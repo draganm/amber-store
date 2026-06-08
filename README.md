@@ -63,6 +63,22 @@ store:
 | [`architecture/types.md`](architecture/types.md) | The type model: object types, filesystem entry types, length-field semantics. |
 | [`architecture/fstree.md`](architecture/fstree.md) | On-the-wire CBOR layout of every type, the chunkers, tree construction, and read paths. |
 
+## Packing a directory
+
+The `amber-store pack` command walks a directory depth-first, builds the
+content-addressed tree, and writes every unique chunk into a tar (the root
+object is the last member):
+
+```sh
+go run ./cmd/amber-store pack ./some/dir > tree.tar      # tar to stdout
+go run ./cmd/amber-store pack -o tree.tar ./some/dir     # tar to a file
+```
+
+The root key (hex) is printed to stderr. Chunking is tunable with
+`--min/--avg/--max` (ultracdc byte chunking) and `--item-bits` (index/entry
+chunking); `--xattr-inline-max` controls when extended attributes spill to an
+`XattrSet` object.
+
 ## Development
 
 The repository uses a [Nix](https://nixos.org/) flake (with
