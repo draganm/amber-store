@@ -2,6 +2,7 @@ package key
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/bits"
 
@@ -83,6 +84,11 @@ func Parse(b []byte) (Key, error) {
 		return Key{}, err
 	}
 	return k, nil
+}
+
+// String returns the lowercase hex encoding of the key, for logs and errors.
+func (k Key) String() string {
+	return hex.EncodeToString(k[:])
 }
 
 // NewFromHash assembles a canonical key from a CAS object type, a logical

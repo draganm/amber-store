@@ -220,3 +220,16 @@ func TestValidate_ZeroLengthIsCanonical(t *testing.T) {
 		t.Errorf("zero-length key should validate, got %v", err)
 	}
 }
+
+func TestString_Hex(t *testing.T) {
+	var k Key
+	k[0] = 0x12
+	k[31] = 0xFF
+	got := k.String()
+	if want := hex.EncodeToString(k[:]); got != want {
+		t.Errorf("String() = %s, want %s", got, want)
+	}
+	if len(got) != 2*Size {
+		t.Errorf("len(String()) = %d, want %d", len(got), 2*Size)
+	}
+}
