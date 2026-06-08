@@ -159,6 +159,26 @@ func TestKey_DeterministicAndComparable(t *testing.T) {
 	}
 }
 
+func TestNew_LengthIsLogicalNotSerialized(t *testing.T) {
+	// The length field is the logical payload size and is passed verbatim; it is
+	// NOT derived from or validated against len(serialized). A FileNode covering
+	// a 1 MiB file region has length 1<<20 even though its own serialized bytes
+	// (here stand-in content) are tiny. The hash still covers the serialized
+	// bytes, not the logical length.
+	content := []byte("tiny")
+	k, err := New(FileNode, 1<<20, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.Length() != 1<<20 {
+		t.Errorf("Length() = %d, want %d", k.Length(), 1<<20)
+	}
+	full := blake3.Sum256(content)
+	if !bytes.Equal(k.Hash(), full[:len(k.Hash())]) {
+		t.Errorf("hash must cover the serialized bytes, not the logical length")
+	}
+}
+
 func TestParse_RoundTrip(t *testing.T) {
 	var full [32]byte
 	for i := range full {
