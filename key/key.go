@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/bits"
+
+	"github.com/zeebo/blake3"
 )
 
 // Size is the fixed byte length of every key.
@@ -44,6 +46,13 @@ func lengthSizeFor(length uint64) int {
 		return 1
 	}
 	return (bits.Len64(length) + 7) / 8
+}
+
+// New computes the BLAKE3-256 digest of serialized, then assembles a canonical
+// key via NewFromHash. length is the logical payload length and is taken as
+// given (it need not equal len(serialized) — see NewFromHash).
+func New(t Type, length uint64, serialized []byte) (Key, error) {
+	return NewFromHash(t, length, blake3.Sum256(serialized))
 }
 
 // NewFromHash assembles a canonical key from a CAS object type, a logical

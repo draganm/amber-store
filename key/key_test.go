@@ -2,8 +2,11 @@ package key
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"testing"
+
+	"github.com/zeebo/blake3"
 )
 
 func TestAccessors_SingleByteLength(t *testing.T) {
@@ -114,5 +117,44 @@ func TestNewFromHash_ReservedType(t *testing.T) {
 		if _, err := NewFromHash(ty, 1, full); !errors.Is(err, ErrReservedType) {
 			t.Errorf("Type(%d): err = %v, want ErrReservedType", uint8(ty), err)
 		}
+	}
+}
+
+func TestNew_KnownAnswerAndTruncation(t *testing.T) {
+	// Official BLAKE3-256 hash of the empty input.
+	const wantHex = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+	full := blake3.Sum256(nil)
+	if got := hex.EncodeToString(full[:]); got != wantHex {
+		t.Fatalf("blake3.Sum256(nil) = %s, want %s", got, wantHex)
+	}
+	// New(Blob, 0, nil): empty blob, lengthSize 1, hashLen 30.
+	k, err := New(Blob, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.Length() != 0 || k.LengthSize() != 1 {
+		t.Errorf("Length=%d LengthSize=%d, want 0 and 1", k.Length(), k.LengthSize())
+	}
+	if !bytes.Equal(k.Hash(), full[:30]) {
+		t.Errorf("New hash truncation = %x, want %x", k.Hash(), full[:30])
+	}
+	// New must equal NewFromHash on the same content's digest.
+	k2, _ := NewFromHash(Blob, 0, full)
+	if k != k2 {
+		t.Errorf("New != NewFromHash for the same content")
+	}
+}
+
+func TestKey_DeterministicAndComparable(t *testing.T) {
+	content := []byte("amber-store determinism check")
+	a, _ := New(FileNode, uint64(len(content)), content)
+	b, _ := New(FileNode, uint64(len(content)), content)
+	if a != b {
+		t.Fatal("New is not deterministic for identical inputs")
+	}
+	// Keys must be usable as Go map keys.
+	m := map[Key]int{a: 1}
+	if m[b] != 1 {
+		t.Errorf("equal keys do not resolve to the same map entry")
 	}
 }
