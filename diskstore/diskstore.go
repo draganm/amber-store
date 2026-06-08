@@ -217,6 +217,17 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 		if _, dup := seen[obj.Key]; dup {
 			continue
 		}
+
+		has, err := s.Has(obj.Key)
+
+		if err != nil {
+			return fmt.Errorf("diskstore: checking if %s exists: %w", obj.Key, err)
+		}
+
+		if has {
+			continue
+		}
+
 		seen[obj.Key] = struct{}{}
 
 		if len(obj.Data) > s.threshold {
