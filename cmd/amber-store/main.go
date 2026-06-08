@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/draganm/amber-store/chunkers"
+	"github.com/draganm/amber-store/diskstore"
 	"github.com/urfave/cli/v2"
 )
 
@@ -22,79 +23,171 @@ func newApp() *cli.App {
 		Name:  "amber-store",
 		Usage: "content-addressed filesystem tree store",
 		Commands: []*cli.Command{
-			{
-				Name:      "pack",
-				Usage:     "build the content-addressed tree for DIR and write chunks as a tar",
-				ArgsUsage: "DIR",
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "output",
-						Aliases: []string{"o"},
-						Usage:   "output tar file (default: stdout)",
-					},
-					&cli.IntFlag{
-						Name:  "min",
-						Usage: "ultracdc minimum chunk size in bytes",
-					},
-					&cli.IntFlag{
-						Name:  "avg",
-						Usage: "ultracdc average (normal) chunk size in bytes",
-					},
-					&cli.IntFlag{
-						Name:  "max",
-						Usage: "ultracdc maximum chunk size in bytes",
-					},
-					&cli.IntFlag{
-						Name:  "item-bits",
-						Value: 7,
-						Usage: "item chunker average run = 2^bits",
-					},
-					&cli.IntFlag{
-						Name:  "xattr-inline-max",
-						Value: 256,
-						Usage: "xattrs larger than this many bytes spill to an XattrSet",
-					},
-				},
-				Action: runPack,
-			},
+			packCommand(),
+			ingestCommand(),
 		},
 	}
 }
 
-// Handles the 'pack' command.
-func runPack(c *cli.Context) error {
-	if c.NArg() != 1 {
-		return fmt.Errorf("pack requires exactly one DIR argument, got %d", c.NArg())
-	}
+// chunkConfig holds the content-defined-chunking parameters shared by every
+// command that builds the tree (pack, ingest).
+type chunkConfig struct {
+	min            int
+	avg            int
+	max            int
+	itemBits       int
+	xattrInlineMax int
+}
 
+// byteOpts returns the ultracdc byte-chunker options, or nil for the library
+// defaults. min/avg/max must all be set together or all left unset.
+func (cc *chunkConfig) byteOpts() (*chunkers.ByteOpts, error) {
+	if cc.min == 0 && cc.avg == 0 && cc.max == 0 {
+		return nil, nil
+	}
+	if cc.min <= 0 || cc.avg <= 0 || cc.max <= 0 {
+		return nil, fmt.Errorf("--min, --avg and --max must all be set together")
+	}
+	return &chunkers.ByteOpts{MinSize: cc.min, NormalSize: cc.avg, MaxSize: cc.max}, nil
+}
+
+// itemChunker builds the item chunker from the configured bit width.
+func (cc *chunkConfig) itemChunker() chunkers.ItemChunker {
+	return chunkers.NewItemChunker(cc.itemBits)
+}
+
+// chunkFlags returns the CLI flags that fill cc.
+func chunkFlags(cc *chunkConfig) []cli.Flag {
+	return []cli.Flag{
+		&cli.IntFlag{
+			Name:        "min",
+			Usage:       "ultracdc minimum chunk size in bytes",
+			Destination: &cc.min,
+		},
+		&cli.IntFlag{
+			Name:        "avg",
+			Usage:       "ultracdc average (normal) chunk size in bytes",
+			Destination: &cc.avg,
+		},
+		&cli.IntFlag{
+			Name:        "max",
+			Usage:       "ultracdc maximum chunk size in bytes",
+			Destination: &cc.max,
+		},
+		&cli.IntFlag{
+			Name:        "item-bits",
+			Value:       7,
+			Usage:       "item chunker average run = 2^bits",
+			Destination: &cc.itemBits,
+		},
+		&cli.IntFlag{
+			Name:        "xattr-inline-max",
+			Value:       256,
+			Usage:       "xattrs larger than this many bytes spill to an XattrSet",
+			Destination: &cc.xattrInlineMax,
+		},
+	}
+}
+
+// packConfig is the fully-typed configuration for the pack command.
+type packConfig struct {
+	chunk  chunkConfig
+	output string
+}
+
+// packCommand builds the pack command, wiring its flags into a packConfig.
+func packCommand() *cli.Command {
+	cfg := &packConfig{}
+	flags := append(chunkFlags(&cfg.chunk),
+		&cli.StringFlag{
+			Name:        "output",
+			Aliases:     []string{"o"},
+			Usage:       "output tar file (default: stdout)",
+			Destination: &cfg.output,
+		},
+	)
+	return &cli.Command{
+		Name:      "pack",
+		Usage:     "build the content-addressed tree for DIR and write chunks as a tar",
+		ArgsUsage: "DIR",
+		Flags:     flags,
+		Action:    func(c *cli.Context) error { return runPack(c, cfg) },
+	}
+}
+
+// ingestConfig is the fully-typed configuration for the ingest command.
+type ingestConfig struct {
+	chunk           chunkConfig
+	store           string
+	inlineThreshold int
+	sync            bool
+}
+
+// ingestCommand builds the ingest command, wiring its flags into an ingestConfig.
+func ingestCommand() *cli.Command {
+	cfg := &ingestConfig{}
+	flags := append(chunkFlags(&cfg.chunk),
+		&cli.StringFlag{
+			Name:        "store",
+			Aliases:     []string{"s"},
+			Usage:       "diskstore directory (created if missing)",
+			Required:    true,
+			Destination: &cfg.store,
+		},
+		&cli.IntFlag{
+			Name:        "inline-threshold",
+			Value:       diskstore.DefaultInlineThreshold,
+			Usage:       "objects larger than this many bytes are stored as external blob files",
+			Destination: &cfg.inlineThreshold,
+		},
+		&cli.BoolFlag{
+			Name:        "sync",
+			Value:       true,
+			Usage:       "fsync writes for crash durability (disable to speed bulk loads)",
+			Destination: &cfg.sync,
+		},
+	)
+	return &cli.Command{
+		Name:      "ingest",
+		Usage:     "build the content-addressed tree for DIR and store its objects in a diskstore",
+		ArgsUsage: "DIR",
+		Flags:     flags,
+		Action:    func(c *cli.Context) error { return runIngest(c, cfg) },
+	}
+}
+
+// dirArg validates that the command received exactly one argument naming an
+// existing directory, and returns it. cmd names the command for error messages.
+func dirArg(c *cli.Context, cmd string) (string, error) {
+	if c.NArg() != 1 {
+		return "", fmt.Errorf("%s requires exactly one DIR argument, got %d", cmd, c.NArg())
+	}
 	dir := c.Args().First()
 	info, err := os.Stat(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+		return "", fmt.Errorf("%s is not a directory", dir)
+	}
+	return dir, nil
+}
+
+// Handles the 'pack' command.
+func runPack(c *cli.Context, cfg *packConfig) error {
+	dir, err := dirArg(c, "pack")
+	if err != nil {
+		return err
 	}
 
-	var byteOpts *chunkers.ByteOpts
-	min := c.Int("min")
-	avg := c.Int("avg")
-	max := c.Int("max")
-	if min > 0 || avg > 0 || max > 0 {
-		if min <= 0 || avg <= 0 || max <= 0 {
-			return fmt.Errorf("--min, --avg and --max must all be set together")
-		}
-		byteOpts = &chunkers.ByteOpts{
-			MinSize:    min,
-			NormalSize: avg,
-			MaxSize:    max,
-		}
+	byteOpts, err := cfg.chunk.byteOpts()
+	if err != nil {
+		return err
 	}
 
 	var out *os.File
-	outputPath := c.String("output")
-	if outputPath != "" {
-		out, err = os.Create(outputPath)
+	if cfg.output != "" {
+		out, err = os.Create(cfg.output)
 		if err != nil {
 			return err
 		}
@@ -103,11 +196,7 @@ func runPack(c *cli.Context) error {
 		out = os.Stdout
 	}
 
-	itemBits := c.Int("item-bits")
-	xattrInlineMax := c.Int("xattr-inline-max")
-	ic := chunkers.NewItemChunker(itemBits)
-
-	root, err := pack(dir, out, ic, byteOpts, xattrInlineMax)
+	root, err := pack(dir, out, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax)
 	if err != nil {
 		return err
 	}
