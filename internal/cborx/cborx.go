@@ -6,6 +6,9 @@ package cborx
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
 	"sort"
 )
 
@@ -56,4 +59,89 @@ func EncodeXattrs(m map[string][]byte) []byte {
 		out = appendBStr(out, m[n])
 	}
 	return out
+}
+
+// DecodeXattrs parses a canonical CBOR map of byte-string keys to byte-string
+// values, the inverse of EncodeXattrs. It accepts only the definite-length
+// forms this package emits and rejects any trailing bytes.
+func DecodeXattrs(b []byte) (map[string][]byte, error) {
+	major, n, rest, err := readHead(b)
+	if err != nil {
+		return nil, err
+	}
+	if major != 5 {
+		return nil, fmt.Errorf("cborx: expected CBOR map (major 5), got major %d", major)
+	}
+	b = rest
+	m := make(map[string][]byte, n)
+	for i := range n {
+		var name, val []byte
+		if name, b, err = readBStr(b); err != nil {
+			return nil, fmt.Errorf("cborx: xattr key %d: %w", i, err)
+		}
+		if val, b, err = readBStr(b); err != nil {
+			return nil, fmt.Errorf("cborx: xattr value for %q: %w", name, err)
+		}
+		m[string(name)] = val
+	}
+	if len(b) != 0 {
+		return nil, fmt.Errorf("cborx: %d trailing bytes after xattr map", len(b))
+	}
+	return m, nil
+}
+
+// readHead reads one CBOR head, returning its major type, argument, and the
+// remaining bytes. Only the shortest-form arguments emitted by appendHead are
+// supported.
+func readHead(b []byte) (major byte, arg uint64, rest []byte, err error) {
+	if len(b) == 0 {
+		return 0, 0, nil, io.ErrUnexpectedEOF
+	}
+	major = b[0] >> 5
+	ai := b[0] & 0x1f
+	b = b[1:]
+	switch {
+	case ai < 24:
+		return major, uint64(ai), b, nil
+	case ai == 24:
+		if len(b) < 1 {
+			return 0, 0, nil, io.ErrUnexpectedEOF
+		}
+		return major, uint64(b[0]), b[1:], nil
+	case ai == 25:
+		if len(b) < 2 {
+			return 0, 0, nil, io.ErrUnexpectedEOF
+		}
+		return major, uint64(binary.BigEndian.Uint16(b)), b[2:], nil
+	case ai == 26:
+		if len(b) < 4 {
+			return 0, 0, nil, io.ErrUnexpectedEOF
+		}
+		return major, uint64(binary.BigEndian.Uint32(b)), b[4:], nil
+	case ai == 27:
+		if len(b) < 8 {
+			return 0, 0, nil, io.ErrUnexpectedEOF
+		}
+		return major, binary.BigEndian.Uint64(b), b[8:], nil
+	default:
+		return 0, 0, nil, fmt.Errorf("cborx: unsupported additional info %d", ai)
+	}
+}
+
+// readBStr reads one CBOR byte string, returning a copy of its bytes and the
+// remaining input.
+func readBStr(b []byte) (val, rest []byte, err error) {
+	major, n, b, err := readHead(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	if major != 2 {
+		return nil, nil, fmt.Errorf("cborx: expected byte string (major 2), got major %d", major)
+	}
+	if uint64(len(b)) < n {
+		return nil, nil, io.ErrUnexpectedEOF
+	}
+	out := make([]byte, n)
+	copy(out, b[:n])
+	return out, b[n:], nil
 }

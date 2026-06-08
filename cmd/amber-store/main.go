@@ -25,6 +25,7 @@ func newApp() *cli.App {
 		Commands: []*cli.Command{
 			packCommand(),
 			ingestCommand(),
+			restoreCommand(),
 		},
 	}
 }
