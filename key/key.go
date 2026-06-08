@@ -1,6 +1,10 @@
 package key
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+	"math/bits"
+)
 
 // Size is the fixed byte length of every key.
 const Size = 32
@@ -31,4 +35,33 @@ func (k Key) Length() uint64 {
 // Hash returns the truncated payload hash bytes (len == Size-1-LengthSize).
 func (k Key) Hash() []byte {
 	return k[1+k.LengthSize():]
+}
+
+// lengthSizeFor returns the minimum number of bytes needed to hold length
+// big-endian with no leading zero. Zero is the special case: a single 0x00 byte.
+func lengthSizeFor(length uint64) int {
+	if length == 0 {
+		return 1
+	}
+	return (bits.Len64(length) + 7) / 8
+}
+
+// NewFromHash assembles a canonical key from a CAS object type, a logical
+// payload length, and a precomputed full 256-bit BLAKE3 digest. The digest is
+// truncated to its leading bytes to fill the key. length is used verbatim: for
+// Blob/XattrSet it is the serialized byte length; for FileNode/DirLeaf/DirNode
+// it is the logical size (see architecture/types.md). Returns ErrReservedType
+// if t is not a defined type.
+func NewFromHash(t Type, length uint64, fullHash [Size]byte) (Key, error) {
+	if !t.IsValid() {
+		return Key{}, fmt.Errorf("%w: %d", ErrReservedType, uint8(t))
+	}
+	ls := lengthSizeFor(length)
+	var k Key
+	k[0] = byte(t)<<4 | byte(ls-1)
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], length)
+	copy(k[1:1+ls], buf[8-ls:])
+	copy(k[1+ls:], fullHash[:Size-1-ls])
+	return k, nil
 }
