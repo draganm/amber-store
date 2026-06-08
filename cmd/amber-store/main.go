@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/diskstore"
@@ -122,6 +123,7 @@ type ingestConfig struct {
 	store           string
 	inlineThreshold int
 	sync            bool
+	jobs            int
 }
 
 // ingestCommand builds the ingest command, wiring its flags into an ingestConfig.
@@ -146,6 +148,13 @@ func ingestCommand() *cli.Command {
 			Value:       true,
 			Usage:       "fsync writes for crash durability (disable to speed bulk loads)",
 			Destination: &cfg.sync,
+		},
+		&cli.IntFlag{
+			Name:        "jobs",
+			Aliases:     []string{"j"},
+			Value:       runtime.GOMAXPROCS(0),
+			Usage:       "number of concurrent workers building the tree (default: number of CPUs)",
+			Destination: &cfg.jobs,
 		},
 	)
 	return &cli.Command{

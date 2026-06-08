@@ -68,7 +68,7 @@ func (d *driver) buildDir(path string, emit fstree.Emit) (key.Key, error) {
 	db := fstree.NewDirBuilder(d.ic)
 	for _, de := range ents {
 		full := filepath.Join(path, de.Name())
-		e, err := d.buildEntry(full, de.Name(), emit)
+		e, err := d.buildEntry(full, de.Name(), emit, d.buildDir)
 		if err != nil {
 			return key.Key{}, err
 		}
@@ -81,8 +81,10 @@ func (d *driver) buildDir(path string, emit fstree.Emit) (key.Key, error) {
 
 // buildEntry produces the directory entry for one path, recursing into files and
 // subdirectories (and emitting their objects) and reading inline metadata for
-// links and special files.
-func (d *driver) buildEntry(full, name string, emit fstree.Emit) (fstree.Entry, error) {
+// links and special files. buildDir is the function used to build a
+// subdirectory: d.buildDir for the sequential pack walk, or the parallel
+// builder's buildDir for concurrent ingestion.
+func (d *driver) buildEntry(full, name string, emit fstree.Emit, buildDir func(string, fstree.Emit) (key.Key, error)) (fstree.Entry, error) {
 	info, err := os.Lstat(full)
 	if err != nil {
 		return fstree.Entry{}, err
@@ -104,7 +106,7 @@ func (d *driver) buildEntry(full, name string, emit fstree.Emit) (fstree.Entry, 
 		}
 		e.ContentKey = ck[:]
 	case unix.S_IFDIR:
-		ck, err := d.buildDir(full, emit)
+		ck, err := buildDir(full, emit)
 		if err != nil {
 			return fstree.Entry{}, err
 		}

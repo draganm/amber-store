@@ -153,7 +153,7 @@ func ingestTree(t *testing.T, src string) (storeDir string, root key.Key) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	seq := ingestObjects(src, chunkers.NewItemChunker(7), nil, 256, &root)
+	seq := ingestObjects(src, chunkers.NewItemChunker(7), nil, 256, 4, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
