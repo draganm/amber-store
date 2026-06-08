@@ -158,3 +158,65 @@ func TestKey_DeterministicAndComparable(t *testing.T) {
 		t.Errorf("equal keys do not resolve to the same map entry")
 	}
 }
+
+func TestParse_RoundTrip(t *testing.T) {
+	var full [32]byte
+	for i := range full {
+		full[i] = byte(i + 1)
+	}
+	for _, ty := range []Type{Blob, FileNode, DirLeaf, DirNode, XattrSet} {
+		k, _ := NewFromHash(ty, 12345, full)
+		got, err := Parse(k[:])
+		if err != nil {
+			t.Fatalf("%v: Parse: %v", ty, err)
+		}
+		if got != k {
+			t.Errorf("%v: round-trip mismatch", ty)
+		}
+	}
+}
+
+func TestParse_BadLength(t *testing.T) {
+	for _, n := range []int{0, 31, 33, 64} {
+		if _, err := Parse(make([]byte, n)); !errors.Is(err, ErrBadKeyLength) {
+			t.Errorf("len %d: err = %v, want ErrBadKeyLength", n, err)
+		}
+	}
+}
+
+func TestValidate_ReservedBit(t *testing.T) {
+	var full [32]byte
+	k, _ := NewFromHash(Blob, 1, full)
+	k[0] |= 0x08 // set the reserved bit
+	if err := k.Validate(); !errors.Is(err, ErrReservedBitSet) {
+		t.Errorf("err = %v, want ErrReservedBitSet", err)
+	}
+}
+
+func TestValidate_ReservedType(t *testing.T) {
+	var k Key
+	k[0] = 5 << 4 // type 5, lengthSize 1
+	k[1] = 0x01
+	if err := k.Validate(); !errors.Is(err, ErrReservedType) {
+		t.Errorf("err = %v, want ErrReservedType", err)
+	}
+}
+
+func TestValidate_NonCanonicalLength(t *testing.T) {
+	// Blob, lengthSize 2 (header low bits = 1), length bytes 0x00 0x05:
+	// leading zero with a non-zero value -> non-canonical.
+	var k Key
+	k[0] = 0x01
+	k[1], k[2] = 0x00, 0x05
+	if err := k.Validate(); !errors.Is(err, ErrNonCanonicalLength) {
+		t.Errorf("err = %v, want ErrNonCanonicalLength", err)
+	}
+}
+
+func TestValidate_ZeroLengthIsCanonical(t *testing.T) {
+	// Blob, lengthSize 1, length byte 0x00: value 0 is the allowed special case.
+	var k Key // all zero bytes
+	if err := k.Validate(); err != nil {
+		t.Errorf("zero-length key should validate, got %v", err)
+	}
+}

@@ -55,6 +55,36 @@ func New(t Type, length uint64, serialized []byte) (Key, error) {
 	return NewFromHash(t, length, blake3.Sum256(serialized))
 }
 
+// Validate reports whether k is canonical: the reserved bit is clear, the type
+// is defined (0..4), and the length field is minimally encoded (its first byte
+// is non-zero, except for the single 0x00 byte that encodes a zero length).
+func (k Key) Validate() error {
+	if k[0]&0x08 != 0 {
+		return ErrReservedBitSet
+	}
+	if !k.Type().IsValid() {
+		return fmt.Errorf("%w: %d", ErrReservedType, uint8(k.Type()))
+	}
+	if k[1] == 0 && !(k.LengthSize() == 1 && k.Length() == 0) {
+		return ErrNonCanonicalLength
+	}
+	return nil
+}
+
+// Parse copies b into a Key and validates its canonical form. b must be exactly
+// Size bytes.
+func Parse(b []byte) (Key, error) {
+	if len(b) != Size {
+		return Key{}, fmt.Errorf("%w: got %d", ErrBadKeyLength, len(b))
+	}
+	var k Key
+	copy(k[:], b)
+	if err := k.Validate(); err != nil {
+		return Key{}, err
+	}
+	return k, nil
+}
+
 // NewFromHash assembles a canonical key from a CAS object type, a logical
 // payload length, and a precomputed full 256-bit BLAKE3 digest. The digest is
 // truncated to its leading bytes to fill the key. length is used verbatim: for
