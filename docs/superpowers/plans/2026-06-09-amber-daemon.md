@@ -1923,7 +1923,15 @@ import (
 func startDaemon(t *testing.T) string {
 	t.Helper()
 	storeDir := t.TempDir()
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	// Keep the socket path short: a unix sun_path is capped at ~104 bytes on
+	// macOS/BSD, and t.TempDir() embeds the (long) test name and can overflow it.
+	// MkdirTemp("", ...) yields a short per-user path.
+	sockDir, err := os.MkdirTemp("", "amber-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "d.sock")
 
 	app := newApp()
 	ctx, cancel := context.WithCancel(context.Background())
