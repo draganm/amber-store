@@ -12,7 +12,9 @@ this and, in the same move, splits responsibilities:
 
 - **Client = build.** Walk a directory, content-defined-chunk, BLAKE3-hash, and
   assemble the `fstree` (the CPU-heavy work), then serialize objects into a
-  compact **pack-write format**.
+  compact **pack-write format** and upload them — in one stream or sharded
+  across several concurrent, possibly-partial streams. The client computes the
+  root key locally and prints it; the store keeps no root registry.
 - **Daemon = own + verify + serve.** Hold the store, verify every object's key,
   store via `diskstore.WriteParallel`, and stream filesystem tars back out.
 
@@ -32,7 +34,8 @@ The `pack` command and the `castar` package are removed.
    (reuses driver / pbuilder)                       net/http handler on a unix listener
         │
         ├─ ingest:  stream pack-format ─POST /v1/objects─► verify each key → WriteParallel
-        │           ◄──────── {root, stored, deduped, bytes} ──┤
+        │           (optionally sharded across N connections)
+        │           ◄──────────── {stored, deduped, bytes} ───┤
         ├─ dump/restore: ──────────────GET /v1/tar/{key}──────► traverse CAS → stream PAX tar
         │           ◄──────────────── tar stream ─────────────┤
         └─ load FILE: stream a prebuilt pack file ─POST /v1/objects┘
@@ -51,9 +54,9 @@ The `pack` command and the `castar` package are removed.
 | Command | Talks to daemon? | Behaviour |
 |---|---|---|
 | `amber-store daemon --store DIR [--socket PATH]` | — (is the daemon) | Open the store exclusively; serve HTTP on the unix socket. |
-| `amber-store ingest DIR [--socket PATH]` | yes (`POST /v1/objects`) | Build the tree, **stream** pack-format to the daemon, print the root key. |
-| `amber-store ingest DIR --output FILE` | no | Offline: build the tree, write the **same** pack-format to a file. Prints the root. Does not open the store, so no lock conflict. Replaces the old `pack`. |
-| `amber-store load FILE [--socket PATH]` | yes (`POST /v1/objects`) | Upload a prebuilt pack file to the daemon. Prints the root. |
+| `amber-store ingest DIR [--socket PATH]` | yes (`POST /v1/objects`) | Build the tree, **stream** pack-format to the daemon (optionally sharded across parallel connections), print the locally-computed root key. |
+| `amber-store ingest DIR --output FILE` | no | Offline: build the tree, write the **same** pack-format to a file. Prints the locally-computed root. Does not open the store, so no lock conflict. Replaces the old `pack`. |
+| `amber-store load FILE [--socket PATH]` | yes (`POST /v1/objects`) | Upload a prebuilt pack file to the daemon. Prints store stats. The pack file holds no root, so the user must keep the root that `ingest --output` printed at build time. |
 | `amber-store dump KEY [--socket PATH] [-o FILE]` | yes (`GET /v1/tar/{key}`) | Fetch the directory tar; write to file/stdout. |
 | `amber-store restore KEY DIR [--socket PATH]` | yes (`GET /v1/tar/{key}`) | Fetch the tar; extract faithfully into DIR. |
 
@@ -71,7 +74,11 @@ is known only to the daemon**; clients never name it.
 ## The pack-write format
 
 A flat, sequential, stream-friendly byte format — no seeking, no index —
-identical whether streamed over the socket or written to a file.
+identical whether streamed over the socket or written to a file. A stream is a
+**possibly-partial, unordered set of CAS objects** (like a git pack), not a
+self-contained rooted tree: it carries no root key. A complete tree may be split
+across several independent streams, uploaded in parallel; because the store is
+content-addressed and dedups, fragments may overlap or arrive in any order.
 
 ```
 Header   "AMBERPK\x01"                     8 bytes   magic + version
@@ -80,11 +87,14 @@ Records  repeat:
            key                            32 bytes   full canonical key
            uvarint(len(payload))
            payload                   len bytes
-Trailer    0x00                            1 byte    record tag = end
-           rootKey                        32 bytes
-           uvarint(objectCount)
+End        0x00                            1 byte    record tag = end of stream
 ```
 
+- **No root key.** The client builds the whole tree and already knows the root
+  (`buildDir`/`Finish` returns it); it prints the root locally. Embedding a root
+  in the format would be meaningless for a partial fragment, so the format omits
+  it entirely. The root is tracked out-of-band by the user (as a git ref is kept
+  alongside a pack) and supplied as the `KEY` argument to `dump`/`restore`.
 - **The 32-byte key already encodes type and logical length** (`key[0]` =
   type + length-size; the next 1–8 bytes = length). The envelope therefore needs
   no separate type/length fields — just `key + uvarint(len) + payload`.
@@ -93,15 +103,13 @@ Trailer    0x00                            1 byte    record tag = end
   name per object; for directory-heavy trees with many small objects the
   pack-format is far smaller, and for blob-heavy trees it never wastes the
   ~1 KB/object tar overhead.
-- **The 1-byte record tag** makes the stream self-terminating: a client that
-  builds and uploads concurrently need not know the object count up front, and a
-  truncated upload is detected by the missing `0x00` trailer.
-- **Root in the trailer**, not the header: the root is the last object built, so
-  a trailer lets build-and-upload overlap (as today's ingest pipeline does). The
-  trailer `rootKey` is what `load FILE` reports for an offline file and what the
-  daemon echoes back.
+- **The 1-byte record tag** makes the stream self-terminating and order-free: a
+  client that builds and uploads concurrently need not know the object count up
+  front. The explicit `0x00` end marker distinguishes a complete stream from one
+  truncated at a record boundary by a half-closed socket — a clean EOF without
+  the marker is rejected as truncated.
 - **No separate checksum.** Every object is BLAKE3-verified by the daemon, and
-  the trailer detects truncation; a stream-level CRC would be redundant.
+  the end marker detects truncation; a stream-level CRC would be redundant.
 
 ## Daemon — verify and store (`POST /v1/objects`)
 
@@ -126,9 +134,9 @@ hashing on re-ingest" win is preserved:
 Putting `Verify` on `diskstore` (rather than a verifying wrapper in the daemon)
 avoids a redundant second `Has` lookup per object.
 
-**Response:** JSON `{ "root": "<hex>", "objects_stored": N, "objects_deduped":
-M, "bytes_stored": B }`. On verification failure: HTTP 422 with a body naming the
-offending key (expected vs computed).
+**Response:** JSON `{ "objects_stored": N, "objects_deduped": M, "bytes_stored":
+B }` for this stream (no root — a stream is a fragment). On verification failure:
+HTTP 422 with a body naming the offending key (expected vs computed).
 
 **Failure semantics** (consistent with today's `ingest`): `WriteParallel` is not
 atomic, so a verification failure mid-stream may leave already-committed objects.
@@ -166,9 +174,11 @@ so the truncated archive surfaces as a tar read error on the client.
 New:
 
 - `amberpack/` — the pack-write format. `Writer` (an `fstree.Emit` sink:
-  object → bytes) used by the client; `Reader` (bytes →
-  `iter.Seq2[diskstore.Object, error]`) used by the daemon. One definition,
-  exercised from both sides.
+  object → bytes; `Close()` emits the end marker) used by the client; `Reader`
+  (bytes → `iter.Seq2[diskstore.Object, error]`) used by the daemon. The writer
+  knows nothing about roots, so a client may instantiate several writers over
+  several connections and shard objects across them. One definition, exercised
+  from both sides.
 - `daemon/` — the `http.Handler`: routes `POST /v1/objects` and
   `GET /v1/tar/{key}`, wired to a `*diskstore.Store` and `tarexport`. Pure
   handler constructed with a store (no listener logic), so tests drive it via
@@ -201,6 +211,11 @@ Removed:
   `WriteParallel`'s `seenSet` is per-request.
 - **Dump of a bad root:** 404 if the root object is absent; 400 if the key is not
   a directory type.
+- **Incomplete uploads:** the daemon never tracks tree completeness — it stores
+  whatever objects arrive. Ensuring every object of a tree is uploaded before
+  using its root is the client's responsibility (for a sharded upload: all
+  `POST`s must succeed first). A `dump`/`restore` of a root whose subtree is only
+  partially present fails on the first missing object, as above.
 - **Graceful shutdown:** the daemon traps SIGINT/SIGTERM, stops accepting, drains
   in-flight requests, `store.Close()`, and removes the socket.
 - **Progress bar:** today's `ingest` progress bar is sized by a pre-scan and
@@ -211,9 +226,13 @@ Removed:
 
 Following the repo's style (stdlib `testing`, no testify, parity tests):
 
-- **amberpack round-trip:** `Writer` → `Reader` reproduces objects and root; a
-  truncated stream (missing trailer) is detected; a corrupt payload fails
-  verification.
+- **amberpack round-trip:** `Writer` → `Reader` reproduces the object set; a
+  truncated stream (missing end marker, or cut mid-record) is detected; a corrupt
+  payload fails verification.
+- **Split upload:** a tree's objects partitioned across two independent pack
+  streams, uploaded separately, reconstruct the full tree — `dump KEY` after both
+  uploads round-trips byte-for-byte, and dumping after only one upload fails on a
+  missing object.
 - **Parity:** objects emitted into `amberpack` for a tree equal the objects from
   the existing build walk (mirrors `TestIngestObjects_ParityWithPack`), and the
   resolved root matches.
