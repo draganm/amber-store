@@ -2996,7 +2996,25 @@ git rm -r castar/
 git rm cmd/amber-store/main_test.go
 ```
 
-Edit `cmd/amber-store/driver_test.go`: delete `TestPack_SmallTreeRootIsLast`, `TestPack_DeduplicatesIdenticalFiles`, `TestPack_Deterministic`, `TestPack_FailFastOnUnreadableFile`, and the now-unused `readTar` helper (and its `archive/tar`, `bytes`, `io`, `encoding/hex` imports if nothing else uses them). If `driver_test.go` ends up empty, `git rm` it. Replace the fail-fast coverage with a sequential-build test so the behavior stays covered:
+Edit `cmd/amber-store/driver_test.go`: delete `TestPack_SmallTreeRootIsLast`, `TestPack_DeduplicatesIdenticalFiles`, `TestPack_Deterministic`, `TestPack_FailFastOnUnreadableFile`, and the `readTar` helper (and its `archive/tar`, `bytes`, `io`, `encoding/hex` imports if nothing else uses them). If `driver_test.go` ends up empty, `git rm` it. Replace the fail-fast coverage with a sequential-build test so the behavior stays covered:
+
+Also rewrite `cmd/amber-store/decode_test.go` (a structural round-trip test that currently calls the removed `pack()` and `readTar`). Keep its CBOR-structure assertions (`fileContent`, `listDir`, the symlink/perm checks in `TestEndToEnd_StructureRoundTrips`), but change `loadStore` to build the object set with the sequential driver instead of packing a tar: collect via `collectSequential` (defined in the rewritten `ingest_test.go`) and key the `store` map by `k.String()`:
+
+```go
+// loadStore builds the CAS object set for dir via the sequential driver,
+// keyed by key hex, and returns it with the root key.
+func loadStore(t *testing.T, dir string) (store, key.Key) {
+	t.Helper()
+	root, objs := collectSequential(t, dir, chunkers.NewItemChunker(7), nil, 256)
+	s := store{}
+	for k, v := range objs {
+		s[k.String()] = v
+	}
+	return s, root
+}
+```
+
+Then in `TestEndToEnd_StructureRoundTrips`, replace the `pack(...)` + `loadStore(t, buf.Bytes())` lines with `s, root := loadStore(t, dir)` and drop the `var buf bytes.Buffer` and the `chunkers`/`bytes` imports only if they become unused (chunkers stays — used in loadStore; bytes stays — used for `bytes.Repeat`).
 
 ```go
 package main
