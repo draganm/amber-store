@@ -14,6 +14,7 @@ import (
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/tarexport"
 )
@@ -35,6 +36,7 @@ func New(store *diskstore.Store, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
+	mux.HandleFunc("GET /v1/ls/{key}", h.getLs)
 	return logRequests(logger, mux)
 }
 
@@ -142,6 +144,108 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 		// the status now. Log and let the truncated archive surface as a tar read
 		// error on the client.
 		h.log.Error("tar export aborted", "key", k, "error", err)
+	}
+}
+
+// lsEntry is one NDJSON line of the GET /v1/ls/{key} response. Size is the
+// logical content length for regular files and directories (from the content
+// key) and the target length for symlinks. Key is the hex content key of
+// regular-file and directory entries, usable for further /v1/ls or /v1/tar
+// requests.
+type lsEntry struct {
+	Name       string   `json:"name"`
+	Mode       uint64   `json:"mode"`
+	UID        uint64   `json:"uid"`
+	GID        uint64   `json:"gid"`
+	MtimeNs    int64    `json:"mtime_ns"`
+	Size       uint64   `json:"size"`
+	Key        string   `json:"key,omitempty"`
+	LinkTarget string   `json:"link_target,omitempty"`
+	Rdev       []uint64 `json:"rdev,omitempty"`
+}
+
+// getLs streams the entries of the directory object {key} as NDJSON, one JSON
+// object per line. An optional ?path= query names a subdirectory of {key}
+// (slash-separated) to list instead of {key} itself. DirNode index levels are
+// flattened; the response lists the directory's immediate entries in name
+// order.
+func (h *handler) getLs(w http.ResponseWriter, r *http.Request) {
+	k, err := parseHexKey(r.PathValue("key"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if k.Type() != key.DirLeaf && k.Type() != key.DirNode {
+		http.Error(w, "key is not a directory object", http.StatusBadRequest)
+		return
+	}
+	has, err := h.store.Has(k)
+	if err != nil {
+		h.log.Error("ls root lookup failed", "key", k, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !has {
+		http.Error(w, "directory object not found", http.StatusNotFound)
+		return
+	}
+	if path := r.URL.Query().Get("path"); path != "" {
+		k, err = fstree.ResolvePath(k, path, h.store.Get)
+		switch {
+		case errors.Is(err, fstree.ErrNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		case errors.Is(err, fstree.ErrNotDir):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case err != nil:
+			h.log.Error("ls path resolution failed", "key", k, "path", path, "error", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	entries, err := fstree.CollectEntries(k, h.store.Get)
+	if err != nil {
+		h.log.Error("ls failed", "key", k, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Convert before writing so a malformed entry surfaces as a 500, not a
+	// truncated 200 stream.
+	lines := make([]lsEntry, len(entries))
+	for i, ent := range entries {
+		le := lsEntry{
+			Name:    string(ent.Name),
+			Mode:    ent.Mode,
+			UID:     ent.UID,
+			GID:     ent.GID,
+			MtimeNs: ent.Mtime,
+			Rdev:    ent.Rdev,
+		}
+		if len(ent.ContentKey) > 0 {
+			ck, err := key.Parse(ent.ContentKey)
+			if err != nil {
+				h.log.Error("ls entry has invalid content key", "key", k, "name", le.Name, "error", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			le.Key = ck.String()
+			le.Size = ck.Length()
+		}
+		if len(ent.LinkTarget) > 0 {
+			le.LinkTarget = string(ent.LinkTarget)
+			le.Size = uint64(len(ent.LinkTarget))
+		}
+		lines[i] = le
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	enc := json.NewEncoder(w)
+	for _, le := range lines {
+		if err := enc.Encode(le); err != nil {
+			// Bytes are already in flight; log and stop, like getTar.
+			h.log.Error("ls stream aborted", "key", k, "error", err)
+			return
+		}
 	}
 }
 

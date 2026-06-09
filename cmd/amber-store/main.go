@@ -27,6 +27,7 @@ func newApp() *cli.App {
 			loadCommand(),
 			dumpCommand(),
 			restoreCommand(),
+			lsCommand(),
 		},
 	}
 }

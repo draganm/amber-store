@@ -44,7 +44,7 @@ type exporter struct {
 // dir writes every entry of the directory object dirKey, prefixing names with
 // prefix (the path of the directory relative to the export root, "" for root).
 func (e *exporter) dir(dirKey key.Key, prefix string) error {
-	entries, err := e.collectEntries(dirKey)
+	entries, err := fstree.CollectEntries(dirKey, e.get)
 	if err != nil {
 		return err
 	}
@@ -54,43 +54,6 @@ func (e *exporter) dir(dirKey key.Key, prefix string) error {
 		}
 	}
 	return nil
-}
-
-// collectEntries returns the entries reachable from k, descending DirNode index
-// levels into the DirLeaves that hold them.
-func (e *exporter) collectEntries(k key.Key) ([]fstree.Entry, error) {
-	data, err := e.get(k)
-	if err != nil {
-		return nil, fmt.Errorf("tarexport: reading %s: %w", k, err)
-	}
-	switch k.Type() {
-	case key.DirLeaf:
-		entries, err := fstree.DecodeDirLeaf(data)
-		if err != nil {
-			return nil, fmt.Errorf("tarexport: decoding DirLeaf %s: %w", k, err)
-		}
-		return entries, nil
-	case key.DirNode:
-		pairs, err := fstree.DecodeDirNode(data)
-		if err != nil {
-			return nil, fmt.Errorf("tarexport: decoding DirNode %s: %w", k, err)
-		}
-		var out []fstree.Entry
-		for _, p := range pairs {
-			ck, err := key.Parse(p.ChildKey)
-			if err != nil {
-				return nil, fmt.Errorf("tarexport: child key in DirNode %s: %w", k, err)
-			}
-			sub, err := e.collectEntries(ck)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, sub...)
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("tarexport: %s is not a directory object (type %v)", k, k.Type())
-	}
 }
 
 func (e *exporter) entry(prefix string, ent fstree.Entry) error {

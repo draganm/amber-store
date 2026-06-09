@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 
 	"github.com/draganm/amber-store/key"
 )
@@ -69,6 +70,55 @@ func (c *Client) Ingest(ctx context.Context, body io.Reader) (Stats, error) {
 		return Stats{}, fmt.Errorf("decoding ingest response: %w", err)
 	}
 	return s, nil
+}
+
+// Entry mirrors one NDJSON line of the daemon's GET /v1/ls/{key} response.
+// Size is the logical content length for regular files and directories and the
+// target length for symlinks. Key is the hex content key of regular-file and
+// directory entries (usable for further Ls or Tar calls).
+type Entry struct {
+	Name       string   `json:"name"`
+	Mode       uint64   `json:"mode"`
+	UID        uint64   `json:"uid"`
+	GID        uint64   `json:"gid"`
+	MtimeNs    int64    `json:"mtime_ns"`
+	Size       uint64   `json:"size"`
+	Key        string   `json:"key,omitempty"`
+	LinkTarget string   `json:"link_target,omitempty"`
+	Rdev       []uint64 `json:"rdev,omitempty"`
+}
+
+// Ls fetches the entries of the directory object k, in name order. A non-empty
+// path names a subdirectory of k (slash-separated) to list instead of k itself.
+func (c *Client) Ls(ctx context.Context, k key.Key, path string) ([]Entry, error) {
+	u := baseURL + "/v1/ls/" + k.String()
+	if path != "" {
+		u += "?path=" + url.QueryEscape(path)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, c.dialHint(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return nil, fmt.Errorf("ls request failed: %s: %s", resp.Status, msg)
+	}
+	var entries []Entry
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var e Entry
+		if err := dec.Decode(&e); err == io.EOF {
+			return entries, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("decoding ls response: %w", err)
+		}
+		entries = append(entries, e)
+	}
 }
 
 // Tar requests the directory tar for k. The caller must close the returned

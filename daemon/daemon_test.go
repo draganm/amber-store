@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
@@ -321,5 +322,202 @@ func TestGetTar_NonDirectoryKeyIs400(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a non-directory key", resp.StatusCode)
+	}
+}
+
+func TestGetLs_ListsDirectoryEntries(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	// A subdirectory leaf and a root leaf holding a file, a symlink and the
+	// subdirectory.
+	content := mustBlob(t, "alpha")
+	subLeaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("nested"), Mode: 0o100600, Mtime: 3, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootLeaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("a.txt"), Mode: 0o100644, UID: 501, GID: 20, Mtime: 1, ContentKey: content.Key[:]},
+		{Name: []byte("link"), Mode: 0o120777, Mtime: 2, LinkTarget: []byte("a.txt")},
+		{Name: []byte("sub"), Mode: 0o040755, Mtime: 4, ContentKey: subLeaf.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Ingest(context.Background(), packOf(t, content, subLeaf, rootLeaf)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	got, err := c.Ls(context.Background(), rootLeaf.Key, "")
+	if err != nil {
+		t.Fatalf("Ls: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3: %+v", len(got), got)
+	}
+
+	file := got[0]
+	if file.Name != "a.txt" || file.Mode != 0o100644 || file.UID != 501 || file.GID != 20 {
+		t.Fatalf("file entry = %+v", file)
+	}
+	if file.MtimeNs != 1 || file.Size != uint64(len("alpha")) || file.Key != content.Key.String() {
+		t.Fatalf("file entry = %+v", file)
+	}
+
+	link := got[1]
+	if link.Name != "link" || link.LinkTarget != "a.txt" || link.Size != uint64(len("a.txt")) {
+		t.Fatalf("link entry = %+v", link)
+	}
+
+	sub := got[2]
+	if sub.Name != "sub" || sub.Key != subLeaf.Key.String() {
+		t.Fatalf("sub entry = %+v", sub)
+	}
+
+	// The subdirectory's key from the listing must itself be listable.
+	subKey, err := key.Parse(subLeaf.Key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested, err := c.Ls(context.Background(), subKey, "")
+	if err != nil {
+		t.Fatalf("Ls(sub): %v", err)
+	}
+	if len(nested) != 1 || nested[0].Name != "nested" {
+		t.Fatalf("nested entries = %+v", nested)
+	}
+}
+
+func TestGetLs_StreamsNDJSON(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store, nil))
+	defer srv.Close()
+
+	content := mustBlob(t, "alpha")
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("a"), Mode: 0o100644, Mtime: 1, ContentKey: content.Key[:]},
+		{Name: []byte("b"), Mode: 0o100644, Mtime: 2, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(leaf.Key, leaf.Bytes); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/v1/ls/" + leaf.Key.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("Content-Type = %q, want application/x-ndjson", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), body)
+	}
+	for _, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("line %q is not valid JSON: %v", line, err)
+		}
+	}
+}
+
+func TestGetLs_MissingDirIs404(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store, nil))
+	defer srv.Close()
+
+	xb := mustBlob(t, "x")
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("x"), Mode: 0o100644, ContentKey: xb.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/v1/ls/" + leaf.Key.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for an absent directory", resp.StatusCode)
+	}
+}
+
+func TestGetLs_NonDirectoryKeyIs400(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store, nil))
+	defer srv.Close()
+
+	blob := mustBlob(t, "data")
+	resp, err := http.Get(srv.URL + "/v1/ls/" + blob.Key.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a non-directory key", resp.StatusCode)
+	}
+}
+
+func TestGetLs_PathListsSubdirectory(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	content := mustBlob(t, "alpha")
+	inner, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("deep.txt"), Mode: 0o100644, Mtime: 1, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("inner"), Mode: 0o040755, Mtime: 2, ContentKey: inner.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("file"), Mode: 0o100644, Mtime: 3, ContentKey: content.Key[:]},
+		{Name: []byte("mid"), Mode: 0o040755, Mtime: 4, ContentKey: mid.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Ingest(context.Background(), packOf(t, content, inner, mid, root)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	got, err := c.Ls(context.Background(), root.Key, "mid/inner")
+	if err != nil {
+		t.Fatalf("Ls(mid/inner): %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "deep.txt" {
+		t.Fatalf("entries = %+v, want [deep.txt]", got)
+	}
+
+	// A missing path component is a 404.
+	if _, err := c.Ls(context.Background(), root.Key, "mid/nope"); err == nil ||
+		!strings.Contains(err.Error(), "404") {
+		t.Fatalf("missing path: err = %v, want 404", err)
+	}
+
+	// A path through a regular file is a 400.
+	if _, err := c.Ls(context.Background(), root.Key, "file"); err == nil ||
+		!strings.Contains(err.Error(), "400") {
+		t.Fatalf("file path: err = %v, want 400", err)
 	}
 }
