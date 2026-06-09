@@ -12,13 +12,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// store is the decoded tar: key hex -> object bytes.
+// store is the decoded object set: key hex -> object bytes.
 type store map[string][]byte
 
-func loadStore(t *testing.T, tarBytes []byte) store {
+// loadStore builds the CAS object set for dir via the sequential driver,
+// keyed by key hex, and returns it with the root key.
+func loadStore(t *testing.T, dir string) (store, key.Key) {
 	t.Helper()
-	members, _ := readTar(t, tarBytes)
-	return store(members)
+	root, objs := collectSequential(t, dir, chunkers.NewItemChunker(7), nil, 256)
+	s := store{}
+	for k, v := range objs {
+		s[k.String()] = v
+	}
+	return s, root
 }
 
 // fileContent reassembles a file's bytes from its content key.
@@ -105,12 +111,7 @@ func TestEndToEnd_StructureRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var buf bytes.Buffer
-	root, err := pack(dir, &buf, chunkers.NewItemChunker(7), nil, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := loadStore(t, buf.Bytes())
+	s, root := loadStore(t, dir)
 
 	ents := s.listDir(t, root)
 	byName := map[string]entryMap{}

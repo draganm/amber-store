@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/draganm/amber-store/chunkers"
-	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )
@@ -143,33 +143,42 @@ func compareTrees(t *testing.T, src, dst string) {
 	}
 }
 
-// ingestTree stores the tree rooted at src into a fresh diskstore and returns
-// the store directory and the root key.
-func ingestTree(t *testing.T, src string) (storeDir string, root key.Key) {
+// ingestViaDaemon builds src into a pack file, starts a daemon, loads the pack,
+// and returns the daemon socket and the tree root key.
+func ingestViaDaemon(t *testing.T, src string) (sock string, root key.Key) {
 	t.Helper()
-	storeDir = t.TempDir()
-	store, err := diskstore.Open(storeDir, diskstore.WithSync(false))
+	out := filepath.Join(t.TempDir(), "tree.amberpack")
+	var rootBuf bytes.Buffer
+	app := newApp()
+	app.Writer = &rootBuf
+	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "-o", out, src}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	raw, err := hex.DecodeString(strings.TrimSpace(rootBuf.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	seq := ingestObjects(src, chunkers.NewItemChunker(7), nil, 256, 4, nil, &root)
-	if err := store.WriteBatch(seq); err != nil {
-		t.Fatalf("WriteBatch: %v", err)
+	root, err = key.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return storeDir, root
+	sock = startDaemon(t)
+	app = newApp()
+	if err := app.Run([]string{"amber-store", "load", "--socket", sock, out}); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	return sock, root
 }
 
 func TestRestore_RoundTrip(t *testing.T) {
 	src := buildSourceTree(t)
-	storeDir, root := ingestTree(t, src)
+	sock, root := ingestViaDaemon(t, src)
 
 	out := filepath.Join(t.TempDir(), "restored")
 	app := newApp()
-	if err := app.Run([]string{"amber-store", "restore", "--store", storeDir, root.String(), out}); err != nil {
+	if err := app.Run([]string{"amber-store", "restore", "--socket", sock, root.String(), out}); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-
 	compareTrees(t, src, out)
 }
 
@@ -180,38 +189,46 @@ func TestRestore_Xattrs(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []byte("hello world")
-	if err := writeXattrs(f, map[string][]byte{"user.comment": want}); err != nil {
+	if err := unix.Lsetxattr(f, "user.comment", want, 0); err != nil {
 		t.Skipf("filesystem does not support xattrs: %v", err)
 	}
 
-	storeDir, root := ingestTree(t, src)
+	sock, root := ingestViaDaemon(t, src)
 	out := filepath.Join(t.TempDir(), "restored")
 	app := newApp()
-	if err := app.Run([]string{"amber-store", "restore", "--store", storeDir, root.String(), out}); err != nil {
+	if err := app.Run([]string{"amber-store", "restore", "--socket", sock, root.String(), out}); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-
-	got, err := readXattrs(filepath.Join(out, "file"))
+	got, err := getXattr(t, filepath.Join(out, "file"), "user.comment")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got["user.comment"], want) {
-		t.Errorf("restored xattr user.comment = %q, want %q", got["user.comment"], want)
+	if !bytes.Equal(got, want) {
+		t.Errorf("restored xattr = %q, want %q", got, want)
 	}
+}
+
+// getXattr reads a single xattr value via unix.Lgetxattr.
+func getXattr(t *testing.T, path, name string) ([]byte, error) {
+	t.Helper()
+	buf := make([]byte, 1024)
+	n, err := unix.Lgetxattr(path, name, buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 func TestRunRestore_RejectsBadKey(t *testing.T) {
 	app := newApp()
-	err := app.Run([]string{"amber-store", "restore", "--store", t.TempDir(), "not-a-key", t.TempDir()})
-	if err == nil {
+	if err := app.Run([]string{"amber-store", "restore", "not-a-key", t.TempDir()}); err == nil {
 		t.Errorf("expected error for malformed key")
 	}
 }
 
 func TestRunRestore_RequiresTwoArgs(t *testing.T) {
 	app := newApp()
-	err := app.Run([]string{"amber-store", "restore", "--store", t.TempDir(), "deadbeef"})
-	if err == nil {
+	if err := app.Run([]string{"amber-store", "restore", "deadbeef"}); err == nil {
 		t.Errorf("expected error with only one positional argument")
 	}
 }
