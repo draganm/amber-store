@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,17 +12,26 @@ import (
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
+	"github.com/draganm/amber-store/daemon"
+	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/fstree"
 )
 
-// startDaemon runs the daemon command in a goroutine on a temp store + socket and
-// waits until the socket accepts connections. It returns the socket path.
+// startDaemon brings up the daemon HTTP handler directly on a fresh unix socket
+// (no CLI), returning the socket path. It deliberately avoids newApp().Run so it
+// can run concurrently with the cli client commands under test without racing on
+// urfave/cli's package-global flags. The socket is bound before this returns, so
+// clients may connect immediately.
 func startDaemon(t *testing.T) string {
 	t.Helper()
-	storeDir := t.TempDir()
+	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
 	// Keep the socket path short: a unix sun_path is capped at ~104 bytes on
 	// macOS/BSD, and t.TempDir() embeds the (long) test name and can overflow it.
-	// MkdirTemp("", ...) yields a short per-user path.
 	sockDir, err := os.MkdirTemp("", "amber-sock-*")
 	if err != nil {
 		t.Fatal(err)
@@ -28,30 +39,47 @@ func startDaemon(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 	sock := filepath.Join(sockDir, "d.sock")
 
-	app := newApp()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: daemon.New(store)}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return sock
+}
+
+// TestDaemon_ServesIngest exercises the real cli `daemon` command: it launches it
+// in a goroutine (the only cli.App.Run in this test) and drives it with the
+// direct client (not cli), so there is no concurrent cli flag parsing.
+func TestDaemon_ServesIngest(t *testing.T) {
+	storeDir := t.TempDir()
+	sockDir, err := os.MkdirTemp("", "amber-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "d.sock")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = app.RunContext(ctx, []string{"amber-store", "daemon", "--store", storeDir, "--socket", sock})
+		_ = newApp().RunContext(ctx, []string{"amber-store", "daemon", "--store", storeDir, "--socket", sock})
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 
-	// Wait for the socket file to appear and accept a connection.
+	// Wait for the daemon to bind the socket.
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		if _, err := os.Stat(sock); err == nil {
-			return sock
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon socket did not appear")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("daemon socket did not appear")
-	return ""
-}
-
-func TestDaemon_ServesIngest(t *testing.T) {
-	sock := startDaemon(t)
-	c := client.New(sock)
 
 	o, err := fstree.EncodeBlob([]byte("hello"))
 	if err != nil {
@@ -66,7 +94,7 @@ func TestDaemon_ServesIngest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stats, err := c.Ingest(context.Background(), &buf)
+	stats, err := client.New(sock).Ingest(context.Background(), &buf)
 	if err != nil {
 		t.Fatalf("Ingest against daemon command: %v", err)
 	}
