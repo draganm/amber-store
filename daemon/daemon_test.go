@@ -259,7 +259,7 @@ func TestGetTar_RoundTripAfterSplitUpload(t *testing.T) {
 		t.Fatalf("upload leaf: %v", err)
 	}
 
-	body, err := c.Tar(context.Background(), leaf.Key)
+	body, err := c.Tar(context.Background(), leaf.Key, "")
 	if err != nil {
 		t.Fatalf("Tar: %v", err)
 	}
@@ -280,6 +280,70 @@ func TestGetTar_RoundTripAfterSplitUpload(t *testing.T) {
 	}
 	if got["a"] != "alpha" || got["b"] != "beta" {
 		t.Fatalf("tar = %v, want a=alpha b=beta", got)
+	}
+}
+
+func TestGetTar_PathTarsSubdirectory(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	content := mustBlob(t, "alpha")
+	inner, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("deep.txt"), Mode: 0o100644, Mtime: 1, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("inner"), Mode: 0o040755, Mtime: 2, ContentKey: inner.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("file"), Mode: 0o100644, Mtime: 3, ContentKey: content.Key[:]},
+		{Name: []byte("mid"), Mode: 0o040755, Mtime: 4, ContentKey: mid.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Ingest(context.Background(), packOf(t, content, inner, mid, root)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	body, err := c.Tar(context.Background(), root.Key, "mid/inner")
+	if err != nil {
+		t.Fatalf("Tar(mid/inner): %v", err)
+	}
+	defer body.Close()
+
+	got := map[string]string{}
+	tr := tar.NewReader(body)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(tr)
+		got[h.Name] = string(data)
+	}
+	if len(got) != 1 || got["deep.txt"] != "alpha" {
+		t.Fatalf("tar = %v, want only deep.txt=alpha", got)
+	}
+
+	// A missing path component is a 404.
+	if _, err := c.Tar(context.Background(), root.Key, "mid/nope"); err == nil ||
+		!strings.Contains(err.Error(), "404") {
+		t.Fatalf("missing path: err = %v, want 404", err)
+	}
+
+	// A path through a regular file is a 400.
+	if _, err := c.Tar(context.Background(), root.Key, "file"); err == nil ||
+		!strings.Contains(err.Error(), "400") {
+		t.Fatalf("file path: err = %v, want 400", err)
 	}
 }
 

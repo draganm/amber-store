@@ -117,7 +117,9 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getTar streams a PAX tar of the directory tree rooted at the {key} path value.
+// getTar streams a PAX tar of the directory tree rooted at the {key} path
+// value. An optional ?path= query names a subdirectory of {key}
+// (slash-separated) to tar instead of {key} itself.
 func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 	k, err := parseHexKey(r.PathValue("key"))
 	if err != nil {
@@ -137,6 +139,21 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 	if !has {
 		http.Error(w, "root object not found", http.StatusNotFound)
 		return
+	}
+	if path := r.URL.Query().Get("path"); path != "" {
+		k, err = fstree.ResolvePath(k, path, h.store.Get)
+		switch {
+		case errors.Is(err, fstree.ErrNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		case errors.Is(err, fstree.ErrNotDir):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case err != nil:
+			h.log.Error("tar path resolution failed", "key", k, "path", path, "error", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
 	if err := tarexport.Write(w, k, h.store.Get); err != nil {

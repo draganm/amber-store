@@ -17,8 +17,8 @@ func restoreCommand() *cli.Command {
 	cfg := &restoreConfig{}
 	return &cli.Command{
 		Name:      "restore",
-		Usage:     "restore the filesystem tree rooted at KEY (fetched from the daemon) into DIR",
-		ArgsUsage: "KEY DIR",
+		Usage:     "restore the filesystem tree rooted at KEY (fetched from the daemon), or at the subdirectory PATH within it, into DIR",
+		ArgsUsage: "KEY[/PATH] DIR",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -32,15 +32,15 @@ func restoreCommand() *cli.Command {
 
 func runRestore(c *cli.Context, cfg *restoreConfig) error {
 	if c.NArg() != 2 {
-		return fmt.Errorf("restore requires exactly two arguments KEY and DIR, got %d", c.NArg())
+		return fmt.Errorf("restore requires exactly two arguments KEY[/PATH] and DIR, got %d", c.NArg())
 	}
-	k, err := parseHexKey(c.Args().Get(0))
+	k, path, err := parseKeyPath(c.Args().Get(0))
 	if err != nil {
 		return err
 	}
 	outDir := c.Args().Get(1)
 
-	body, err := client.New(socketpath.Resolve(cfg.socket)).Tar(c.Context, k)
+	body, err := client.New(socketpath.Resolve(cfg.socket)).Tar(c.Context, k, path)
 	if err != nil {
 		return err
 	}

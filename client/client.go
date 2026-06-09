@@ -121,10 +121,15 @@ func (c *Client) Ls(ctx context.Context, k key.Key, path string) ([]Entry, error
 	}
 }
 
-// Tar requests the directory tar for k. The caller must close the returned
-// reader. A non-2xx status is drained and returned as an error.
-func (c *Client) Tar(ctx context.Context, k key.Key) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/tar/"+k.String(), nil)
+// Tar requests the directory tar for k. A non-empty path names a subdirectory
+// of k (slash-separated) to tar instead of k itself. The caller must close the
+// returned reader. A non-2xx status is drained and returned as an error.
+func (c *Client) Tar(ctx context.Context, k key.Key, path string) (io.ReadCloser, error) {
+	u := baseURL + "/v1/tar/" + k.String()
+	if path != "" {
+		u += "?path=" + url.QueryEscape(path)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -182,6 +182,20 @@ func TestRestore_RoundTrip(t *testing.T) {
 	compareTrees(t, src, out)
 }
 
+// TestRestore_SubdirPath restores only the subdirectory named by appending its
+// path to the key (KEY/PATH) and checks it matches the source subtree.
+func TestRestore_SubdirPath(t *testing.T) {
+	src := buildSourceTree(t)
+	sock, root := ingestViaDaemon(t, src)
+
+	out := filepath.Join(t.TempDir(), "restored")
+	app := newApp()
+	if err := app.Run([]string{"amber-store", "restore", "--socket", sock, root.String() + "/sub", out}); err != nil {
+		t.Fatalf("restore sub: %v", err)
+	}
+	compareTrees(t, filepath.Join(src, "sub"), out)
+}
+
 func TestRestore_Xattrs(t *testing.T) {
 	src := t.TempDir()
 	f := filepath.Join(src, "file")

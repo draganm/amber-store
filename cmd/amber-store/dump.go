@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/internal/socketpath"
@@ -21,8 +22,8 @@ func dumpCommand() *cli.Command {
 	cfg := &dumpConfig{}
 	return &cli.Command{
 		Name:      "dump",
-		Usage:     "fetch the directory tar for KEY from the daemon",
-		ArgsUsage: "KEY",
+		Usage:     "fetch the directory tar for KEY from the daemon, or for the subdirectory PATH within it",
+		ArgsUsage: "KEY[/PATH]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -42,14 +43,14 @@ func dumpCommand() *cli.Command {
 
 func runDump(c *cli.Context, cfg *dumpConfig) error {
 	if c.NArg() != 1 {
-		return fmt.Errorf("dump requires exactly one KEY argument, got %d", c.NArg())
+		return fmt.Errorf("dump requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	k, err := parseHexKey(c.Args().First())
+	k, path, err := parseKeyPath(c.Args().First())
 	if err != nil {
 		return err
 	}
 
-	body, err := client.New(socketpath.Resolve(cfg.socket)).Tar(c.Context, k)
+	body, err := client.New(socketpath.Resolve(cfg.socket)).Tar(c.Context, k, path)
 	if err != nil {
 		return err
 	}
@@ -68,6 +69,17 @@ func runDump(c *cli.Context, cfg *dumpConfig) error {
 	}
 	_, err = io.Copy(os.Stdout, body)
 	return err
+}
+
+// parseKeyPath splits a KEY[/PATH] argument at the first slash and decodes the
+// key part. The returned path is empty when no slash follows the key.
+func parseKeyPath(s string) (key.Key, string, error) {
+	keyPart, path, _ := strings.Cut(s, "/")
+	k, err := parseHexKey(keyPart)
+	if err != nil {
+		return key.Key{}, "", err
+	}
+	return k, path, nil
 }
 
 // parseHexKey decodes a lowercase-hex key argument into a validated key.

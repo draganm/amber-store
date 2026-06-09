@@ -22,7 +22,7 @@ func lsCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "ls",
 		Usage:     "list the entries of the directory object KEY (fetched from the daemon), or of the subdirectory PATH within it",
-		ArgsUsage: "KEY [PATH]",
+		ArgsUsage: "KEY[/PATH]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -40,14 +40,14 @@ func lsCommand() *cli.Command {
 }
 
 func runLs(c *cli.Context, cfg *lsConfig) error {
-	if c.NArg() < 1 || c.NArg() > 2 {
-		return fmt.Errorf("ls requires a KEY argument and an optional PATH, got %d arguments", c.NArg())
+	if c.NArg() != 1 {
+		return fmt.Errorf("ls requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	k, err := parseHexKey(c.Args().First())
+	k, path, err := parseKeyPath(c.Args().First())
 	if err != nil {
 		return err
 	}
-	entries, err := client.New(socketpath.Resolve(cfg.socket)).Ls(c.Context, k, c.Args().Get(1))
+	entries, err := client.New(socketpath.Resolve(cfg.socket)).Ls(c.Context, k, path)
 	if err != nil {
 		return err
 	}

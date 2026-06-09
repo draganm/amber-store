@@ -150,11 +150,11 @@ func TestLs_ListsDaemonDirectory(t *testing.T) {
 		t.Errorf("link line = %q", lines[1])
 	}
 
-	// With a PATH argument the subdirectory is listed instead of the root.
+	// With KEY/PATH the subdirectory is listed instead of the root.
 	out.Reset()
 	app = newApp()
 	app.Writer = &out
-	if err := app.Run([]string{"amber-store", "ls", "--socket", sock, leaf.Key.String(), "sub"}); err != nil {
+	if err := app.Run([]string{"amber-store", "ls", "--socket", sock, leaf.Key.String() + "/sub"}); err != nil {
 		t.Fatalf("ls sub: %v", err)
 	}
 	lines = strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
@@ -165,7 +165,14 @@ func TestLs_ListsDaemonDirectory(t *testing.T) {
 	// A missing path is an error.
 	app = newApp()
 	app.Writer = io.Discard
-	if err := app.Run([]string{"amber-store", "ls", "--socket", sock, leaf.Key.String(), "nope"}); err == nil {
+	if err := app.Run([]string{"amber-store", "ls", "--socket", sock, leaf.Key.String() + "/nope"}); err == nil {
 		t.Fatal("expected error for a missing path")
+	}
+
+	// A second positional argument is an error.
+	app = newApp()
+	app.Writer = io.Discard
+	if err := app.Run([]string{"amber-store", "ls", "--socket", sock, leaf.Key.String(), "sub"}); err == nil {
+		t.Fatal("expected error for a separate PATH argument")
 	}
 }
