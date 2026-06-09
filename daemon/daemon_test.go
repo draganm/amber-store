@@ -1,8 +1,10 @@
 package daemon_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -144,5 +146,80 @@ func TestPostObjects_RejectsTamperedKey(t *testing.T) {
 	}
 	if has, _ := store.Has(bad.Key); has {
 		t.Fatalf("tampered object must not be stored")
+	}
+}
+
+func TestGetTar_RoundTripAfterSplitUpload(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	// Build a one-leaf directory with two files, then upload the objects in TWO
+	// separate packs (the blobs in one, the leaf in another) to exercise partial
+	// uploads.
+	a, b := mustBlob(t, "alpha"), mustBlob(t, "beta")
+	entries := []fstree.Entry{
+		{Name: []byte("a"), Mode: 0o100644, Mtime: 1, ContentKey: a.Key[:]},
+		{Name: []byte("b"), Mode: 0o100644, Mtime: 2, ContentKey: b.Key[:]},
+	}
+	leaf, err := fstree.EncodeDirLeaf(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Ingest(context.Background(), packOf(t, a, b)); err != nil {
+		t.Fatalf("upload blobs: %v", err)
+	}
+	if _, err := c.Ingest(context.Background(), packOf(t, leaf)); err != nil {
+		t.Fatalf("upload leaf: %v", err)
+	}
+
+	body, err := c.Tar(context.Background(), leaf.Key)
+	if err != nil {
+		t.Fatalf("Tar: %v", err)
+	}
+	defer body.Close()
+
+	got := map[string]string{}
+	tr := tar.NewReader(body)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(tr)
+		got[h.Name] = string(data)
+	}
+	if got["a"] != "alpha" || got["b"] != "beta" {
+		t.Fatalf("tar = %v, want a=alpha b=beta", got)
+	}
+}
+
+func TestGetTar_MissingRootIs404(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+	// A well-formed directory key that was never stored.
+	xblob := mustBlob(t, "x")
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{{Name: []byte("x"), Mode: 0o100644, ContentKey: xblob.Key[:]}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Tar(context.Background(), leaf.Key)
+	if err == nil {
+		t.Fatalf("expected error fetching an absent root")
+	}
+}
+
+func TestGetTar_NonDirectoryKeyIs400(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+	blob := mustBlob(t, "data")
+	if _, err := c.Ingest(context.Background(), packOf(t, blob)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Tar(context.Background(), blob.Key); err == nil {
+		t.Fatalf("expected error fetching a tar for a blob key")
 	}
 }

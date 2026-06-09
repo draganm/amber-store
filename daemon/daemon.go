@@ -4,12 +4,16 @@
 package daemon
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/tarexport"
 )
 
@@ -65,8 +69,40 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getTar is implemented in Task 8.
+// getTar streams a PAX tar of the directory tree rooted at the {key} path value.
 func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
-	_ = tarexport.Write // referenced fully in Task 8
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+	k, err := parseHexKey(r.PathValue("key"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if k.Type() != key.DirLeaf && k.Type() != key.DirNode {
+		http.Error(w, "key is not a directory object", http.StatusBadRequest)
+		return
+	}
+	has, err := h.store.Has(k)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !has {
+		http.Error(w, "root object not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-tar")
+	if err := tarexport.Write(w, k, h.store.Get); err != nil {
+		// The 200 status and some bytes may already be in flight; we cannot change
+		// the status now. Log and let the truncated archive surface as a tar read
+		// error on the client.
+		log.Printf("amber-store daemon: tar export of %s aborted: %v", k, err)
+	}
+}
+
+// parseHexKey decodes a lowercase-hex key path segment into a validated key.
+func parseHexKey(s string) (key.Key, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return key.Key{}, fmt.Errorf("invalid key %q: %w", s, err)
+	}
+	return key.Parse(raw)
 }
