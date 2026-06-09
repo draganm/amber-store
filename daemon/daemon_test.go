@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
@@ -36,7 +40,7 @@ func serveOnSocket(t *testing.T, store *diskstore.Store) *client.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.New(store)}
+	srv := &http.Server{Handler: daemon.New(store, nil)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return client.New(sock)
@@ -77,6 +81,87 @@ func mustBlob(t *testing.T, s string) fstree.Object {
 	return o
 }
 
+// syncBuf is a concurrency-safe log sink: the server goroutine writes while the
+// test polls String.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// waitForLog polls buf until every want substring appears, or fails the test.
+// The request log line is written after the handler returns, which may race the
+// client seeing the response, so the test cannot assert synchronously.
+func waitForLog(t *testing.T, buf *syncBuf, wants ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := buf.String()
+		missing := ""
+		for _, w := range wants {
+			if !strings.Contains(got, w) {
+				missing = w
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log output %q never contained %q", got, missing)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestLogging_RejectedIngestIsLogged(t *testing.T) {
+	store := openStore(t)
+	buf := &syncBuf{}
+	srv := httptest.NewServer(daemon.New(store, slog.New(slog.NewTextHandler(buf, nil))))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
+		bytes.NewReader([]byte("not a valid pack stream")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+	// The rejection reason and the request line must both be logged.
+	waitForLog(t, buf, "malformed stream", "POST", "/v1/objects", "status=422")
+}
+
+func TestLogging_SuccessfulIngestIsLogged(t *testing.T) {
+	store := openStore(t)
+	buf := &syncBuf{}
+	srv := httptest.NewServer(daemon.New(store, slog.New(slog.NewTextHandler(buf, nil))))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
+		packOf(t, mustBlob(t, "alpha")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	waitForLog(t, buf, "ingest complete", "stored=1", "status=200")
+}
+
 func TestPostObjects_StoresAndReportsStats(t *testing.T) {
 	store := openStore(t)
 	c := serveOnSocket(t, store)
@@ -99,7 +184,7 @@ func TestPostObjects_StoresAndReportsStats(t *testing.T) {
 
 func TestPostObjects_MalformedStreamIs422(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store))
+	srv := httptest.NewServer(daemon.New(store, nil))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
@@ -115,7 +200,7 @@ func TestPostObjects_MalformedStreamIs422(t *testing.T) {
 
 func TestPostObjects_TamperedKeyIs422(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store))
+	srv := httptest.NewServer(daemon.New(store, nil))
 	defer srv.Close()
 
 	good := mustBlob(t, "honest")
@@ -199,7 +284,7 @@ func TestGetTar_RoundTripAfterSplitUpload(t *testing.T) {
 
 func TestGetTar_MissingRootIs404(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store))
+	srv := httptest.NewServer(daemon.New(store, nil))
 	defer srv.Close()
 
 	// A well-formed directory key that was never stored.
@@ -223,7 +308,7 @@ func TestGetTar_MissingRootIs404(t *testing.T) {
 
 func TestGetTar_NonDirectoryKeyIs400(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store))
+	srv := httptest.NewServer(daemon.New(store, nil))
 	defer srv.Close()
 
 	// A blob key is not a directory object; rejected with 400 before any lookup,

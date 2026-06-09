@@ -1,7 +1,6 @@
 package socketpath
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -31,11 +30,11 @@ func TestResolve_XDGDefault(t *testing.T) {
 	}
 }
 
-func TestResolve_TempDirFallback(t *testing.T) {
+func TestResolve_TmpFallback(t *testing.T) {
 	t.Setenv("AMBER_STORE_SOCKET", "")
-	t.Setenv("XDG_RUNTIME_DIR", "") // unset -> fall back to os.TempDir (macOS path)
+	t.Setenv("XDG_RUNTIME_DIR", "") // unset -> fixed /tmp fallback
 	got := Resolve("")
-	want := filepath.Join(os.TempDir(), perUserName())
+	want := filepath.Join("/tmp", perUserName())
 	if got != want {
 		t.Fatalf("Resolve(\"\") = %q, want %q", got, want)
 	}
@@ -45,8 +44,24 @@ func TestResolve_IgnoresRelativeXDG(t *testing.T) {
 	t.Setenv("AMBER_STORE_SOCKET", "")
 	t.Setenv("XDG_RUNTIME_DIR", "relative/dir") // not absolute -> ignored
 	got := Resolve("")
-	want := filepath.Join(os.TempDir(), perUserName())
+	want := filepath.Join("/tmp", perUserName())
 	if got != want {
 		t.Fatalf("Resolve(\"\") = %q, want %q", got, want)
+	}
+}
+
+// TestResolve_DefaultIgnoresTMPDIR pins the rendezvous property: two processes
+// with different per-shell TMPDIRs (as nix-shell and direnv set) must still
+// resolve the same default socket path.
+func TestResolve_DefaultIgnoresTMPDIR(t *testing.T) {
+	t.Setenv("AMBER_STORE_SOCKET", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	t.Setenv("TMPDIR", t.TempDir())
+	first := Resolve("")
+	t.Setenv("TMPDIR", t.TempDir())
+	second := Resolve("")
+	if first != second {
+		t.Fatalf("default socket path depends on TMPDIR: %q vs %q", first, second)
 	}
 }

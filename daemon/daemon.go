@@ -8,8 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/diskstore"
@@ -19,15 +20,51 @@ import (
 
 type handler struct {
 	store *diskstore.Store
+	log   *slog.Logger
 }
 
-// New returns an http.Handler serving the store.
-func New(store *diskstore.Store) http.Handler {
-	h := &handler{store: store}
+// New returns an http.Handler serving the store. Every request is logged to
+// logger (method, path, status, duration), as are per-operation outcomes:
+// rejected uploads at Warn, store failures at Error, completed ingests at Info.
+// A nil logger discards all logging.
+func New(store *diskstore.Store, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	h := &handler{store: store, log: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
-	return mux
+	return logRequests(logger, mux)
+}
+
+// statusWriter records the status code a handler sends so the request log can
+// include it. Unwrap keeps http.ResponseController working through the wrapper.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// logRequests logs one line per completed request.
+func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(sw, r)
+		log.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration", time.Since(start),
+		)
+	})
 }
 
 type ingestResponse struct {
@@ -40,6 +77,7 @@ type ingestResponse struct {
 // returns store stats. Malformed-stream and verification failures are client
 // errors (422); other failures are 500.
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	rd := amberpack.NewReader(r.Body)
 	seq := func(yield func(diskstore.Object, error) bool) {
 		for o, err := range rd.All() {
@@ -55,12 +93,20 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.store.WriteParallel(seq, diskstore.WriteOpts{Verify: true})
 	if err != nil {
 		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, diskstore.ErrVerify) {
+			h.log.Warn("ingest rejected", "error", err)
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		h.log.Error("ingest failed", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.log.Info("ingest complete",
+		"stored", stats.Stored,
+		"deduped", stats.Deduped,
+		"bytes_stored", stats.BytesStored,
+		"duration", time.Since(start),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ingestResponse{
 		ObjectsStored:  stats.Stored,
@@ -82,6 +128,7 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 	}
 	has, err := h.store.Has(k)
 	if err != nil {
+		h.log.Error("tar root lookup failed", "key", k, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -94,7 +141,7 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 		// The 200 status and some bytes may already be in flight; we cannot change
 		// the status now. Log and let the truncated archive surface as a tar read
 		// error on the client.
-		log.Printf("amber-store daemon: tar export of %s aborted: %v", k, err)
+		h.log.Error("tar export aborted", "key", k, "error", err)
 	}
 }
 

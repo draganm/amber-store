@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,8 @@ type daemonConfig struct {
 	socket          string
 	inlineThreshold int
 	sync            bool
+	logLevel        string
+	logFormat       string
 }
 
 func daemonCommand() *cli.Command {
@@ -53,12 +56,49 @@ func daemonCommand() *cli.Command {
 				Usage:       "fsync writes for crash durability",
 				Destination: &cfg.sync,
 			},
+			&cli.StringFlag{
+				Name:        "log-level",
+				Value:       "info",
+				Usage:       "log level: debug, info, warn or error",
+				Destination: &cfg.logLevel,
+			},
+			&cli.StringFlag{
+				Name:        "log-format",
+				Value:       "text",
+				Usage:       "log format: text or json",
+				Destination: &cfg.logFormat,
+			},
 		},
 		Action: func(c *cli.Context) error { return runDaemon(c, cfg) },
 	}
 }
 
+// buildLogger constructs the daemon's slog logger on stderr from the
+// --log-level and --log-format flags.
+func buildLogger(level, format string) (*slog.Logger, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("invalid --log-level %q: %w", level, err)
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler
+	switch format {
+	case "text":
+		h = slog.NewTextHandler(os.Stderr, opts)
+	case "json":
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	default:
+		return nil, fmt.Errorf("invalid --log-format %q: want text or json", format)
+	}
+	return slog.New(h), nil
+}
+
 func runDaemon(c *cli.Context, cfg *daemonConfig) error {
+	logger, err := buildLogger(cfg.logLevel, cfg.logFormat)
+	if err != nil {
+		return err
+	}
+
 	store, err := diskstore.Open(cfg.store,
 		diskstore.WithInlineThreshold(cfg.inlineThreshold),
 		diskstore.WithSync(cfg.sync),
@@ -79,19 +119,25 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	}
 	defer os.Remove(sock)
 
-	srv := &http.Server{Handler: daemon.New(store)}
+	srv := &http.Server{
+		Handler: daemon.New(store, logger),
+		// Route the http.Server's own diagnostics (handler panics, accept
+		// errors) through the structured logger.
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
 
 	// Shut down gracefully on context cancellation (tests) or SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
+		logger.Info("shutting down")
 		// No timeout: let in-flight ingests/tar streams finish so a shutdown never
 		// truncates a client mid-operation.
 		_ = srv.Shutdown(context.Background())
 	}()
 
-	fmt.Fprintf(os.Stderr, "amber-store daemon listening on %s\n", sock)
+	logger.Info("daemon listening", "socket", sock, "store", cfg.store)
 	err = srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil

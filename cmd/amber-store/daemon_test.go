@@ -43,7 +43,7 @@ func startDaemon(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.New(store)}
+	srv := &http.Server{Handler: daemon.New(store, nil)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return sock

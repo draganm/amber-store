@@ -280,11 +280,19 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		}()
 		_, ingErr := client.New(socketpath.Resolve(cfg.socket)).Ingest(ctx, pr)
 		res := <-resCh
-		if res.err != nil {
+		// A closed-pipe build error is a secondary effect: the transport closes
+		// the body pipe when the daemon replies early (an error status), so the
+		// request error is the cause and the pipe error just noise. Any other
+		// build error is the true cause (it aborted the request via
+		// CloseWithError), so it wins.
+		if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) {
 			return res.err
 		}
 		if ingErr != nil {
 			return ingErr
+		}
+		if res.err != nil {
+			return res.err
 		}
 		root = res.root
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,6 +180,45 @@ func TestRunIngest_RejectsNonDirectory(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "p.amberpack")
 	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "-o", out, f}); err == nil {
 		t.Errorf("expected error ingesting a non-directory")
+	}
+}
+
+// TestRunIngest_ServerErrorNotMaskedByClosedPipe reproduces a daemon rejecting
+// an upload mid-stream: the transport closes the request-body pipe, the
+// still-running build hits io.ErrClosedPipe, and the CLI must surface the
+// server's error — not the secondary closed-pipe artifact.
+func TestRunIngest_ServerErrorNotMaskedByClosedPipe(t *testing.T) {
+	sockDir, err := os.MkdirTemp("", "amber-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reject immediately without reading the body, like a verify failure would.
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "object verification failed", http.StatusUnprocessableEntity)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	// A tree large enough that the build is still streaming when the 422 lands.
+	src := t.TempDir()
+	writeDeepTree(t, src)
+
+	app := newApp()
+	err = app.Run([]string{"amber-store", "ingest", "--no-progress", "--socket", sock, src})
+	if err == nil {
+		t.Fatal("expected ingest to fail")
+	}
+	if !strings.Contains(err.Error(), "object verification failed") {
+		t.Errorf("error %q does not contain the server's message", err)
+	}
+	if strings.Contains(err.Error(), "closed pipe") {
+		t.Errorf("error %q surfaces the closed-pipe artifact instead of the cause", err)
 	}
 }
 
