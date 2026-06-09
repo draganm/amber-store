@@ -5,8 +5,10 @@ directories and files, where file content is split by content-defined chunking a
 every object is identified by a fixed 32-byte key derived from a hash of its
 content.
 
-> **Status:** architecture/design phase. The data model is specified in
-> [`architecture/`](architecture/); there is no implementation yet.
+> **Status:** working implementation. A store-owning daemon serves CLI clients
+> over a unix socket; trees are built client-side and ingested, listed, dumped,
+> and restored through it. The design is specified in
+> [`architecture/`](architecture/).
 
 ## What it is
 
@@ -62,22 +64,47 @@ store:
 | [`architecture/keys.md`](architecture/keys.md)   | The 32-byte lookup key: header byte, payload length, truncated hash. |
 | [`architecture/types.md`](architecture/types.md) | The type model: object types, filesystem entry types, length-field semantics. |
 | [`architecture/fstree.md`](architecture/fstree.md) | On-the-wire CBOR layout of every type, the chunkers, tree construction, and read paths. |
+| [`architecture/daemon.md`](architecture/daemon.md) | The daemon/CLI split: who builds trees, who stores objects, the unix-socket protocol, and the pack-write format. |
 
-## Packing a directory
+## Usage
 
-The `amber-store pack` command walks a directory depth-first, builds the
-content-addressed tree, and writes every unique chunk into a tar (the root
-object is the last member):
+One long-running daemon owns the store; every other command is a short-lived
+client talking to it over a unix socket (see
+[`architecture/daemon.md`](architecture/daemon.md)):
 
 ```sh
-go run ./cmd/amber-store pack ./some/dir > tree.tar      # tar to stdout
-go run ./cmd/amber-store pack -o tree.tar ./some/dir     # tar to a file
+amber-store daemon --store /path/to/store      # run the store-owning daemon
 ```
 
-The root key (hex) is printed to stderr. Chunking is tunable with
-`--min/--avg/--max` (ultracdc byte chunking) and `--item-bits` (index/entry
-chunking); `--xattr-inline-max` controls when extended attributes spill to an
-`XattrSet` object.
+Ingest a directory — the tree is built (walked, chunked, hashed) client-side
+and streamed to the daemon; the root key (hex) is printed to stdout:
+
+```sh
+amber-store ingest ./some/dir
+```
+
+Inspect and export by key, optionally addressing a subdirectory with
+`KEY/PATH`:
+
+```sh
+amber-store ls KEY[/PATH]                # list entries, ls -l style (--keys adds content keys)
+amber-store content-keys KEY[/PATH]      # every key needed to fetch the whole content
+amber-store dump KEY[/PATH] -o tree.tar  # PAX tar of the tree (default: stdout)
+amber-store restore KEY[/PATH] ./dest    # recreate the tree on disk
+```
+
+For offline operation, `ingest` can write the pack-write stream to a file
+instead of a daemon, and `load` uploads it later:
+
+```sh
+amber-store ingest -o tree.amberpack ./some/dir
+amber-store load tree.amberpack
+```
+
+Ingest parallelism is set with `--jobs` (default: number of CPUs). Chunking is
+tunable with `--min/--avg/--max` (ultracdc byte chunking) and `--item-bits`
+(index/entry chunking); `--xattr-inline-max` controls when extended attributes
+spill to an `XattrSet` object.
 
 ## Development
 
