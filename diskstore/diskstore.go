@@ -15,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/draganm/amber-store/key"
+	"golang.org/x/sync/errgroup"
 )
 
 // ErrNotFound is returned by Get for a key that is not present in the store.
@@ -23,7 +24,7 @@ var ErrNotFound = errors.New("diskstore: object not found")
 // DefaultInlineThreshold is the default boundary (in bytes) between inline
 // (Pebble) and external (file) storage: objects with len(data) > threshold are
 // stored as files.
-const DefaultInlineThreshold = 16 << 10 // 16 KiB
+const DefaultInlineThreshold = 64 << 10 // 64 KiB
 
 // Pebble value tags: the first byte of every record.
 const (
@@ -98,7 +99,16 @@ func Open(dir string, opts ...Option) (*Store, error) {
 		}
 	}
 
-	db, err := pebble.Open(filepath.Join(dir, "db"), &pebble.Options{Logger: discardLogger{}})
+	cache := pebble.NewCache(1024 << 20)
+	defer cache.Unref()
+
+	pebbleOpts := &pebble.Options{
+		Logger:       discardLogger{},
+		Cache:        cache,
+		MemTableSize: 128 << 20,
+	}
+
+	db, err := pebble.Open(filepath.Join(dir, "db"), pebbleOpts)
 	if err != nil {
 		return nil, fmt.Errorf("diskstore: opening pebble: %w", err)
 	}
@@ -152,13 +162,7 @@ func (s *Store) writeExternal(k key.Key, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	if s.sync {
-		if err := tmp.Sync(); err != nil {
-			tmp.Close()
-			os.Remove(tmpName)
-			return err
-		}
-	}
+
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return err
@@ -167,22 +171,8 @@ func (s *Store) writeExternal(k key.Key, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	if s.sync {
-		if err := fsyncDir(shard); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
-// fsyncDir fsyncs a directory so a rename into it is durable.
-func fsyncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
+	return nil
 }
 
 // Put stores a single object under k, deduplicating against existing content.
@@ -209,6 +199,9 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 	b := s.db.NewBatch()
 	defer b.Close()
 
+	eg := &errgroup.Group{}
+	eg.SetLimit(10)
+
 	seen := make(map[key.Key]struct{})
 	for obj, err := range seq {
 		if err != nil {
@@ -218,22 +211,14 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 			continue
 		}
 
-		has, err := s.Has(obj.Key)
-
-		if err != nil {
-			return fmt.Errorf("diskstore: checking if %s exists: %w", obj.Key, err)
-		}
-
-		if has {
-			continue
-		}
-
 		seen[obj.Key] = struct{}{}
 
 		if len(obj.Data) > s.threshold {
-			if err := s.writeExternal(obj.Key, obj.Data); err != nil {
-				return err
-			}
+
+			eg.Go(func() error {
+				return s.writeExternal(obj.Key, obj.Data)
+			})
+
 			if err := b.Set(obj.Key[:], []byte{tagExternal}, nil); err != nil {
 				return err
 			}
@@ -245,6 +230,10 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 		if err := b.Set(obj.Key[:], val, nil); err != nil {
 			return err
 		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		return err
 	}
 	return b.Commit(s.writeOpts)
 }
