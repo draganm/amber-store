@@ -89,7 +89,10 @@ func (p *Progress) render(elapsed time.Duration) string {
 
 // Run renders progress to w until ctx is cancelled, using start as t0. On a TTY
 // it redraws one line in place and clears it on exit; on a non-TTY it prints a
-// plain line at a slower cadence. start is injected so the caller owns the clock.
+// plain line at a slower cadence. An initial frame is drawn immediately so even
+// a sub-interval ingest shows something, and on exit a non-TTY run prints a
+// final summary line (a TTY clears its in-place bar so the root prints clean).
+// start is injected so the caller owns the clock.
 func (p *Progress) Run(ctx context.Context, w io.Writer, start time.Time, isTTY bool) {
 	interval := 150 * time.Millisecond
 	if !isTTY {
@@ -105,11 +108,14 @@ func (p *Progress) Run(ctx context.Context, w io.Writer, start time.Time, isTTY 
 			fmt.Fprintf(w, "%s\n", line)
 		}
 	}
+	draw() // immediate feedback, before the first tick
 	for {
 		select {
 		case <-ctx.Done():
 			if isTTY {
-				fmt.Fprint(w, "\r\033[K")
+				fmt.Fprint(w, "\r\033[K") // erase the in-place bar
+			} else {
+				draw() // leave a final summary line in the log
 			}
 			return
 		case <-t.C:

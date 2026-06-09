@@ -1,10 +1,68 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestProgressRunTTYDrawsAndClears verifies the TTY render loop draws an
+// immediate in-place frame and erases it on exit (so the root prints clean).
+func TestProgressRunTTYDrawsAndClears(t *testing.T) {
+	p := NewProgress(2, 100)
+	p.AddBytes(100)
+	p.FileDone()
+	p.FileDone()
+
+	var buf bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.Run(ctx, &buf, time.Now(), true); close(done) }()
+	time.Sleep(20 * time.Millisecond) // the immediate draw lands before any tick
+	cancel()
+	<-done
+
+	out := buf.String()
+	if !strings.Contains(out, "ingest ") {
+		t.Fatalf("Run drew no frame; output=%q", out)
+	}
+	if !strings.Contains(out, "files 2/2") {
+		t.Fatalf("frame missing file counts; output=%q", out)
+	}
+	if !strings.HasSuffix(out, "\r\x1b[K") {
+		t.Fatalf("Run did not clear the in-place bar on exit; output=%q", out)
+	}
+}
+
+// TestProgressRunNonTTYLeavesFinalLine verifies the non-TTY path uses newline
+// frames (no carriage returns) and leaves a final summary line on exit, so even
+// a fast piped ingest shows a start and a 100% line.
+func TestProgressRunNonTTYLeavesFinalLine(t *testing.T) {
+	p := NewProgress(1, 10)
+	p.AddBytes(10)
+	p.FileDone()
+
+	var buf bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.Run(ctx, &buf, time.Now(), false); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	out := buf.String()
+	if strings.Contains(out, "\r") {
+		t.Fatalf("non-TTY output must not use carriage returns; output=%q", out)
+	}
+	if n := strings.Count(out, "\n"); n < 2 {
+		t.Fatalf("want at least a start and a final line, got %d: %q", n, out)
+	}
+	if !strings.Contains(out, "100.0%") {
+		t.Fatalf("final line should show 100%%; output=%q", out)
+	}
+}
 
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
