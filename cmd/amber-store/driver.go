@@ -56,6 +56,7 @@ type driver struct {
 	ic             chunkers.ItemChunker
 	byteOpts       *chunkers.ByteOpts
 	xattrInlineMax int
+	p              *Progress // nil for pack; set for ingest
 }
 
 // buildDir builds the directory at path and returns its root key, emitting every
@@ -105,6 +106,7 @@ func (d *driver) buildEntry(full, name string, emit fstree.Emit, buildDir func(s
 			return fstree.Entry{}, err
 		}
 		e.ContentKey = ck[:]
+		d.p.FileDone()
 	case unix.S_IFDIR:
 		ck, err := buildDir(full, emit)
 		if err != nil {
@@ -163,6 +165,7 @@ func (d *driver) buildFile(full string, emit fstree.Emit) (key.Key, error) {
 	ib := fstree.NewFileIndexBuilder(d.ic)
 	saw := false
 	err = chunkers.SplitBytes(f, d.byteOpts, func(chunk []byte) error {
+		d.p.AddBytes(len(chunk))
 		saw = true
 		obj, err := fstree.EncodeBlob(chunk)
 		if err != nil {

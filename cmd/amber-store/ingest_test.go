@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/chunkers"
@@ -47,7 +48,7 @@ func TestIngestObjects_ParityWithPack(t *testing.T) {
 	defer store.Close()
 
 	var root key.Key
-	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 4, &root)
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 4, nil, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
@@ -75,8 +76,18 @@ func TestIngestObjects_ParityWithPack(t *testing.T) {
 	}
 }
 
+// cliDefaultByteOpts returns the ultracdc parameters the ingest CLI applies by
+// default (see chunkFlags in main.go: 32K/128K/256K). The CLI never passes nil
+// byteOpts, so a reference pack compared against a CLI ingest must use these
+// explicit sizes — nil would select the library defaults (2K/10K/64K) and large
+// files would chunk differently, diverging the root.
+func cliDefaultByteOpts() *chunkers.ByteOpts {
+	return &chunkers.ByteOpts{MinSize: 32 << 10, NormalSize: 128 << 10, MaxSize: 256 << 10}
+}
+
 // TestRunIngest_StoresRoot drives the CLI ingest command end to end and checks
-// that the resulting store contains the root object pack would produce.
+// that the resulting store contains the root object pack would produce with the
+// CLI's default chunk sizes.
 func TestRunIngest_StoresRoot(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "f"), []byte("data"), 0o644); err != nil {
@@ -89,9 +100,10 @@ func TestRunIngest_StoresRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The root pack would produce must be present in the store.
+	// The root pack would produce (with the CLI's default chunk sizes) must be
+	// present in the store.
 	var buf bytes.Buffer
-	root, err := pack(src, &buf, chunkers.NewItemChunker(7), nil, 256)
+	root, err := pack(src, &buf, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +151,7 @@ func TestIngestObjects_ParallelParityDeepTree(t *testing.T) {
 
 	var root key.Key
 	jobs := max(runtime.NumCPU(), 4)
-	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, jobs, &root)
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, jobs, nil, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
@@ -172,7 +184,8 @@ func TestIngestObjects_ParallelParityDeepTree(t *testing.T) {
 }
 
 // TestRunIngest_JobsFlag drives the CLI ingest command with an explicit --jobs
-// value and checks the resulting store contains the root pack would produce.
+// value and checks the resulting store contains the root pack would produce with
+// the CLI's default chunk sizes.
 func TestRunIngest_JobsFlag(t *testing.T) {
 	src := t.TempDir()
 	writeDeepTree(t, src)
@@ -184,7 +197,7 @@ func TestRunIngest_JobsFlag(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	root, err := pack(src, &buf, chunkers.NewItemChunker(7), nil, 256)
+	root, err := pack(src, &buf, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,5 +280,85 @@ func TestRunIngest_RequiresStoreFlag(t *testing.T) {
 	app := newApp()
 	if err := app.Run([]string{"amber-store", "ingest", t.TempDir()}); err == nil {
 		t.Errorf("expected error without --store flag")
+	}
+}
+
+// TestIngestObjects_ReportsProgress checks the instrumented build feeds the
+// Progress tracker: bytesDone equals total regular-file bytes and filesDone
+// equals the file count.
+func TestIngestObjects_ReportsProgress(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644); err != nil { // 5
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bravo!"), 0o644); err != nil { // 6
+		t.Fatal(err)
+	}
+
+	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	p := NewProgress(2, 11)
+	var root key.Key
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 2, p, &root)
+	if err := store.WriteBatch(seq); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	if got := p.bytesDone.Load(); got != 11 {
+		t.Errorf("bytesDone = %d, want 11", got)
+	}
+	if got := p.filesDone.Load(); got != 2 {
+		t.Errorf("filesDone = %d, want 2", got)
+	}
+}
+
+// TestRunIngest_PrintsRootToStdout asserts the ingest command writes the root
+// key (and only the root key) to the app writer (stdout).
+func TestRunIngest_PrintsRootToStdout(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	app := newApp()
+	app.Writer = &buf
+	if err := app.Run([]string{"amber-store", "ingest", "--store", t.TempDir(), "--no-progress", src}); err != nil {
+		t.Fatal(err)
+	}
+
+	var pb bytes.Buffer
+	root, err := pack(src, &pb, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != root.String() {
+		t.Fatalf("stdout = %q, want root %q", got, root.String())
+	}
+}
+
+// TestRunIngest_DeterministicAcrossWriters asserts the resolved root is
+// independent of writer-pool size.
+func TestRunIngest_DeterministicAcrossWriters(t *testing.T) {
+	src := t.TempDir()
+	writeDeepTree(t, src)
+
+	roots := make([]string, 0, 2)
+	for _, w := range []string{"1", "8"} {
+		var buf bytes.Buffer
+		app := newApp()
+		app.Writer = &buf
+		args := []string{"amber-store", "ingest", "--store", t.TempDir(), "--no-progress", "--writers", w, src}
+		if err := app.Run(args); err != nil {
+			t.Fatalf("--writers %s: %v", w, err)
+		}
+		roots = append(roots, strings.TrimSpace(buf.String()))
+	}
+	if roots[0] != roots[1] {
+		t.Fatalf("root differs across --writers: %q vs %q", roots[0], roots[1])
 	}
 }
