@@ -67,9 +67,19 @@ the client still builds trees; only the *sink* changes from "tar/store" to
 "`amberpack.Writer` / HTTP stream".
 
 **Socket discovery (clients and daemon agree):** `--socket` flag →
-`AMBER_STORE_SOCKET` env → default `$XDG_RUNTIME_DIR/amber-store.sock`, falling
-back to `/tmp/amber-store.sock` when `XDG_RUNTIME_DIR` is unset. The **store dir
-is known only to the daemon**; clients never name it.
+`AMBER_STORE_SOCKET` env → a platform default, resolved by one shared helper so
+client and daemon always agree:
+
+1. `$XDG_RUNTIME_DIR/amber-store.sock` when `XDG_RUNTIME_DIR` is set and absolute
+   (the per-user `/run/user/<uid>`, mode `0700`, typical on Linux).
+2. Otherwise `filepath.Join(os.TempDir(), "amber-store-<uid>.sock")`.
+
+`XDG_RUNTIME_DIR` is essentially never set on macOS, so case 2 is the macOS path:
+`os.TempDir()` there is the secure per-user `$TMPDIR` (e.g.
+`/var/folders/…/T/`, mode `0700`), which is the idiomatic location for a
+per-user socket. The `-<uid>` suffix keeps the Linux-without-XDG fallback (where
+`os.TempDir()` is the world-writable `/tmp`) from colliding across users. The
+**store dir is known only to the daemon**; clients never name it.
 
 ## The pack-write format
 
@@ -206,6 +216,10 @@ Removed:
 - **Daemon not running / stale socket:** the client surfaces connection-refused
   as a clear "is the daemon running? (`amber-store daemon --store …`)" message.
   The daemon removes a stale socket file on startup and re-binds.
+- **Socket path length:** a unix `sun_path` is capped (~104 bytes on macOS/BSD,
+  ~108 on Linux). The resolved defaults stay well under it; an over-long
+  `--socket`/`AMBER_STORE_SOCKET` override is reported with a clear bind error
+  rather than a cryptic truncation.
 - **Concurrent clients:** `diskstore` is concurrency-safe and the handler is
   stateless per request, so multiple ingests/dumps run in parallel;
   `WriteParallel`'s `seenSet` is per-request.
@@ -239,6 +253,9 @@ Following the repo's style (stdlib `testing`, no testify, parity tests):
 - **Daemon handler** via `httptest`: ingest then dump round-trips a tree
   byte-for-byte; a tampered key in the upload → 422; dedup counts are correct on
   re-ingest.
+- **Socket-path resolver:** flag beats env beats default; `XDG_RUNTIME_DIR` set
+  (and absolute) yields the XDG path; unset/relative falls back to
+  `os.TempDir()/amber-store-<uid>.sock`. Env vars set per-test with `t.Setenv`.
 - **End-to-end over a real unix socket:** `daemon` plus client in one test;
   `ingest DIR` then `restore KEY DIR2`, asserting DIR2 == DIR (mode, mtime,
   symlinks, and xattrs where the test filesystem supports them), reusing
