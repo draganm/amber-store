@@ -47,7 +47,7 @@ func TestIngestObjects_ParityWithPack(t *testing.T) {
 	defer store.Close()
 
 	var root key.Key
-	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 4, &root)
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 4, nil, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestIngestObjects_ParallelParityDeepTree(t *testing.T) {
 
 	var root key.Key
 	jobs := max(runtime.NumCPU(), 4)
-	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, jobs, &root)
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, jobs, nil, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
@@ -267,5 +267,38 @@ func TestRunIngest_RequiresStoreFlag(t *testing.T) {
 	app := newApp()
 	if err := app.Run([]string{"amber-store", "ingest", t.TempDir()}); err == nil {
 		t.Errorf("expected error without --store flag")
+	}
+}
+
+// TestIngestObjects_ReportsProgress checks the instrumented build feeds the
+// Progress tracker: bytesDone equals total regular-file bytes and filesDone
+// equals the file count.
+func TestIngestObjects_ReportsProgress(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644); err != nil { // 5
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bravo!"), 0o644); err != nil { // 6
+		t.Fatal(err)
+	}
+
+	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	p := NewProgress(2, 11)
+	var root key.Key
+	seq := ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 2, p, &root)
+	if err := store.WriteBatch(seq); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	if got := p.bytesDone.Load(); got != 11 {
+		t.Errorf("bytesDone = %d, want 11", got)
+	}
+	if got := p.filesDone.Load(); got != 2 {
+		t.Errorf("filesDone = %d, want 2", got)
 	}
 }

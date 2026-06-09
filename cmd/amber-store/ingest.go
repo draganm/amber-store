@@ -32,7 +32,7 @@ var errIngestStopped = errors.New("ingest: consumer stopped")
 //
 // Once the walk completes successfully the resolved root key is written to
 // *root; a build error is yielded to the consumer instead.
-func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, root *key.Key) iter.Seq2[diskstore.Object, error] {
+func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[diskstore.Object, error] {
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -57,7 +57,7 @@ func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteO
 				}
 			}
 			b := &pbuilder{
-				d:    &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax},
+				d:    &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax, p: p},
 				emit: emit,
 				sem:  make(chan struct{}, jobs),
 			}
@@ -170,7 +170,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	defer store.Close()
 
 	var root key.Key
-	seq := ingestObjects(dir, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax, cfg.jobs, &root)
+	seq := ingestObjects(dir, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax, cfg.jobs, nil, &root)
 	if err := store.WriteBatch(seq); err != nil {
 		return err
 	}
