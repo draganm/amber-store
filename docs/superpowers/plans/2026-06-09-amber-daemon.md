@@ -1144,7 +1144,7 @@ func Extract(r io.Reader, destDir string) error {
 				return err
 			}
 			dirs = append(dirs, h)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := writeRegular(target, tr); err != nil {
 				return err
 			}

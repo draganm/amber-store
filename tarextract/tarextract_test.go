@@ -69,8 +69,12 @@ func TestExtract_RejectsUnsafeName(t *testing.T) {
 	if err := tw.WriteHeader(h); err != nil {
 		t.Fatal(err)
 	}
-	tw.Write([]byte("x"))
-	tw.Close()
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	dest := filepath.Join(t.TempDir(), "out")
 	if err := tarextract.Extract(&buf, dest); err == nil {

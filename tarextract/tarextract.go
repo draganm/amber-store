@@ -47,7 +47,7 @@ func Extract(r io.Reader, destDir string) error {
 				return err
 			}
 			dirs = append(dirs, h)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if err := writeRegular(target, tr); err != nil {
 				return err
 			}
@@ -108,7 +108,6 @@ func Extract(r io.Reader, destDir string) error {
 // It rejects names that contain ".." components (in any position) as well as
 // absolute paths, so that a tar archive cannot write outside of destDir.
 func safeJoin(dest, name string) (string, error) {
-	// Reject names that contain ".." components.
 	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
 		if part == ".." {
 			return "", fmt.Errorf("refusing unsafe entry name %q", name)
