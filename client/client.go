@@ -3,6 +3,7 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -119,6 +120,41 @@ func (c *Client) Ls(ctx context.Context, k key.Key, path string) ([]Entry, error
 		}
 		entries = append(entries, e)
 	}
+}
+
+// ContentKeys returns the hex keys of every object reachable from k — the set
+// that must be fetched to hold the whole content — root first, each key once.
+// A non-empty path names a subdirectory of k (slash-separated) to walk instead
+// of k itself.
+func (c *Client) ContentKeys(ctx context.Context, k key.Key, path string) ([]string, error) {
+	u := baseURL + "/v1/content-keys/" + k.String()
+	if path != "" {
+		u += "?path=" + url.QueryEscape(path)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, c.dialHint(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return nil, fmt.Errorf("content-keys request failed: %s: %s", resp.Status, msg)
+	}
+	var keys []string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if line := sc.Text(); line != "" {
+			keys = append(keys, line)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading content-keys response: %w", err)
+	}
+	return keys, nil
 }
 
 // Tar requests the directory tar for k. A non-empty path names a subdirectory

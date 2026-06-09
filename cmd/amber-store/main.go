@@ -28,6 +28,7 @@ func newApp() *cli.App {
 			dumpCommand(),
 			restoreCommand(),
 			lsCommand(),
+			contentKeysCommand(),
 		},
 	}
 }

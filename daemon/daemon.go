@@ -37,6 +37,7 @@ func New(store *diskstore.Store, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
 	mux.HandleFunc("GET /v1/ls/{key}", h.getLs)
+	mux.HandleFunc("GET /v1/content-keys/{key}", h.getContentKeys)
 	return logRequests(logger, mux)
 }
 
@@ -161,6 +162,64 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 		// the status now. Log and let the truncated archive surface as a tar read
 		// error on the client.
 		h.log.Error("tar export aborted", "key", k, "error", err)
+	}
+}
+
+// getContentKeys lists the keys of every object reachable from {key} — the set
+// a client must fetch to hold the whole content — as plain text, one
+// lowercase-hex key per line, root first, each key once. {key} may be any
+// object type. An optional ?path= query names a subdirectory of {key}
+// (slash-separated) to walk instead of {key} itself.
+func (h *handler) getContentKeys(w http.ResponseWriter, r *http.Request) {
+	k, err := parseHexKey(r.PathValue("key"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	has, err := h.store.Has(k)
+	if err != nil {
+		h.log.Error("content-keys root lookup failed", "key", k, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !has {
+		http.Error(w, "root object not found", http.StatusNotFound)
+		return
+	}
+	if path := r.URL.Query().Get("path"); path != "" {
+		if k.Type() != key.DirLeaf && k.Type() != key.DirNode {
+			http.Error(w, "key is not a directory object", http.StatusBadRequest)
+			return
+		}
+		k, err = fstree.ResolvePath(k, path, h.store.Get)
+		switch {
+		case errors.Is(err, fstree.ErrNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		case errors.Is(err, fstree.ErrNotDir):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case err != nil:
+			h.log.Error("content-keys path resolution failed", "key", k, "path", path, "error", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	// Walk fully before writing so a failure surfaces as a 500, not a truncated
+	// 200 stream.
+	keys, err := fstree.ReachableKeys(k, h.store.Get)
+	if err != nil {
+		h.log.Error("content-keys walk failed", "key", k, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	for _, rk := range keys {
+		if _, err := fmt.Fprintln(w, rk.String()); err != nil {
+			// Bytes are already in flight; log and stop, like getTar.
+			h.log.Error("content-keys stream aborted", "key", k, "error", err)
+			return
+		}
 	}
 }
 

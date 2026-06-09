@@ -537,6 +537,122 @@ func TestGetLs_NonDirectoryKeyIs400(t *testing.T) {
 	}
 }
 
+func TestGetContentKeys_ListsReachableKeys(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	content := mustBlob(t, "alpha")
+	subLeaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("nested"), Mode: 0o100644, Mtime: 1, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// content is referenced both at the root and in the subdirectory; it must be
+	// listed once.
+	root, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("a.txt"), Mode: 0o100644, Mtime: 2, ContentKey: content.Key[:]},
+		{Name: []byte("sub"), Mode: 0o040755, Mtime: 3, ContentKey: subLeaf.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Ingest(context.Background(), packOf(t, content, subLeaf, root)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	got, err := c.ContentKeys(context.Background(), root.Key, "")
+	if err != nil {
+		t.Fatalf("ContentKeys: %v", err)
+	}
+	want := []string{root.Key.String(), content.Key.String(), subLeaf.Key.String()}
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys %v, want %v", len(got), got, want)
+	}
+	wantSet := map[string]bool{}
+	for _, k := range want {
+		wantSet[k] = true
+	}
+	for _, k := range got {
+		if !wantSet[k] {
+			t.Errorf("unexpected key %s", k)
+		}
+	}
+	if got[0] != root.Key.String() {
+		t.Errorf("first key = %s, want the root %s", got[0], root.Key)
+	}
+
+	// With a path the listing is rooted at the subdirectory.
+	got, err = c.ContentKeys(context.Background(), root.Key, "sub")
+	if err != nil {
+		t.Fatalf("ContentKeys(sub): %v", err)
+	}
+	want = []string{subLeaf.Key.String(), content.Key.String()}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("keys = %v, want %v", got, want)
+	}
+
+	// A missing path component is a 404.
+	if _, err := c.ContentKeys(context.Background(), root.Key, "nope"); err == nil ||
+		!strings.Contains(err.Error(), "404") {
+		t.Fatalf("missing path: err = %v, want 404", err)
+	}
+
+	// A path through a regular file is a 400.
+	if _, err := c.ContentKeys(context.Background(), root.Key, "a.txt"); err == nil ||
+		!strings.Contains(err.Error(), "400") {
+		t.Fatalf("file path: err = %v, want 400", err)
+	}
+}
+
+func TestGetContentKeys_FileKeyRoot(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	content := mustBlob(t, "alpha")
+	if _, err := c.Ingest(context.Background(), packOf(t, content)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	// A blob key is a valid root: its content is just itself.
+	got, err := c.ContentKeys(context.Background(), content.Key, "")
+	if err != nil {
+		t.Fatalf("ContentKeys(blob): %v", err)
+	}
+	if len(got) != 1 || got[0] != content.Key.String() {
+		t.Fatalf("keys = %v, want [%s]", got, content.Key)
+	}
+
+	// A path under a non-directory root is a 400.
+	if _, err := c.ContentKeys(context.Background(), content.Key, "sub"); err == nil ||
+		!strings.Contains(err.Error(), "400") {
+		t.Fatalf("path under blob: err = %v, want 400", err)
+	}
+}
+
+func TestGetContentKeys_MissingRootIs404(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store, nil))
+	defer srv.Close()
+
+	xb := mustBlob(t, "x")
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("x"), Mode: 0o100644, ContentKey: xb.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/v1/content-keys/" + leaf.Key.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for an absent root", resp.StatusCode)
+	}
+}
+
 func TestGetLs_PathListsSubdirectory(t *testing.T) {
 	store := openStore(t)
 	c := serveOnSocket(t, store)
