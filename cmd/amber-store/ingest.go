@@ -230,6 +230,9 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	var prog *Progress
 	var pwg sync.WaitGroup
 	ctx, cancel := context.WithCancel(c.Context)
+	// LIFO: cancel() runs first to stop the progress goroutine, then pwg.Wait()
+	// drains it — so every return path (including early errors) tears it down.
+	defer pwg.Wait()
 	defer cancel()
 	if !cfg.noProgress {
 		totalFiles, totalBytes, err := scanTree(dir, cfg.jobs)

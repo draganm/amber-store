@@ -86,6 +86,8 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	defer stop()
 	go func() {
 		<-ctx.Done()
+		// No timeout: let in-flight ingests/tar streams finish so a shutdown never
+		// truncates a client mid-operation.
 		_ = srv.Shutdown(context.Background())
 	}()
 

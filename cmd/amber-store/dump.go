@@ -55,16 +55,18 @@ func runDump(c *cli.Context, cfg *dumpConfig) error {
 	}
 	defer body.Close()
 
-	var out io.Writer = os.Stdout
 	if cfg.output != "" {
 		f, err := os.Create(cfg.output)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		out = f
+		if _, err := io.Copy(f, body); err != nil {
+			f.Close()
+			return err
+		}
+		return f.Close() // surface a flush/close error on the happy path
 	}
-	_, err = io.Copy(out, body)
+	_, err = io.Copy(os.Stdout, body)
 	return err
 }
 

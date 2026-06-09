@@ -16,7 +16,7 @@ type driver struct {
 	ic             chunkers.ItemChunker
 	byteOpts       *chunkers.ByteOpts
 	xattrInlineMax int
-	p              *Progress // nil for pack; set for ingest
+	p              *Progress // nil when progress is disabled (or in tests); set by ingest
 }
 
 // buildDir builds the directory at path and returns its root key, emitting every
