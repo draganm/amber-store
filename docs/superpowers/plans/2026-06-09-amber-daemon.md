@@ -1066,6 +1066,8 @@ func TestExtract_FilesDirsAndDeferredDirMeta(t *testing.T) {
 	if di.ModTime().UnixNano() != mtime.UnixNano() {
 		t.Errorf("dir mtime = %d, want %d", di.ModTime().UnixNano(), mtime.UnixNano())
 	}
+	// Restore writability so t.TempDir()'s RemoveAll can delete the 0o500 dir.
+	_ = os.Chmod(filepath.Join(dest, "ro"), 0o700)
 }
 
 func TestExtract_RejectsUnsafeName(t *testing.T) {
@@ -1199,8 +1201,15 @@ func Extract(r io.Reader, destDir string) error {
 	return nil
 }
 
-// safeJoin joins name under dest, rejecting any name that escapes dest.
+// safeJoin joins name under dest, rejecting any name that escapes dest. A ".."
+// component is rejected outright (filepath.Clean would otherwise silently
+// collapse "../escape" to a path inside dest, hiding the corruption).
 func safeJoin(dest, name string) (string, error) {
+	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
+		if part == ".." {
+			return "", fmt.Errorf("refusing unsafe entry name %q", name)
+		}
+	}
 	clean := filepath.Clean("/" + name)
 	target := filepath.Join(dest, clean)
 	if target != dest && !strings.HasPrefix(target, dest+string(os.PathSeparator)) {
