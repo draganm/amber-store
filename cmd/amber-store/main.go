@@ -65,16 +65,19 @@ func chunkFlags(cc *chunkConfig) []cli.Flag {
 			Name:        "min",
 			Usage:       "ultracdc minimum chunk size in bytes",
 			Destination: &cc.min,
+			Value:       32 << 10,
 		},
 		&cli.IntFlag{
 			Name:        "avg",
 			Usage:       "ultracdc average (normal) chunk size in bytes",
 			Destination: &cc.avg,
+			Value:       128 << 10,
 		},
 		&cli.IntFlag{
 			Name:        "max",
 			Usage:       "ultracdc maximum chunk size in bytes",
 			Destination: &cc.max,
+			Value:       256 << 10,
 		},
 		&cli.IntFlag{
 			Name:        "item-bits",

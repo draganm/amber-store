@@ -213,6 +213,16 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 
 		seen[obj.Key] = struct{}{}
 
+		exists, err := s.Has(obj.Key)
+
+		if err != nil {
+			return fmt.Errorf("exists (%s): %w", obj.Key.String(), err)
+		}
+
+		if exists {
+			continue
+		}
+
 		if len(obj.Data) > s.threshold {
 
 			eg.Go(func() error {

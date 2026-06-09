@@ -159,7 +159,8 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		return err
 	}
 
-	store, err := diskstore.Open(cfg.store,
+	store, err := diskstore.Open(
+		cfg.store,
 		diskstore.WithInlineThreshold(cfg.inlineThreshold),
 		diskstore.WithSync(cfg.sync),
 	)
