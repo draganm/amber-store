@@ -18,8 +18,8 @@ import (
 )
 
 // collectSequential builds the tree at dir with the sequential driver and returns
-// the root plus a map of every emitted object's key to its bytes. This is the
-// reference oracle that pack() used to provide.
+// the root plus a map of every emitted object's key to its bytes. It is the
+// reference oracle the parallel build and the CLI are checked against.
 func collectSequential(t *testing.T, dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int) (key.Key, map[key.Key][]byte) {
 	t.Helper()
 	objs := map[key.Key][]byte{}
