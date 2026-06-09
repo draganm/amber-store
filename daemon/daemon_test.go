@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,8 +87,46 @@ func TestPostObjects_StoresAndReportsStats(t *testing.T) {
 	if stats.ObjectsStored != 2 || stats.ObjectsDeduped != 1 {
 		t.Fatalf("stats = %+v, want stored=2 deduped=1", stats)
 	}
+	if stats.BytesStored != int64(len("alpha")+len("beta")) {
+		t.Fatalf("BytesStored = %d, want %d", stats.BytesStored, len("alpha")+len("beta"))
+	}
 	if got, _ := store.Get(a.Key); string(got) != "alpha" {
 		t.Fatalf("stored blob = %q, want alpha", got)
+	}
+}
+
+func TestPostObjects_MalformedStreamIs422(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
+		bytes.NewReader([]byte("not a valid pack stream")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 for a malformed stream", resp.StatusCode)
+	}
+}
+
+func TestPostObjects_TamperedKeyIs422(t *testing.T) {
+	store := openStore(t)
+	srv := httptest.NewServer(daemon.New(store))
+	defer srv.Close()
+
+	good := mustBlob(t, "honest")
+	bad := good
+	bad.Key[key.Size-1] ^= 0xFF // key no longer matches payload
+
+	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream", packOf(t, bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 for a tampered key", resp.StatusCode)
 	}
 }
 
