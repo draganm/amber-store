@@ -75,8 +75,18 @@ func TestIngestObjects_ParityWithPack(t *testing.T) {
 	}
 }
 
+// cliDefaultByteOpts returns the ultracdc parameters the ingest CLI applies by
+// default (see chunkFlags in main.go: 32K/128K/256K). The CLI never passes nil
+// byteOpts, so a reference pack compared against a CLI ingest must use these
+// explicit sizes — nil would select the library defaults (2K/10K/64K) and large
+// files would chunk differently, diverging the root.
+func cliDefaultByteOpts() *chunkers.ByteOpts {
+	return &chunkers.ByteOpts{MinSize: 32 << 10, NormalSize: 128 << 10, MaxSize: 256 << 10}
+}
+
 // TestRunIngest_StoresRoot drives the CLI ingest command end to end and checks
-// that the resulting store contains the root object pack would produce.
+// that the resulting store contains the root object pack would produce with the
+// CLI's default chunk sizes.
 func TestRunIngest_StoresRoot(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "f"), []byte("data"), 0o644); err != nil {
@@ -89,9 +99,10 @@ func TestRunIngest_StoresRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The root pack would produce must be present in the store.
+	// The root pack would produce (with the CLI's default chunk sizes) must be
+	// present in the store.
 	var buf bytes.Buffer
-	root, err := pack(src, &buf, chunkers.NewItemChunker(7), nil, 256)
+	root, err := pack(src, &buf, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +183,8 @@ func TestIngestObjects_ParallelParityDeepTree(t *testing.T) {
 }
 
 // TestRunIngest_JobsFlag drives the CLI ingest command with an explicit --jobs
-// value and checks the resulting store contains the root pack would produce.
+// value and checks the resulting store contains the root pack would produce with
+// the CLI's default chunk sizes.
 func TestRunIngest_JobsFlag(t *testing.T) {
 	src := t.TempDir()
 	writeDeepTree(t, src)
@@ -184,7 +196,7 @@ func TestRunIngest_JobsFlag(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	root, err := pack(src, &buf, chunkers.NewItemChunker(7), nil, 256)
+	root, err := pack(src, &buf, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
 	if err != nil {
 		t.Fatal(err)
 	}
