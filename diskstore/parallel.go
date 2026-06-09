@@ -5,6 +5,7 @@ import (
 	"iter"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sync/errgroup"
@@ -14,10 +15,18 @@ import (
 // Pebble batch and starts a fresh one.
 const DefaultBatchSize = 16 << 20 // 16 MiB
 
+// WriteStats summarizes one WriteParallel run.
+type WriteStats struct {
+	Stored      int   // objects newly written
+	Deduped     int   // objects skipped (already present, or duplicated in the stream)
+	BytesStored int64 // payload bytes of newly-written objects
+}
+
 // WriteOpts configures WriteParallel.
 type WriteOpts struct {
-	Writers   int // concurrent batch writers; <= 0 means GOMAXPROCS
-	BatchSize int // commit when a batch reaches this many bytes; <= 0 means DefaultBatchSize
+	Writers   int  // concurrent batch writers; <= 0 means GOMAXPROCS
+	BatchSize int  // commit when a batch reaches this many bytes; <= 0 means DefaultBatchSize
+	Verify    bool // recompute and check each new object's key before storing it
 }
 
 // WriteParallel stores every object the iterator yields using multiple
@@ -31,7 +40,7 @@ type WriteOpts struct {
 // from already-committed batches remain alongside harmless orphan blob files.
 // Because the store is content-addressed and idempotent, a re-run converges. If
 // the iterator yields an error, WriteParallel stops and returns it.
-func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) error {
+func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
 	writers := opts.Writers
 	if writers <= 0 {
 		writers = runtime.GOMAXPROCS(0)
@@ -47,6 +56,7 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) erro
 	ch := make(chan Object, writers*2)
 	seen := newSeenSet()
 	eg := &errgroup.Group{}
+	var stored, deduped, bytesStored atomic.Int64
 
 	// Distributor: forward objects from the iterator to the writer pool. It does
 	// no Has/commit work, so it never bottlenecks. A yielded error cancels the
@@ -69,7 +79,7 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) erro
 
 	for range writers {
 		eg.Go(func() error {
-			err := s.runWriter(ctx, ch, seen, batchSize)
+			err := s.runWriter(ctx, ch, seen, batchSize, opts.Verify, &stored, &deduped, &bytesStored)
 			if err != nil {
 				cancel() // stop the distributor and sibling writers
 			}
@@ -77,14 +87,19 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) erro
 		})
 	}
 
-	return eg.Wait()
+	err := eg.Wait()
+	return WriteStats{
+		Stored:      int(stored.Load()),
+		Deduped:     int(deduped.Load()),
+		BytesStored: bytesStored.Load(),
+	}, err
 }
 
 // runWriter consumes objects, accumulating them into a Pebble batch it commits
 // when the batch reaches batchSize bytes and once more when the channel closes.
 // On ctx cancellation it returns without committing (the run is being aborted;
 // partial commits are safe in a content-addressed store).
-func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int) (err error) {
+func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int, verify bool, stored, deduped, bytesStored *atomic.Int64) (err error) {
 	b := s.db.NewBatch()
 	defer func() {
 		if b != nil {
@@ -111,6 +126,7 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 				return commit()
 			}
 			if !seen.addIfAbsent(obj.Key) {
+				deduped.Add(1)
 				continue
 			}
 			has, err := s.Has(obj.Key)
@@ -118,7 +134,13 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 				return err
 			}
 			if has {
+				deduped.Add(1)
 				continue
+			}
+			if verify {
+				if err := verifyObject(obj); err != nil {
+					return err
+				}
 			}
 			if len(obj.Data) > s.threshold {
 				if err := s.writeExternal(obj.Key, obj.Data); err != nil {
@@ -135,6 +157,8 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 					return err
 				}
 			}
+			stored.Add(1)
+			bytesStored.Add(int64(len(obj.Data)))
 			if b.Len() >= batchSize {
 				if err := commit(); err != nil {
 					return err
