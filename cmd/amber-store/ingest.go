@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/diskstore"
@@ -169,12 +170,37 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	}
 	defer store.Close()
 
-	var root key.Key
-	seq := ingestObjects(dir, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax, cfg.jobs, nil, &root)
-	if err := store.WriteBatch(seq); err != nil {
-		return err
+	var prog *Progress
+	var pwg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Pre-scan to size the progress bar (cheap: readdir + lstat only). Skipped
+	// entirely when progress is disabled — there is no bar to size.
+	if !cfg.noProgress {
+		totalFiles, totalBytes, err := scanTree(dir, cfg.jobs)
+		if err != nil {
+			return err
+		}
+		prog = NewProgress(totalFiles, totalBytes)
+		isTTY := isTerminal(os.Stderr)
+		start := time.Now()
+		pwg.Go(func() {
+			prog.Run(ctx, os.Stderr, start, isTTY)
+		})
 	}
 
-	fmt.Fprintf(os.Stderr, "%s\n", root.String())
+	var root key.Key
+	seq := ingestObjects(dir, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax, cfg.jobs, prog, &root)
+	writeErr := store.WriteParallel(seq, diskstore.WriteOpts{Writers: cfg.writers})
+
+	cancel()
+	pwg.Wait()
+
+	if writeErr != nil {
+		return writeErr
+	}
+
+	fmt.Fprintf(c.App.Writer, "%s\n", root.String())
 	return nil
 }

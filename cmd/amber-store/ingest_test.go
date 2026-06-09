@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/chunkers"
@@ -312,5 +313,52 @@ func TestIngestObjects_ReportsProgress(t *testing.T) {
 	}
 	if got := p.filesDone.Load(); got != 2 {
 		t.Errorf("filesDone = %d, want 2", got)
+	}
+}
+
+// TestRunIngest_PrintsRootToStdout asserts the ingest command writes the root
+// key (and only the root key) to the app writer (stdout).
+func TestRunIngest_PrintsRootToStdout(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	app := newApp()
+	app.Writer = &buf
+	if err := app.Run([]string{"amber-store", "ingest", "--store", t.TempDir(), "--no-progress", src}); err != nil {
+		t.Fatal(err)
+	}
+
+	var pb bytes.Buffer
+	root, err := pack(src, &pb, chunkers.NewItemChunker(7), cliDefaultByteOpts(), 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != root.String() {
+		t.Fatalf("stdout = %q, want root %q", got, root.String())
+	}
+}
+
+// TestRunIngest_DeterministicAcrossWriters asserts the resolved root is
+// independent of writer-pool size.
+func TestRunIngest_DeterministicAcrossWriters(t *testing.T) {
+	src := t.TempDir()
+	writeDeepTree(t, src)
+
+	roots := make([]string, 0, 2)
+	for _, w := range []string{"1", "8"} {
+		var buf bytes.Buffer
+		app := newApp()
+		app.Writer = &buf
+		args := []string{"amber-store", "ingest", "--store", t.TempDir(), "--no-progress", "--writers", w, src}
+		if err := app.Run(args); err != nil {
+			t.Fatalf("--writers %s: %v", w, err)
+		}
+		roots = append(roots, strings.TrimSpace(buf.String()))
+	}
+	if roots[0] != roots[1] {
+		t.Fatalf("root differs across --writers: %q vs %q", roots[0], roots[1])
 	}
 }

@@ -127,6 +127,8 @@ type ingestConfig struct {
 	inlineThreshold int
 	sync            bool
 	jobs            int
+	writers         int
+	noProgress      bool
 }
 
 // ingestCommand builds the ingest command, wiring its flags into an ingestConfig.
@@ -158,6 +160,18 @@ func ingestCommand() *cli.Command {
 			Value:       runtime.GOMAXPROCS(0),
 			Usage:       "number of concurrent workers building the tree (default: number of CPUs)",
 			Destination: &cfg.jobs,
+		},
+		&cli.IntFlag{
+			Name:        "writers",
+			Aliases:     []string{"w"},
+			Value:       runtime.GOMAXPROCS(0),
+			Usage:       "number of concurrent batch writers committing to the store (default: number of CPUs)",
+			Destination: &cfg.writers,
+		},
+		&cli.BoolFlag{
+			Name:        "no-progress",
+			Usage:       "disable the progress bar",
+			Destination: &cfg.noProgress,
 		},
 	)
 	return &cli.Command{
