@@ -4,54 +4,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/chunkers"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/socketpath"
 	"github.com/draganm/amber-store/key"
 	"github.com/urfave/cli/v2"
 )
 
-// errIngestStopped aborts the tree walk when the diskstore consumer stops
-// pulling from the object iterator early. It never escapes ingestObjects.
+// errIngestStopped aborts the tree walk when the consumer stops pulling from
+// the object iterator early. It never escapes ingestObjects.
 var errIngestStopped = errors.New("ingest: consumer stopped")
 
 // ingestObjects returns an iterator over every CAS object in the tree rooted at
-// dir, shaped for diskstore.WriteBatch. The tree is built concurrently by up to
-// jobs workers (file reads, content-defined chunking and hashing run in
-// parallel across sibling files and subdirectories); built objects stream to
-// the consumer through a buffered channel, so production and storage overlap.
-// Object order is unspecified — diskstore is a flat content-addressed store and
-// dedups by key — but the resolved tree is identical to the sequential pack
-// walk: per-file chunk order and per-directory entry order are preserved, so
-// every object's key, and the root, are deterministic.
+// dir, yielding fstree.Objects for serialization into a pack-write stream. The
+// tree is built concurrently by up to jobs workers (file reads, content-defined
+// chunking and hashing run in parallel across sibling files and subdirectories);
+// built objects stream to the consumer through a buffered channel, so production
+// and serialization overlap. Object order is unspecified — the store is a flat
+// content-addressed bag and dedups by key — but the resolved tree is identical
+// to the sequential walk: per-file chunk order and per-directory entry order are
+// preserved, so every object's key, and the root, are deterministic.
 //
 // Once the walk completes successfully the resolved root key is written to
 // *root; a build error is yielded to the consumer instead.
-func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[diskstore.Object, error] {
+func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[fstree.Object, error] {
 	if jobs < 1 {
 		jobs = 1
 	}
-	return func(yield func(diskstore.Object, error) bool) {
+	return func(yield func(fstree.Object, error) bool) {
 		// ctx is cancelled only when the consumer stops pulling early (yield
 		// returns false). Build errors propagate through the normal return
 		// path instead, so they are never masked by stop signals.
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ch := make(chan diskstore.Object, jobs*2)
+		ch := make(chan fstree.Object, jobs*2)
 		var buildErr error
 
 		go func() {
 			defer close(ch)
 			emit := func(o fstree.Object) error {
 				select {
-				case ch <- diskstore.Object{Key: o.Key, Data: o.Bytes}:
+				case ch <- o:
 					return nil
 				case <-ctx.Done():
 					return errIngestStopped
@@ -82,7 +86,7 @@ func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteO
 			}
 		}
 		if buildErr != nil {
-			yield(diskstore.Object{}, buildErr)
+			yield(fstree.Object{}, buildErr)
 		}
 	}
 }
@@ -148,6 +152,73 @@ func (b *pbuilder) buildDir(path string, emit fstree.Emit) (key.Key, error) {
 	return db.Finish(emit)
 }
 
+type ingestConfig struct {
+	chunk      chunkConfig
+	socket     string
+	output     string
+	jobs       int
+	noProgress bool
+}
+
+func ingestCommand() *cli.Command {
+	cfg := &ingestConfig{}
+	flags := append(chunkFlags(&cfg.chunk),
+		&cli.StringFlag{
+			Name:        "socket",
+			Usage:       "daemon unix socket (default: $AMBER_STORE_SOCKET or a per-user path)",
+			Destination: &cfg.socket,
+		},
+		&cli.StringFlag{
+			Name:        "output",
+			Aliases:     []string{"o"},
+			Usage:       "write the pack to FILE instead of streaming to the daemon",
+			Destination: &cfg.output,
+		},
+		&cli.IntFlag{
+			Name:        "jobs",
+			Aliases:     []string{"j"},
+			Value:       runtime.GOMAXPROCS(0),
+			Usage:       "concurrent workers building the tree (default: number of CPUs)",
+			Destination: &cfg.jobs,
+		},
+		&cli.BoolFlag{
+			Name:        "no-progress",
+			Usage:       "disable the progress bar",
+			Destination: &cfg.noProgress,
+		},
+	)
+	return &cli.Command{
+		Name:      "ingest",
+		Usage:     "build the content-addressed tree for DIR and store it via the daemon (or write a pack file with --output)",
+		ArgsUsage: "DIR",
+		Flags:     flags,
+		Action:    func(c *cli.Context) error { return runIngest(c, cfg) },
+	}
+}
+
+// writePack builds the tree at dir and serializes every object into dst as a
+// pack-write stream, returning the resolved root key.
+func writePack(dst io.Writer, dir string, cc *chunkConfig, jobs int, p *Progress) (key.Key, error) {
+	byteOpts, err := cc.byteOpts()
+	if err != nil {
+		return key.Key{}, err
+	}
+	pw := amberpack.NewWriter(dst)
+	var root key.Key
+	for o, err := range ingestObjects(dir, cc.itemChunker(), byteOpts, cc.xattrInlineMax, jobs, p, &root) {
+		if err != nil {
+			return key.Key{}, err
+		}
+		if err := pw.Add(o); err != nil {
+			return key.Key{}, err
+		}
+	}
+	if err := pw.Close(); err != nil {
+		return key.Key{}, err
+	}
+	return root, nil
+}
+
 // Handles the 'ingest' command.
 func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	dir, err := dirArg(c, "ingest")
@@ -155,28 +226,11 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		return err
 	}
 
-	byteOpts, err := cfg.chunk.byteOpts()
-	if err != nil {
-		return err
-	}
-
-	store, err := diskstore.Open(
-		cfg.store,
-		diskstore.WithInlineThreshold(cfg.inlineThreshold),
-		diskstore.WithSync(cfg.sync),
-	)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
+	// Progress (client-side) is sized by a cheap pre-scan, unless disabled.
 	var prog *Progress
 	var pwg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
-
-	// Pre-scan to size the progress bar (cheap: readdir + lstat only). Skipped
-	// entirely when progress is disabled — there is no bar to size.
 	if !cfg.noProgress {
 		totalFiles, totalBytes, err := scanTree(dir, cfg.jobs)
 		if err != nil {
@@ -185,22 +239,55 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		prog = NewProgress(totalFiles, totalBytes)
 		isTTY := isTerminal(os.Stderr)
 		start := time.Now()
-		pwg.Go(func() {
-			prog.Run(ctx, os.Stderr, start, isTTY)
-		})
+		pwg.Go(func() { prog.Run(ctx, os.Stderr, start, isTTY) })
 	}
 
 	var root key.Key
-	seq := ingestObjects(dir, cfg.chunk.itemChunker(), byteOpts, cfg.chunk.xattrInlineMax, cfg.jobs, prog, &root)
-	writeErr := store.WriteParallel(seq, diskstore.WriteOpts{Writers: cfg.writers})
+	if cfg.output != "" {
+		// Offline: write the pack to a file; do not contact the daemon.
+		f, err := os.Create(cfg.output)
+		if err != nil {
+			return err
+		}
+		root, err = writePack(f, dir, &cfg.chunk, cfg.jobs, prog)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	} else {
+		// Stream the pack to the daemon: build into a pipe consumed as the request
+		// body, capturing the build's root and error out-of-band.
+		pr, pw := io.Pipe()
+		type result struct {
+			root key.Key
+			err  error
+		}
+		resCh := make(chan result, 1)
+		go func() {
+			r, err := writePack(pw, dir, &cfg.chunk, cfg.jobs, prog)
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+			resCh <- result{r, err}
+		}()
+		_, ingErr := client.New(socketpath.Resolve(cfg.socket)).Ingest(ctx, pr)
+		res := <-resCh
+		if res.err != nil {
+			return res.err
+		}
+		if ingErr != nil {
+			return ingErr
+		}
+		root = res.root
+	}
 
 	cancel()
 	pwg.Wait()
-
-	if writeErr != nil {
-		return writeErr
-	}
-
 	fmt.Fprintf(c.App.Writer, "%s\n", root.String())
 	return nil
 }
