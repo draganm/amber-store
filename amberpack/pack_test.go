@@ -2,6 +2,7 @@ package amberpack
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -114,5 +115,32 @@ func TestReader_NonCanonicalKeyRejected(t *testing.T) {
 	_, err := collect(t, NewReader(&buf))
 	if !errors.Is(err, ErrMalformed) {
 		t.Fatalf("err = %v, want ErrMalformed (bad key)", err)
+	}
+}
+
+func TestReader_BadRecordTag(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteString(magic)
+	buf.WriteByte(0x42) // unknown record tag
+	_, err := collect(t, NewReader(&buf))
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed (bad record tag)", err)
+	}
+}
+
+func TestReader_TruncatedPayload(t *testing.T) {
+	// Claim a 100-byte payload but provide only 5 bytes.
+	var buf bytes.Buffer
+	buf.WriteString(magic)
+	buf.WriteByte(tagObject)
+	o := mkObj(t, []byte("hello"))
+	buf.Write(o.Key[:])
+	var lb [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lb[:], 100)
+	buf.Write(lb[:n])
+	buf.WriteString("short") // only 5 bytes, not 100
+	_, err := collect(t, NewReader(&buf))
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed (truncated payload)", err)
 	}
 }

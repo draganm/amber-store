@@ -39,6 +39,11 @@ const (
 // errors.Is to map to a client error.
 var ErrMalformed = errors.New("amberpack: malformed stream")
 
+// maxPayloadBytes bounds a single object's payload so a corrupt or hostile
+// stream cannot trigger an unbounded allocation. It is far above any real CAS
+// object (chunker MaxSize is on the order of a few hundred KiB).
+const maxPayloadBytes = 256 << 20 // 256 MiB
+
 // Writer serializes fstree.Objects into the pack-write format. It is not safe
 // for concurrent use; a client wanting parallel uploads creates one Writer per
 // stream.
@@ -108,7 +113,8 @@ func NewReader(r io.Reader) *Reader {
 
 // All iterates over the objects in the stream. It yields exactly one error (and
 // stops) on any structural problem; on a clean stream it yields every object and
-// returns after the end marker.
+// returns after the end marker. All must be called at most once per Reader
+// because the underlying stream position is not reset between calls.
 func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 	return func(yield func(fstree.Object, error) bool) {
 		var hdr [len(magic)]byte
@@ -137,12 +143,16 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 				}
 				k, err := key.Parse(kb[:])
 				if err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
+					yield(fstree.Object{}, fmt.Errorf("%w: non-canonical key: %v", ErrMalformed, err))
 					return
 				}
 				n, err := binary.ReadUvarint(r.br)
 				if err != nil {
 					yield(fstree.Object{}, fmt.Errorf("%w: reading length: %v", ErrMalformed, err))
+					return
+				}
+				if n > maxPayloadBytes {
+					yield(fstree.Object{}, fmt.Errorf("%w: payload length %d exceeds limit %d", ErrMalformed, n, maxPayloadBytes))
 					return
 				}
 				payload := make([]byte, n)
