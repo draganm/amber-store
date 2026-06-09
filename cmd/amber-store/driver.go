@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
-	"github.com/draganm/amber-store/castar"
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/cborx"
@@ -14,49 +12,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// pack builds the content-addressed tree for the directory at root, writing
-// every unique chunk to w as a tar and the root object as the final member. It
-// returns the root key. Any I/O or encoding error aborts (fail fast).
-func pack(root string, w io.Writer, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int) (key.Key, error) {
-	sink := castar.NewSink(w)
-	d := &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax}
-
-	var pending *fstree.Object
-	emit := func(o fstree.Object) error {
-		if pending != nil {
-			if err := sink.Put(pending.Key, pending.Bytes); err != nil {
-				return err
-			}
-		}
-		cp := o
-		pending = &cp
-		return nil
-	}
-
-	rootKey, err := d.buildDir(root, emit)
-	if err != nil {
-		return key.Key{}, err
-	}
-	if pending == nil {
-		return key.Key{}, fmt.Errorf("pack: no objects emitted")
-	}
-	if pending.Key != rootKey {
-		return key.Key{}, fmt.Errorf("pack: internal error, last emitted %s != root %s", pending.Key, rootKey)
-	}
-	if err := sink.PutRoot(pending.Key, pending.Bytes); err != nil {
-		return key.Key{}, err
-	}
-	if err := sink.Close(); err != nil {
-		return key.Key{}, err
-	}
-	return rootKey, nil
-}
-
 type driver struct {
 	ic             chunkers.ItemChunker
 	byteOpts       *chunkers.ByteOpts
 	xattrInlineMax int
-	p              *Progress // nil for pack; set for ingest
+	p              *Progress // nil when progress is disabled (or in tests); set by ingest
 }
 
 // buildDir builds the directory at path and returns its root key, emitting every
