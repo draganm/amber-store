@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/draganm/amber-store/fstree"
@@ -64,17 +65,21 @@ func (e *exporter) collectEntries(k key.Key) ([]fstree.Entry, error) {
 	}
 	switch k.Type() {
 	case key.DirLeaf:
-		return fstree.DecodeDirLeaf(data)
+		entries, err := fstree.DecodeDirLeaf(data)
+		if err != nil {
+			return nil, fmt.Errorf("tarexport: decoding DirLeaf %s: %w", k, err)
+		}
+		return entries, nil
 	case key.DirNode:
 		pairs, err := fstree.DecodeDirNode(data)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("tarexport: decoding DirNode %s: %w", k, err)
 		}
 		var out []fstree.Entry
 		for _, p := range pairs {
 			ck, err := key.Parse(p.ChildKey)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("tarexport: child key in DirNode %s: %w", k, err)
 			}
 			sub, err := e.collectEntries(ck)
 			if err != nil {
@@ -89,7 +94,11 @@ func (e *exporter) collectEntries(k key.Key) ([]fstree.Entry, error) {
 }
 
 func (e *exporter) entry(prefix string, ent fstree.Entry) error {
-	name := path.Join(prefix, string(ent.Name))
+	comp := string(ent.Name)
+	if comp == "" || comp == "." || comp == ".." || strings.Contains(comp, "/") {
+		return fmt.Errorf("tarexport: refusing unsafe entry name %q", comp)
+	}
+	name := path.Join(prefix, comp)
 	hdr := &tar.Header{
 		Name:    name,
 		Mode:    int64(ent.Mode & 0o7777),
@@ -198,11 +207,11 @@ func (e *exporter) setXattrs(hdr *tar.Header, ent fstree.Entry) error {
 	case len(ent.XattrsKey) == key.Size:
 		xk, perr := key.Parse(ent.XattrsKey)
 		if perr != nil {
-			return perr
+			return fmt.Errorf("tarexport: xattrs key for %s: %w", hdr.Name, perr)
 		}
 		data, gerr := e.get(xk)
 		if gerr != nil {
-			return gerr
+			return fmt.Errorf("tarexport: reading xattrs %s for %s: %w", xk, hdr.Name, gerr)
 		}
 		m, err = cborx.DecodeXattrs(data)
 	default:
