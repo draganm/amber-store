@@ -40,6 +40,11 @@ type WriteOpts struct {
 // from already-committed batches remain alongside harmless orphan blob files.
 // Because the store is content-addressed and idempotent, a re-run converges. If
 // the iterator yields an error, WriteParallel stops and returns it.
+//
+// If opts.Verify is set, each not-already-present object's key is recomputed
+// from its payload before it is stored; a mismatch stops the run and returns a
+// wrapped ErrVerify. The returned WriteStats reports how many objects were
+// stored, how many were skipped as duplicates, and the payload bytes written.
 func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
 	writers := opts.Writers
 	if writers <= 0 {
