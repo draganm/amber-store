@@ -199,27 +199,42 @@ func TestGetTar_RoundTripAfterSplitUpload(t *testing.T) {
 
 func TestGetTar_MissingRootIs404(t *testing.T) {
 	store := openStore(t)
-	c := serveOnSocket(t, store)
+	srv := httptest.NewServer(daemon.New(store))
+	defer srv.Close()
+
 	// A well-formed directory key that was never stored.
-	xblob := mustBlob(t, "x")
-	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{{Name: []byte("x"), Mode: 0o100644, ContentKey: xblob.Key[:]}})
+	xb := mustBlob(t, "x")
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("x"), Mode: 0o100644, ContentKey: xb.Key[:]},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Tar(context.Background(), leaf.Key)
-	if err == nil {
-		t.Fatalf("expected error fetching an absent root")
+
+	resp, err := http.Get(srv.URL + "/v1/tar/" + leaf.Key.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for an absent root", resp.StatusCode)
 	}
 }
 
 func TestGetTar_NonDirectoryKeyIs400(t *testing.T) {
 	store := openStore(t)
-	c := serveOnSocket(t, store)
+	srv := httptest.NewServer(daemon.New(store))
+	defer srv.Close()
+
+	// A blob key is not a directory object; rejected with 400 before any lookup,
+	// so it need not be stored.
 	blob := mustBlob(t, "data")
-	if _, err := c.Ingest(context.Background(), packOf(t, blob)); err != nil {
+	resp, err := http.Get(srv.URL + "/v1/tar/" + blob.Key.String())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Tar(context.Background(), blob.Key); err == nil {
-		t.Fatalf("expected error fetching a tar for a blob key")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a non-directory key", resp.StatusCode)
 	}
 }
