@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/draganm/amber-store/client"
@@ -20,15 +21,17 @@ func resolveSpec(ctx context.Context, cl *client.Client, s string) (key.Key, str
 	}
 	name, path, _ := strings.Cut(rest, "@")
 	if err := reference.ValidateName(name); err != nil {
-		return key.Key{}, "", err
+		return key.Key{}, "", fmt.Errorf("invalid reference spec %q: %w", s, err)
 	}
 	rec, err := cl.GetRef(ctx, name)
 	if err != nil {
 		return key.Key{}, "", err
 	}
+	// GetRef already validated the record, so this parse cannot fail in
+	// practice; the wrap keeps any future gap attributable to the reference.
 	k, err := key.Parse(rec.Key)
 	if err != nil {
-		return key.Key{}, "", err
+		return key.Key{}, "", fmt.Errorf("reference %q: stored key: %w", name, err)
 	}
 	return k, path, nil
 }
