@@ -35,7 +35,7 @@ stores the field opaquely.
 **Name rules**, validated by `reference.ValidateName`, enforced in the CLI
 (fail fast) and in the daemon (authoritative, `422`):
 
-- 1–255 bytes, valid UTF-8;
+- 1–1024 bytes, valid UTF-8;
 - must not contain `@` (the ref/path separator), `/` (keeps URL routing
   trivial), or control characters (< 0x20, 0x7F).
 
