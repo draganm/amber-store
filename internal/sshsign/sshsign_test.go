@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -251,6 +252,47 @@ func TestSignRejectsSKKeyFileWithHint(t *testing.T) {
 	_, err := sshsign.Sign(p, []byte("p"), noPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), ".pub") || !strings.Contains(err.Error(), "agent") {
 		t.Fatalf("error = %v, want sk- hint mentioning agent and .pub", err)
+	}
+}
+
+// TestSignatureVerifiesWithOpenSSH proves "verify later" works with stock
+// tooling: armor a produced signature and check ssh-keygen -Y verify accepts
+// it against an allowed_signers entry.
+func TestSignatureVerifiesWithOpenSSH(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not on PATH")
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPath, _, pub := writeKeyFiles(t, priv, "")
+	payload := []byte("payload bytes")
+	blob, err := sshsign.Sign(privPath, payload, noPrompt(t))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	sig, err := sshsig.ParseSignature(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	sigPath := filepath.Join(dir, "ref.sig")
+	if err := os.WriteFile(sigPath, sshsig.Armor(sig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	signersPath := filepath.Join(dir, "allowed_signers")
+	line := "tester@amber " + string(ssh.MarshalAuthorizedKey(pub))
+	if err := os.WriteFile(signersPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ssh-keygen", "-Y", "verify",
+		"-f", signersPath, "-I", "tester@amber",
+		"-n", sshsign.Namespace, "-s", sigPath)
+	cmd.Stdin = bytes.NewReader(payload)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -Y verify failed: %v\n%s", err, out)
 	}
 }
 
