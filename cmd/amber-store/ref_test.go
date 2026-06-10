@@ -207,6 +207,56 @@ func TestRefCreateSignsWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestRefVerifySignature(t *testing.T) {
+	keyPath, _ := writeSigningKey(t)
+	configureTestUserWithKey(t, "signer", keyPath)
+	sock := startDaemon(t)
+	root := ingestTestTree(t, sock, "signed")
+
+	var out bytes.Buffer
+	app := newApp()
+	app.Writer = &out
+	if err := app.Run([]string{"amber-store", "ref", "verify-signature", "--socket", sock, "signed"}); err != nil {
+		t.Fatalf("verify-signature: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "good signature") || !strings.Contains(got, "signer") {
+		t.Fatalf("verify-signature output = %q, want good-signature line naming the user", got)
+	}
+
+	// Unsigned references are reported as such.
+	configureTestUser(t, "signer")
+	if err := newApp().Run([]string{"amber-store", "ref", "create", "--socket", sock, "unsigned", root}); err != nil {
+		t.Fatal(err)
+	}
+	err := newApp().Run([]string{"amber-store", "ref", "verify-signature", "--socket", sock, "unsigned"})
+	if err == nil || !strings.Contains(err.Error(), "not signed") {
+		t.Fatalf("verify-signature on unsigned ref = %v, want not-signed error", err)
+	}
+}
+
+func TestRefVerifySignatureDetectsTampering(t *testing.T) {
+	keyPath, _ := writeSigningKey(t)
+	configureTestUserWithKey(t, "signer", keyPath)
+	sock := startDaemon(t)
+	ingestTestTree(t, sock, "signed")
+
+	// Re-store the record with a field changed after signing: the stored
+	// signature no longer matches the payload.
+	rec, err := client.New(sock).GetRef(context.Background(), "signed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.CreatedAt++
+	if err := client.New(sock).PutRef(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	err = newApp().Run([]string{"amber-store", "ref", "verify-signature", "--socket", sock, "signed"})
+	if err == nil || !strings.Contains(err.Error(), "invalid signature") {
+		t.Fatalf("verify-signature on tampered ref = %v, want invalid-signature error", err)
+	}
+}
+
 func TestRefCreateFailsClosedOnBadSigningKey(t *testing.T) {
 	configureTestUser(t, "signer")
 	sock := startDaemon(t)

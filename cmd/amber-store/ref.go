@@ -9,6 +9,7 @@ import (
 
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/internal/userconfig"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
@@ -33,6 +34,7 @@ func refCommand() *cli.Command {
 			refCreateCommand(),
 			refLsCommand(),
 			refShowCommand(),
+			refVerifySignatureCommand(),
 			refRmCommand(),
 		},
 	}
@@ -162,6 +164,43 @@ func refShowCommand() *cli.Command {
 			enc := json.NewEncoder(c.App.Writer)
 			enc.SetIndent("", "  ")
 			return enc.Encode(out)
+		},
+	}
+}
+
+func refVerifySignatureCommand() *cli.Command {
+	var socket string
+	return &cli.Command{
+		Name:      "verify-signature",
+		Usage:     "check a reference's stored signature: a valid SSHSIG over the record by its recorded public key (integrity only, no trust model)",
+		ArgsUsage: "NAME",
+		Flags:     []cli.Flag{socketFlag(&socket)},
+		Action: func(c *cli.Context) error {
+			if c.NArg() != 1 {
+				return fmt.Errorf("ref verify-signature requires exactly one NAME argument, got %d", c.NArg())
+			}
+			name := c.Args().First()
+			rec, err := client.New(socketpath.Resolve(socket)).GetRef(c.Context, name)
+			if err != nil {
+				return err
+			}
+			if len(rec.Signature) == 0 {
+				return fmt.Errorf("reference %q is not signed", name)
+			}
+			if len(rec.PublicKey) == 0 {
+				return fmt.Errorf("reference %q carries no public key", name)
+			}
+			payload, err := rec.SignaturePayload()
+			if err != nil {
+				return err
+			}
+			pub, err := sshsign.Verify(payload, rec.Signature, rec.PublicKey)
+			if err != nil {
+				return fmt.Errorf("reference %q: invalid signature: %w", name, err)
+			}
+			fmt.Fprintf(c.App.Writer, "good signature on %q by %q with %s key %s\n",
+				name, rec.User, pub.Type(), ssh.FingerprintSHA256(pub))
+			return nil
 		},
 	}
 }
