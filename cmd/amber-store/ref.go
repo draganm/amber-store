@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/draganm/amber-store/client"
@@ -12,6 +13,7 @@ import (
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/crypto/ssh"
 )
 
 // socketFlag is the shared --socket flag; dst receives the value.
@@ -113,7 +115,21 @@ type refShowOutput struct {
 	Key       string `json:"key"`
 	User      string `json:"user"`
 	CreatedAt string `json:"created_at"`
-	Signature string `json:"signature,omitempty"` // hex
+	Signature string `json:"signature,omitempty"`  // hex
+	PublicKey string `json:"public_key,omitempty"` // authorized_keys form, hex if unparseable
+}
+
+// formatPublicKey renders a stored SSH wire-format public key in
+// authorized_keys form, falling back to hex for unparseable bytes.
+func formatPublicKey(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	pub, err := ssh.ParsePublicKey(b)
+	if err != nil {
+		return hex.EncodeToString(b)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
 }
 
 func refShowCommand() *cli.Command {
@@ -141,6 +157,7 @@ func refShowCommand() *cli.Command {
 				User:      rec.User,
 				CreatedAt: time.Unix(0, rec.CreatedAt).UTC().Format(time.RFC3339Nano),
 				Signature: hex.EncodeToString(rec.Signature),
+				PublicKey: formatPublicKey(rec.PublicKey),
 			}
 			enc := json.NewEncoder(c.App.Writer)
 			enc.SetIndent("", "  ")

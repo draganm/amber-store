@@ -17,16 +17,19 @@ same convention as fstree objects) with integer keys:
 | 2 | user | text string | creator, from the user config (`amber-store config-user`) |
 | 3 | created_at | int64 | ns since the Unix epoch |
 | 4 | signature | byte string, omitted when absent | raw SSHSIG blob (see below) |
+| 5 | public_key | byte string, omitted when absent | signer's public key, SSH wire format |
 
 The **signature payload** is the deterministic encoding of the record without
-key 4 — the canonical bytes of `{0,1,2,3}`. When the user config carries a
-signing key, clients store an **SSHSIG v1** signature (the `ssh-keygen -Y
-sign` / git SSH-signing format) over this payload in key 4: namespace
-`amber-store-ref`, SHA-512 message hash, raw binary blob (not PEM-armored).
-The key may be a private-key file (passphrase-protected ones prompt on the
-terminal) or a `.pub` resolved through the ssh-agent. Signing failures abort
-the command — a configured key never silently yields an unsigned reference.
-Verification is not yet implemented; the daemon stores the field opaquely.
+key 4 — the canonical bytes of `{0,1,2,3,5}` — so the signature covers the
+signer's public key. When the user config carries a signing key, clients set
+key 5 to the signer's public key (SSH wire format) and store an **SSHSIG v1**
+signature (the `ssh-keygen -Y sign` / git SSH-signing format) over the
+payload in key 4: namespace `amber-store-ref`, SHA-512 message hash, raw
+binary blob (not PEM-armored). The signing key may be a private-key file
+(passphrase-protected ones prompt on the terminal) or a `.pub` resolved
+through the ssh-agent. Signing failures abort the command — a configured key
+never silently yields an unsigned reference. Verification is not yet
+implemented; the daemon stores both fields opaquely.
 
 **Name rules:** 1–1024 bytes of valid UTF-8; no `@` (the ref/path separator)
 and no control characters (< 0x20 or 0x7F). `/` is allowed

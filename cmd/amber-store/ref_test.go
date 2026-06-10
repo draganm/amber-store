@@ -188,6 +188,23 @@ func TestRefCreateSignsWhenConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustVerifyRef(t, rec, pub)
+
+	// ref show prints the public key in authorized_keys form.
+	var showOut bytes.Buffer
+	app := newApp()
+	app.Writer = &showOut
+	if err := app.Run([]string{"amber-store", "ref", "show", "--socket", sock, "signed"}); err != nil {
+		t.Fatalf("ref show: %v", err)
+	}
+	var shown struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(showOut.Bytes(), &shown); err != nil {
+		t.Fatalf("ref show output not JSON: %v\n%s", err, showOut.String())
+	}
+	if want := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))); shown.PublicKey != want {
+		t.Fatalf("ref show public_key = %q, want %q", shown.PublicKey, want)
+	}
 }
 
 func TestRefCreateFailsClosedOnBadSigningKey(t *testing.T) {

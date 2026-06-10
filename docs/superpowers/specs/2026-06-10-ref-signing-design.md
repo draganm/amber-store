@@ -49,8 +49,11 @@ tooling.
   key 4. Sizes are ~300 B (ed25519) to ~1 KiB (RSA), far under the 64 KiB
   field cap. Armoring for external verification is a trivial wrapper and is
   exercised in the interop test.
+- The signer's **public key** is stored alongside in record key 5 (SSH wire
+  format, ≤16 KiB), set from the resolved signer before signing.
 - Signed message: exactly `Reference.SignaturePayload()` — the canonical
-  CBOR bytes of map keys `{0,1,2,3}`.
+  CBOR bytes of map keys `{0,1,2,3,5}`, so the signature covers the public
+  key. (Amended 2026-06-10: originally `{0,1,2,3}` with no stored key.)
 
 Implementation uses **`github.com/hiddeco/sshsig`** (small, MIT, used by
 fluxcd) rather than hand-rolling the format: it brings `Verify` for free
@@ -62,11 +65,14 @@ fluxcd) rather than hand-rolling the format: it brings `Verify` for free
 
 ### `internal/sshsign` (new)
 
-Entry point:
+Entry points (two-phase, so the signer's public key is available before the
+payload — which covers it — is encoded):
 
 ```go
-// Sign signs payload with the key at keyPath and returns a raw SSHSIG blob.
-func Sign(keyPath string, payload []byte) ([]byte, error)
+// Signer resolves the key at keyPath; close releases any agent connection.
+func Signer(keyPath string, prompt PassphrasePrompt) (ssh.Signer, func(), error)
+// SignWith signs payload with signer, returning a raw SSHSIG blob.
+func SignWith(signer ssh.Signer, payload []byte) ([]byte, error)
 ```
 
 Key resolution is by **file content**, not extension:
@@ -126,9 +132,10 @@ unsigned record, byte-identical to today's behavior.
 
 ### Unchanged
 
-Daemon, wire protocol, record encoding, `ref ls` (its `signed` column) and
-`ref show` (signature visible in the JSON dump) all work as-is: key 4 is
-already stored and transported opaquely.
+Daemon, wire protocol and `ref ls` work as-is: keys 4 and 5 are stored and
+transported opaquely (the list wire format's `signed` field reflects key 4;
+the CLI does not print it). `ref show` additionally renders the stored
+public key in authorized_keys form (hex if unparseable).
 
 ## Error handling summary
 
