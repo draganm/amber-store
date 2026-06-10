@@ -166,13 +166,3 @@ func (h *handler) auth(next authedHandler) http.HandlerFunc {
 func (h *handler) getIdentity(w http.ResponseWriter, r *http.Request) {
 	h.signAndWrite(w, nil, http.StatusOK, "application/octet-stream", h.identity.PublicKey().Marshal())
 }
-
-func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
-}
-func (h *handler) getRefs(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
-}
-func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
-}
