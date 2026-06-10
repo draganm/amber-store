@@ -14,11 +14,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/remotes"
+	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/server"
 	"golang.org/x/crypto/ssh"
@@ -40,14 +45,15 @@ func testSignerD(t *testing.T) ssh.Signer {
 // remoteHarness wires a local daemon (with remotes support) and a remote
 // server together.
 type remoteHarness struct {
-	daemonSrv *httptest.Server
-	serverSrv *httptest.Server
-	store     *diskstore.Store // local daemon's store
-	refs      *refstore.Store  // local daemon's refs
-	srvStore  *diskstore.Store // remote server's store
-	srvRefs   *refstore.Store
-	identity  ssh.Signer
-	registry  *remotes.Registry
+	daemonSrv    *httptest.Server
+	serverSrv    *httptest.Server
+	store        *diskstore.Store // local daemon's store
+	refs         *refstore.Store  // local daemon's refs
+	srvStore     *diskstore.Store // remote server's store
+	srvRefs      *refstore.Store
+	identity     ssh.Signer
+	clientSigner ssh.Signer // the SSH signer allowed by the remote server
+	registry     *remotes.Registry
 }
 
 // newRemoteServer starts an in-process remote server allowing clientPub.
@@ -104,7 +110,7 @@ func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh
 	return &remoteHarness{
 		daemonSrv: daemonSrv, serverSrv: serverSrv,
 		store: store, refs: refs, srvStore: srvStore, srvRefs: srvRefs,
-		identity: identity, registry: registry,
+		identity: identity, clientSigner: client, registry: registry,
 	}
 }
 
@@ -160,6 +166,75 @@ func (h *remoteHarness) addRemote(t *testing.T, name string) {
 	if code != 204 {
 		t.Fatalf("add = %d: %s", code, body)
 	}
+}
+
+// newRemoteHarnessWithServer attaches a fresh daemon to an existing harness's
+// server, reusing the same allowed client signer so the new daemon can auth.
+func newRemoteHarnessWithServer(t *testing.T, h *remoteHarness, client ssh.Signer) *remoteHarness {
+	t.Helper()
+	return newDaemonFor(t, h.serverSrv, h.identity, client, h.srvStore, h.srvRefs)
+}
+
+// putLocalRef stores a signed ref in the local daemon's refstore, pointing at
+// root, signed by signer. Returns the canonical record bytes.
+func (h *remoteHarness) putLocalRef(t *testing.T, name string, root key.Key, signer ssh.Signer) []byte {
+	t.Helper()
+	rec := reference.Reference{
+		Name:      name,
+		Key:       root[:],
+		User:      "u@example.com",
+		CreatedAt: time.Now().UnixNano(),
+		PublicKey: signer.PublicKey().Marshal(),
+	}
+	payload, err := rec.SignaturePayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsign.SignWith(signer, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Signature = sig
+	b, err := rec.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.refs.Put(name, b); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// buildTree stores a small two-level tree in store and returns its root:
+// DirLeaf{ file "f" → FileNode → [blob1, blob2] }.
+func buildTree(t *testing.T, store *diskstore.Store) key.Key {
+	t.Helper()
+	b1, err := fstree.EncodeBlob([]byte("blob one payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := fstree.EncodeBlob([]byte("blob two payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, err := fstree.EncodeFileNode([]key.Key{b1.Key, b2.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{{
+		Name:       []byte("f"),
+		Mode:       0o100644,
+		ContentKey: fn.Key[:],
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []fstree.Object{b1, b2, fn, leaf} {
+		if err := store.Put(o.Key, o.Bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return leaf.Key
 }
 
 func TestRemoteAddListRemove(t *testing.T) {
