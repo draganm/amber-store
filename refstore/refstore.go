@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -15,9 +16,13 @@ import (
 var ErrNotFound = errors.New("refstore: reference not found")
 
 // Store is a Pebble-backed name→record map. It is safe for concurrent use.
+// Readers (Get, All) are lock-free; writes (Put, Delete) are serialized via
+// writeMu so that Delete's existence check is linearizable against other
+// writers.
 type Store struct {
 	db        *pebble.DB
 	writeOpts *pebble.WriteOptions
+	writeMu   sync.Mutex
 }
 
 // discardLogger silences pebble's internal logging (same trick as diskstore).
@@ -45,6 +50,8 @@ func Open(dir string, sync bool) (*Store, error) {
 
 // Put stores record under name, overwriting unconditionally.
 func (s *Store) Put(name string, record []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.db.Set([]byte(name), record, s.writeOpts)
 }
 
@@ -64,9 +71,13 @@ func (s *Store) Get(name string) ([]byte, error) {
 	return out, nil
 }
 
-// Delete removes name, or returns ErrNotFound if absent. The daemon is the
-// only writer, so the read-then-delete pair is not racy in practice.
+// Delete removes name, or returns ErrNotFound if absent. The existence check
+// and the delete are serialized against other writes via writeMu, so
+// concurrent Deletes of the same name report ErrNotFound to all but one
+// caller.
 func (s *Store) Delete(name string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if _, err := s.Get(name); err != nil {
 		return err
 	}

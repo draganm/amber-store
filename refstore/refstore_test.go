@@ -3,6 +3,7 @@ package refstore_test
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/draganm/amber-store/refstore"
@@ -100,5 +101,55 @@ func TestSurvivesReopen(t *testing.T) {
 	}
 	if !bytes.Equal(got, []byte("v")) {
 		t.Fatalf("Get after reopen = %q, want v", got)
+	}
+}
+
+func TestAllEmpty(t *testing.T) {
+	s := open(t, t.TempDir())
+	recs, err := s.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("All on empty store = %d records, want 0", len(recs))
+	}
+}
+
+func TestConcurrentDeleteReportsOnce(t *testing.T) {
+	s := open(t, t.TempDir())
+	if err := s.Put("target", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 8
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	// Use a gate so all goroutines start as close together as possible.
+	var gate sync.WaitGroup
+	gate.Add(1)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			gate.Wait()
+			errs[i] = s.Delete("target")
+		}(i)
+	}
+	gate.Done()
+	wg.Wait()
+
+	var nilCount int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			nilCount++
+		case errors.Is(err, refstore.ErrNotFound):
+			// expected for all-but-one
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if nilCount != 1 {
+		t.Errorf("exactly 1 Delete should succeed, got %d", nilCount)
 	}
 }
