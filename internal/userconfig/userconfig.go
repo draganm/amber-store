@@ -1,6 +1,6 @@
 // Package userconfig reads and writes the per-user amber-store configuration:
-// a JSON file holding the user identity recorded in references it creates.
-// The JSON format leaves room for a future signing key.
+// a JSON file holding the user identity recorded in references it creates and
+// the optional reference-signing key.
 package userconfig
 
 import (
@@ -18,6 +18,10 @@ var ErrNotConfigured = errors.New("no user configured — run 'amber-store confi
 // Config is the persisted user configuration.
 type Config struct {
 	User string `json:"user"`
+	// SigningKey is the path to the SSH key used to sign references: a
+	// private-key file, or a .pub whose key the ssh-agent holds. Empty
+	// means references are created unsigned.
+	SigningKey string `json:"signing_key,omitempty"`
 }
 
 // Path returns the config file location: $AMBER_STORE_CONFIG when set,

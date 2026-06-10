@@ -60,3 +60,32 @@ func TestLoadMalformedJSONError(t *testing.T) {
 		t.Fatalf("error %q does not mention the config path %q", err.Error(), p)
 	}
 }
+
+func TestSigningKeyRoundTrip(t *testing.T) {
+	t.Setenv("AMBER_STORE_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if err := userconfig.Save(userconfig.Config{User: "alice", SigningKey: "/home/alice/.ssh/id_ed25519"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := userconfig.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SigningKey != "/home/alice/.ssh/id_ed25519" {
+		t.Fatalf("SigningKey = %q", cfg.SigningKey)
+	}
+}
+
+func TestSigningKeyOmittedWhenEmpty(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("AMBER_STORE_CONFIG", p)
+	if err := userconfig.Save(userconfig.Config{User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "signing_key") {
+		t.Fatalf("empty SigningKey serialized: %s", b)
+	}
+}
