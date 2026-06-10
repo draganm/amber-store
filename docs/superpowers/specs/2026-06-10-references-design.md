@@ -36,8 +36,11 @@ stores the field opaquely.
 (fail fast) and in the daemon (authoritative, `422`):
 
 - 1–1024 bytes, valid UTF-8;
-- must not contain `@` (the ref/path separator), `/` (keeps URL routing
-  trivial), or control characters (< 0x20, 0x7F).
+- must not contain `@` (the ref/path separator) or control characters
+  (< 0x20, 0x7F).
+
+`/` is allowed, enabling hierarchical names (`backups/2026/06`); it has no
+structural meaning — names are opaque strings, compared whole.
 
 Everything else is allowed. Names are global to a store; there is exactly one
 record per name.
@@ -60,18 +63,19 @@ the daemon.
 
 ## Wire protocol
 
-Four routes join the existing `/v1` handler. The name travels as a URL path
-segment (legal because `/` is banned in names); since other reserved URL
-characters (space, `?`, `#`, `%`, …) are allowed in names, the client
-percent-escapes the segment (`url.PathEscape`) and the daemon reads the
-decoded value from the route pattern.
+Four routes join the existing `/v1` handler. The name travels as a `?name=`
+query parameter, not a path segment: names may contain `/`, and
+`http.ServeMux` path-cleaning would mangle names with `..`, `.`, or empty
+segments. Standard query escaping handles every allowed character; this also
+matches the existing `?path=` convention. A `GET`/`PUT`/`DELETE` to `/v1/refs`
+without a `name` parameter is the list operation (`GET`) or `422` (others).
 
 | Route | Body / response | Errors |
 | --- | --- | --- |
-| `PUT /v1/refs/{name}` | CBOR record in → `204` | undecodable record, record name ≠ URL name, invalid name, non-canonical key → `422`; pointed-to key absent from store → `404` |
-| `GET /v1/refs/{name}` | CBOR record out, `application/cbor` | absent → `404` |
+| `PUT /v1/refs?name=N` | CBOR record in → `204` | missing `name`, undecodable record, record name ≠ query name, invalid name, non-canonical key → `422`; pointed-to key absent from store → `404` |
+| `GET /v1/refs?name=N` | CBOR record out, `application/cbor` | absent → `404` |
 | `GET /v1/refs` | NDJSON, one ref per line: `name`, `key` (hex), `user`, `created_at` (RFC 3339), `signed` (bool); name order | — |
-| `DELETE /v1/refs/{name}` | `204` | absent → `404` |
+| `DELETE /v1/refs?name=N` | `204` | missing `name` → `422`; absent → `404` |
 
 `PUT` validation order: decode → name rules → name match → key canonical →
 `store.Has(key)`. **No dangling references**: the pointed-to key must already
@@ -135,11 +139,13 @@ Follows existing patterns (table-driven; `daemon_test.go`-style handler tests;
 
 - **`reference`**: encode/decode round-trip; determinism (two encodes are
   byte-identical); `SignaturePayload` excludes the signature field and matches
-  the encoding of an unsigned record; name-validation table (valid, empty,
-  too long, `@`, `/`, control chars, non-UTF-8).
+  the encoding of an unsigned record; name-validation table (valid incl. `/`,
+  `..` segments, empty, too long, `@`, control chars, non-UTF-8).
 - **`daemon`**: PUT/GET/DELETE happy paths; overwrite replaces the record;
-  `404` on missing ref and on dangling key; `422` on bad name, mismatched URL
-  name, bad CBOR, non-canonical key; NDJSON listing in name order; refs
+  names with `/`, `..`, and empty segments round-trip through the query
+  parameter; `404` on missing ref and on dangling key; `422` on bad name,
+  missing `name` parameter, mismatched query name, bad CBOR, non-canonical
+  key; NDJSON listing in name order; refs
   survive a daemon restart (close and reopen the Pebble DB).
 - **CLI e2e**: `config-user` then `ingest NAME DIR` creates the ref and the
   resolved key equals the printed root; ingest without config refuses;
