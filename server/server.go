@@ -167,16 +167,6 @@ func (h *handler) getIdentity(w http.ResponseWriter, r *http.Request) {
 	h.signAndWrite(w, nil, http.StatusOK, "application/octet-stream", h.identity.PublicKey().Marshal())
 }
 
-// Stubs replaced in later tasks.
-func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signAndWrite(w, a.nonce, http.StatusOK, "application/octet-stream", nil)
-}
-func (h *handler) postObjects(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
-}
-func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
-}
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
 }
