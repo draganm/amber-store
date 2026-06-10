@@ -86,6 +86,9 @@ func TestAddValidates(t *testing.T) {
 			t.Fatalf("Add(%q, %+v) succeeded, want error", tc.name, tc.rem)
 		}
 	}
+	if err := r.Add("", remotes.Remote{URL: "http://x", ServerKey: []byte("k")}); !errors.Is(err, remotes.ErrInvalid) {
+		t.Fatalf("validation error = %v, want ErrInvalid", err)
+	}
 }
 
 func TestAllSorted(t *testing.T) {

@@ -20,6 +20,9 @@ var ErrExists = errors.New("remote already exists")
 // ErrNotFound reports an operation on an unregistered name.
 var ErrNotFound = errors.New("remote not found")
 
+// ErrInvalid reports a remote that fails validation (bad name, URL or key).
+var ErrInvalid = errors.New("invalid remote")
+
 // Remote is one registered remote server.
 type Remote struct {
 	URL       string `json:"url"`
@@ -58,19 +61,19 @@ func Open(path string) (*Registry, error) {
 // validate checks a remote name and its fields before persisting.
 func validate(name string, rem Remote) error {
 	if name == "" || len(name) > 64 {
-		return errors.New("remote name must be 1-64 bytes")
+		return fmt.Errorf("%w: name must be 1-64 bytes", ErrInvalid)
 	}
 	for _, c := range name {
 		if c == '/' || c < 0x21 || c == 0x7f {
-			return fmt.Errorf("remote name %q contains an invalid character", name)
+			return fmt.Errorf("%w: name %q contains an invalid character", ErrInvalid, name)
 		}
 	}
 	u, err := url.Parse(rem.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("remote URL %q must be http(s)://host[:port][/path]", rem.URL)
+		return fmt.Errorf("%w: URL %q must be http(s)://host[:port][/path]", ErrInvalid, rem.URL)
 	}
 	if len(rem.ServerKey) == 0 {
-		return errors.New("remote has no pinned server key")
+		return fmt.Errorf("%w: no pinned server key", ErrInvalid)
 	}
 	return nil
 }
