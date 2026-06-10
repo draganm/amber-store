@@ -25,37 +25,39 @@ const Namespace = "amber-store-ref"
 // PassphrasePrompt obtains the passphrase for the encrypted key at path.
 type PassphrasePrompt func(path string) ([]byte, error)
 
-// Sign signs payload with the key at keyPath and returns a raw (un-armored)
-// SSHSIG blob. A public-key file selects the matching ssh-agent key; a
-// private-key file is parsed directly, calling prompt at most once if it is
-// encrypted.
-func Sign(keyPath string, payload []byte, prompt PassphrasePrompt) ([]byte, error) {
+// Signer resolves the signing key at keyPath into an ssh.Signer, exposing the
+// signer's public key before anything is signed. A public-key file selects
+// the matching ssh-agent key; a private-key file is parsed directly, calling
+// prompt at most once if it is encrypted. The returned close func releases
+// the agent connection backing agent signers (a no-op for file keys) and must
+// be called once signing is done.
+func Signer(keyPath string, prompt PassphrasePrompt) (ssh.Signer, func(), error) {
 	b, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("reading signing key: %w", err)
+		return nil, nil, fmt.Errorf("reading signing key: %w", err)
 	}
 	if pub, _, _, _, perr := ssh.ParseAuthorizedKey(b); perr == nil {
-		return signWithAgent(pub, payload)
+		return agentSigner(pub)
 	}
 	if err := skKeyError(keyPath, b); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	signer, err := ssh.ParsePrivateKey(b)
 	if err != nil {
 		var miss *ssh.PassphraseMissingError
 		if !errors.As(err, &miss) {
-			return nil, fmt.Errorf("parsing signing key %s: %w", keyPath, err)
+			return nil, nil, fmt.Errorf("parsing signing key %s: %w", keyPath, err)
 		}
 		pass, perr := prompt(keyPath)
 		if perr != nil {
-			return nil, fmt.Errorf("reading passphrase for %s: %w", keyPath, perr)
+			return nil, nil, fmt.Errorf("reading passphrase for %s: %w", keyPath, perr)
 		}
 		signer, err = ssh.ParsePrivateKeyWithPassphrase(b, pass)
 		if err != nil {
-			return nil, fmt.Errorf("decrypting signing key %s: %w", keyPath, err)
+			return nil, nil, fmt.Errorf("decrypting signing key %s: %w", keyPath, err)
 		}
 	}
-	return rawSign(signer, payload)
+	return signer, func() {}, nil
 }
 
 // TTYPrompt reads a passphrase from the controlling terminal without echo.
@@ -71,8 +73,9 @@ func TTYPrompt(path string) ([]byte, error) {
 	return term.ReadPassword(int(tty.Fd()))
 }
 
-// rawSign wraps a one-shot SSHSIG signing, returning the binary blob.
-func rawSign(signer ssh.Signer, payload []byte) ([]byte, error) {
+// SignWith signs payload with signer, returning a raw (un-armored) SSHSIG
+// blob in the amber-store namespace.
+func SignWith(signer ssh.Signer, payload []byte) ([]byte, error) {
 	sig, err := sshsig.Sign(bytes.NewReader(payload), signer, sshsig.HashSHA512, Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("signing: %w", err)
@@ -139,26 +142,28 @@ func CheckKeyFile(path string) error {
 	return nil
 }
 
-// signWithAgent signs with the agent key matching pub.
-func signWithAgent(pub ssh.PublicKey, payload []byte) ([]byte, error) {
+// agentSigner returns the agent signer matching pub; the close func releases
+// the agent connection the signer is backed by.
+func agentSigner(pub ssh.PublicKey) (ssh.Signer, func(), error) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
-		return nil, errors.New("signing key is a public key, but no ssh-agent is available ($SSH_AUTH_SOCK is not set)")
+		return nil, nil, errors.New("signing key is a public key, but no ssh-agent is available ($SSH_AUTH_SOCK is not set)")
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to ssh-agent: %w", err)
+		return nil, nil, fmt.Errorf("connecting to ssh-agent: %w", err)
 	}
-	defer conn.Close()
 	signers, err := agent.NewClient(conn).Signers()
 	if err != nil {
-		return nil, fmt.Errorf("listing ssh-agent keys: %w", err)
+		conn.Close()
+		return nil, nil, fmt.Errorf("listing ssh-agent keys: %w", err)
 	}
 	want := pub.Marshal()
 	for _, s := range signers {
 		if bytes.Equal(s.PublicKey().Marshal(), want) {
-			return rawSign(s, payload)
+			return s, func() { conn.Close() }, nil
 		}
 	}
-	return nil, fmt.Errorf("signing key %s is not loaded in the ssh-agent", ssh.FingerprintSHA256(pub))
+	conn.Close()
+	return nil, nil, fmt.Errorf("signing key %s is not loaded in the ssh-agent", ssh.FingerprintSHA256(pub))
 }

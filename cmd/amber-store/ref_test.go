@@ -157,6 +157,9 @@ func mustVerifyRef(t *testing.T, rec reference.Reference, pub ssh.PublicKey) {
 	if len(rec.Signature) == 0 {
 		t.Fatal("reference has no signature")
 	}
+	if !bytes.Equal(rec.PublicKey, pub.Marshal()) {
+		t.Fatal("reference public key differs from the signing key")
+	}
 	payload, err := rec.SignaturePayload()
 	if err != nil {
 		t.Fatal(err)

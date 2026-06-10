@@ -8,7 +8,6 @@ import (
 
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/internal/socketpath"
-	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/internal/userconfig"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
@@ -69,17 +68,11 @@ func refCreateCommand() *cli.Command {
 				CreatedAt: time.Now().UnixNano(),
 			}
 			if ucfg.SigningKey != "" {
-				payload, err := rec.SignaturePayload()
-				if err != nil {
-					return fmt.Errorf("encoding reference for signing: %w", err)
-				}
 				// Fail closed: a configured key never silently yields an
 				// unsigned reference.
-				sig, err := sshsign.Sign(ucfg.SigningKey, payload, sshsign.TTYPrompt)
-				if err != nil {
+				if err := signReference(&rec, ucfg.SigningKey); err != nil {
 					return fmt.Errorf("signing reference %q: %w", name, err)
 				}
-				rec.Signature = sig
 			}
 			return client.New(socketpath.Resolve(socket)).PutRef(c.Context, rec)
 		},

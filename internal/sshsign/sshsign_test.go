@@ -59,6 +59,22 @@ func writeKeyFiles(t *testing.T, priv crypto.PrivateKey, passphrase string) (pri
 	return privPath, pubPath, pub
 }
 
+// mustSign resolves the key at keyPath, signs payload, and returns the blob
+// together with the resolved signer's public key.
+func mustSign(t *testing.T, keyPath string, payload []byte, prompt sshsign.PassphrasePrompt) ([]byte, ssh.PublicKey) {
+	t.Helper()
+	signer, closeSigner, err := sshsign.Signer(keyPath, prompt)
+	if err != nil {
+		t.Fatalf("Signer: %v", err)
+	}
+	defer closeSigner()
+	blob, err := sshsign.SignWith(signer, payload)
+	if err != nil {
+		t.Fatalf("SignWith: %v", err)
+	}
+	return blob, signer.PublicKey()
+}
+
 // mustVerify checks blob is a valid SSHSIG over payload by pub in our namespace.
 func mustVerify(t *testing.T, blob, payload []byte, pub ssh.PublicKey) {
 	t.Helper()
@@ -78,9 +94,9 @@ func TestSignWithEd25519File(t *testing.T) {
 	}
 	privPath, _, pub := writeKeyFiles(t, priv, "")
 	payload := []byte("payload bytes")
-	blob, err := sshsign.Sign(privPath, payload, noPrompt(t))
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
+	blob, got := mustSign(t, privPath, payload, noPrompt(t))
+	if !bytes.Equal(got.Marshal(), pub.Marshal()) {
+		t.Fatal("resolved signer public key differs from the key file's")
 	}
 	mustVerify(t, blob, payload, pub)
 }
@@ -92,15 +108,15 @@ func TestSignWithRSAFile(t *testing.T) {
 	}
 	privPath, _, pub := writeKeyFiles(t, priv, "")
 	payload := []byte("payload bytes")
-	blob, err := sshsign.Sign(privPath, payload, noPrompt(t))
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
+	blob, got := mustSign(t, privPath, payload, noPrompt(t))
+	if !bytes.Equal(got.Marshal(), pub.Marshal()) {
+		t.Fatal("resolved signer public key differs from the key file's")
 	}
 	mustVerify(t, blob, payload, pub)
 }
 
 func TestSignMissingKeyFile(t *testing.T) {
-	_, err := sshsign.Sign(filepath.Join(t.TempDir(), "absent"), []byte("p"), noPrompt(t))
+	_, _, err := sshsign.Signer(filepath.Join(t.TempDir(), "absent"), noPrompt(t))
 	if err == nil {
 		t.Fatal("expected error for missing key file")
 	}
@@ -114,16 +130,13 @@ func TestSignWithEncryptedKey(t *testing.T) {
 	privPath, _, pub := writeKeyFiles(t, priv, "letmein")
 	payload := []byte("payload bytes")
 	calls := 0
-	blob, err := sshsign.Sign(privPath, payload, func(path string) ([]byte, error) {
+	blob, _ := mustSign(t, privPath, payload, func(path string) ([]byte, error) {
 		calls++
 		if path != privPath {
 			t.Fatalf("prompt path = %q, want %q", path, privPath)
 		}
 		return []byte("letmein"), nil
 	})
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
 	if calls != 1 {
 		t.Fatalf("prompt called %d times, want 1", calls)
 	}
@@ -136,7 +149,7 @@ func TestSignWithWrongPassphrase(t *testing.T) {
 		t.Fatal(err)
 	}
 	privPath, _, _ := writeKeyFiles(t, priv, "letmein")
-	_, err = sshsign.Sign(privPath, []byte("p"), func(string) ([]byte, error) {
+	_, _, err = sshsign.Signer(privPath, func(string) ([]byte, error) {
 		return []byte("wrong"), nil
 	})
 	if err == nil {
@@ -187,9 +200,9 @@ func TestSignWithAgentKey(t *testing.T) {
 	_, pubPath, pub := writeKeyFiles(t, priv, "")
 	startTestAgent(t, priv)
 	payload := []byte("payload bytes")
-	blob, err := sshsign.Sign(pubPath, payload, noPrompt(t))
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
+	blob, got := mustSign(t, pubPath, payload, noPrompt(t))
+	if !bytes.Equal(got.Marshal(), pub.Marshal()) {
+		t.Fatal("resolved agent public key differs from the .pub file's")
 	}
 	mustVerify(t, blob, payload, pub)
 }
@@ -205,7 +218,7 @@ func TestSignAgentKeyNotLoaded(t *testing.T) {
 	}
 	_, pubPath, pub := writeKeyFiles(t, priv, "")
 	startTestAgent(t, otherPriv) // agent holds a different key
-	_, err = sshsign.Sign(pubPath, []byte("p"), noPrompt(t))
+	_, _, err = sshsign.Signer(pubPath, noPrompt(t))
 	if err == nil {
 		t.Fatal("expected error when key absent from agent")
 	}
@@ -221,7 +234,7 @@ func TestSignAgentUnavailable(t *testing.T) {
 	}
 	_, pubPath, _ := writeKeyFiles(t, priv, "")
 	t.Setenv("SSH_AUTH_SOCK", "")
-	_, err = sshsign.Sign(pubPath, []byte("p"), noPrompt(t))
+	_, _, err = sshsign.Signer(pubPath, noPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), "SSH_AUTH_SOCK") {
 		t.Fatalf("error = %v, want mention of SSH_AUTH_SOCK", err)
 	}
@@ -249,7 +262,7 @@ func TestSignRejectsSKKeyFileWithHint(t *testing.T) {
 	if err := os.WriteFile(p, fakeSKKeyPEM(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := sshsign.Sign(p, []byte("p"), noPrompt(t))
+	_, _, err := sshsign.Signer(p, noPrompt(t))
 	if err == nil || !strings.Contains(err.Error(), ".pub") || !strings.Contains(err.Error(), "agent") {
 		t.Fatalf("error = %v, want sk- hint mentioning agent and .pub", err)
 	}
@@ -268,10 +281,7 @@ func TestSignatureVerifiesWithOpenSSH(t *testing.T) {
 	}
 	privPath, _, pub := writeKeyFiles(t, priv, "")
 	payload := []byte("payload bytes")
-	blob, err := sshsign.Sign(privPath, payload, noPrompt(t))
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
+	blob, _ := mustSign(t, privPath, payload, noPrompt(t))
 	sig, err := sshsig.ParseSignature(blob)
 	if err != nil {
 		t.Fatal(err)

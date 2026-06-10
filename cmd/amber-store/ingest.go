@@ -18,7 +18,6 @@ import (
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/socketpath"
-	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/internal/userconfig"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
@@ -347,18 +346,12 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			CreatedAt: time.Now().UnixNano(),
 		}
 		if signingKey != "" {
-			payload, err := rec.SignaturePayload()
-			if err != nil {
-				return fmt.Errorf("encoding reference %q for signing: %w", refName, err)
-			}
 			// Fail closed, but the tree is already stored — reuse the
 			// existing recovery-hint style so the work is not lost.
-			sig, err := sshsign.Sign(signingKey, payload, sshsign.TTYPrompt)
-			if err != nil {
+			if err := signReference(&rec, signingKey); err != nil {
 				return fmt.Errorf("tree stored (root %s) but signing reference %q failed: %w\nretry with: amber-store ref create %s %s",
 					root, refName, err, shellQuote(refName), root)
 			}
-			rec.Signature = sig
 		}
 		if err := cl.PutRef(c.Context, rec); err != nil {
 			return fmt.Errorf("tree stored (root %s) but creating reference %q failed: %w\nretry with: amber-store ref create %s %s",
