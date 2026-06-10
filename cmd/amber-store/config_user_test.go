@@ -1,15 +1,11 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/draganm/amber-store/internal/userconfig"
-	"golang.org/x/crypto/ssh"
 )
 
 func TestConfigUserCommand(t *testing.T) {
@@ -50,18 +46,7 @@ func TestConfigUserRejectsControlChar(t *testing.T) {
 // writeTestPrivateKey writes an unencrypted ed25519 OpenSSH key, returns path.
 func writeTestPrivateKey(t *testing.T) string {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(p, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	p, _ := writeSigningKey(t)
 	return p
 }
 
