@@ -17,6 +17,12 @@ import (
 // MaxNameLen is the maximum reference name length in bytes.
 const MaxNameLen = 1024
 
+// MaxUserLen is the maximum User field length in bytes.
+const MaxUserLen = 1024
+
+// MaxSignatureLen is the maximum Signature field length in bytes (64 KiB).
+const MaxSignatureLen = 64 << 10
+
 // encMode is the shared deterministic encoder, mirroring fstree.encMode.
 var encMode cbor.EncMode
 
@@ -65,13 +71,20 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// validate checks the whole record: name rules plus a canonical key.
+// validate checks the whole record: name rules plus a canonical key, and
+// bounds on the User and Signature fields.
 func (r Reference) validate() error {
 	if err := ValidateName(r.Name); err != nil {
 		return err
 	}
 	if _, err := key.Parse(r.Key); err != nil {
 		return fmt.Errorf("reference key: %w", err)
+	}
+	if len(r.User) > MaxUserLen {
+		return fmt.Errorf("reference user exceeds %d bytes", MaxUserLen)
+	}
+	if len(r.Signature) > MaxSignatureLen {
+		return fmt.Errorf("reference signature exceeds %d bytes", MaxSignatureLen)
 	}
 	return nil
 }

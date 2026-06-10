@@ -148,6 +148,34 @@ func TestDecodeRejectsExtraMapKey(t *testing.T) {
 	}
 }
 
+func TestEncodeRejectsTooLongUserAndSignature(t *testing.T) {
+	k := testKey(t)
+
+	// User exactly at the limit is accepted.
+	okUser := strings.Repeat("u", reference.MaxUserLen)
+	if _, err := (reference.Reference{Name: "n", Key: k, User: okUser}).Encode(); err != nil {
+		t.Fatalf("user at MaxUserLen should be accepted: %v", err)
+	}
+
+	// User one byte over the limit is rejected.
+	longUser := strings.Repeat("u", reference.MaxUserLen+1)
+	if _, err := (reference.Reference{Name: "n", Key: k, User: longUser}).Encode(); err == nil {
+		t.Fatal("expected error for user exceeding MaxUserLen")
+	}
+
+	// Signature exactly at the limit is accepted.
+	okSig := make([]byte, reference.MaxSignatureLen)
+	if _, err := (reference.Reference{Name: "n", Key: k, Signature: okSig}).Encode(); err != nil {
+		t.Fatalf("signature at MaxSignatureLen should be accepted: %v", err)
+	}
+
+	// Signature one byte over the limit is rejected.
+	longSig := make([]byte, reference.MaxSignatureLen+1)
+	if _, err := (reference.Reference{Name: "n", Key: k, Signature: longSig}).Encode(); err == nil {
+		t.Fatal("expected error for signature exceeding MaxSignatureLen")
+	}
+}
+
 func TestDecodeRejectsNonCanonicalEncoding(t *testing.T) {
 	// Golden bytes with the last two bytes (18 2a = uint 42) replaced by
 	// 19 00 2a (two-byte encoding of 42) — valid CBOR but not minimal.

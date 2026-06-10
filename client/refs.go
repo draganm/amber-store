@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -68,11 +67,15 @@ func (c *Client) GetRef(ctx context.Context, name string) (reference.Reference, 
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		return reference.Reference{}, fmt.Errorf("get-ref failed: %s: %s", resp.Status, msg)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return reference.Reference{}, fmt.Errorf("reading get-ref response: %w", err)
 	}
-	return reference.Decode(body)
+	ref, err := reference.Decode(body)
+	if err != nil {
+		return reference.Reference{}, fmt.Errorf("get-ref: %w", err)
+	}
+	return ref, nil
 }
 
 // RefInfo mirrors one NDJSON line of the daemon's GET /v1/refs listing.
@@ -100,23 +103,16 @@ func (c *Client) ListRefs(ctx context.Context) ([]RefInfo, error) {
 		return nil, fmt.Errorf("list-refs failed: %s: %s", resp.Status, msg)
 	}
 	var infos []RefInfo
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64<<10), 64<<10)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	dec := json.NewDecoder(resp.Body)
+	for {
 		var info RefInfo
-		if err := json.Unmarshal(line, &info); err != nil {
+		if err := dec.Decode(&info); err == io.EOF {
+			return infos, nil
+		} else if err != nil {
 			return nil, fmt.Errorf("decoding list-refs response: %w", err)
 		}
 		infos = append(infos, info)
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading list-refs response: %w", err)
-	}
-	return infos, nil
 }
 
 // DeleteRef removes the reference stored under name.
