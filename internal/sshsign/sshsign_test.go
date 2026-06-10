@@ -344,6 +344,32 @@ func TestVerify(t *testing.T) {
 	}
 }
 
+func TestSignNamespaceRoundTrip(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("payload bytes")
+	blob, err := sshsign.SignNamespace(signer, payload, "amber-store-http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubWire := signer.PublicKey().Marshal()
+	if _, err := sshsign.VerifyNamespace(payload, blob, pubWire, "amber-store-http"); err != nil {
+		t.Fatalf("verify in same namespace: %v", err)
+	}
+	if _, err := sshsign.VerifyNamespace(payload, blob, pubWire, "amber-store-ref"); err == nil {
+		t.Fatal("verify in a different namespace succeeded, want error")
+	}
+	if _, err := sshsign.VerifyNamespace([]byte("other"), blob, pubWire, "amber-store-http"); err == nil {
+		t.Fatal("verify of different payload succeeded, want error")
+	}
+}
+
 func TestCheckKeyFile(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
