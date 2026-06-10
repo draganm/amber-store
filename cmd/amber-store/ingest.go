@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,6 +222,12 @@ func writePack(dst io.Writer, dir string, cc *chunkConfig, jobs int, p *Progress
 	return root, nil
 }
 
+// shellQuote renders s as a single POSIX-shell word, so a copy-pasteable
+// command hint stays correct for names containing spaces, '$', or backticks.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Handles the 'ingest' command.
 func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	var refName, dir, user string
@@ -240,7 +247,10 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			return err
 		}
 		if err := checkDir(dir); err != nil {
-			return err
+			// Make the failing argument's role explicit: path-like strings are
+			// valid reference names, so a swapped `ingest DIR NAME` otherwise
+			// fails with a bare stat error on the name.
+			return fmt.Errorf("DIR argument: %w", err)
 		}
 		ucfg, err := userconfig.Load()
 		if err != nil {
@@ -329,8 +339,8 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			CreatedAt: time.Now().UnixNano(),
 		}
 		if err := cl.PutRef(c.Context, rec); err != nil {
-			return fmt.Errorf("tree stored (root %s) but creating reference %q failed: %w\nretry with: amber-store ref create %q %s",
-				root, refName, err, refName, root)
+			return fmt.Errorf("tree stored (root %s) but creating reference %q failed: %w\nretry with: amber-store ref create %s %s",
+				root, refName, err, shellQuote(refName), root)
 		}
 	}
 
