@@ -29,6 +29,7 @@ func newApp() *cli.App {
 			restoreCommand(),
 			lsCommand(),
 			contentKeysCommand(),
+			configUserCommand(),
 		},
 	}
 }
