@@ -11,6 +11,7 @@ import (
 
 	"github.com/hiddeco/sshsig"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 // Namespace is the SSHSIG namespace for amber-store reference signatures;
@@ -45,6 +46,19 @@ func Sign(keyPath string, payload []byte, prompt PassphrasePrompt) ([]byte, erro
 		}
 	}
 	return rawSign(signer, payload)
+}
+
+// TTYPrompt reads a passphrase from the controlling terminal without echo.
+// It is the PassphrasePrompt used outside tests.
+func TTYPrompt(path string) ([]byte, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("opening terminal to prompt for passphrase (key %s): %w", path, err)
+	}
+	defer tty.Close()
+	fmt.Fprintf(tty, "Enter passphrase for %s: ", path)
+	defer fmt.Fprintln(tty)
+	return term.ReadPassword(int(tty.Fd()))
 }
 
 // rawSign wraps a one-shot SSHSIG signing, returning the binary blob.

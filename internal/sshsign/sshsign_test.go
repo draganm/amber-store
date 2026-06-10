@@ -101,3 +101,41 @@ func TestSignMissingKeyFile(t *testing.T) {
 		t.Fatal("expected error for missing key file")
 	}
 }
+
+func TestSignWithEncryptedKey(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPath, _, pub := writeKeyFiles(t, priv, "letmein")
+	payload := []byte("payload bytes")
+	calls := 0
+	blob, err := sshsign.Sign(privPath, payload, func(path string) ([]byte, error) {
+		calls++
+		if path != privPath {
+			t.Fatalf("prompt path = %q, want %q", path, privPath)
+		}
+		return []byte("letmein"), nil
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("prompt called %d times, want 1", calls)
+	}
+	mustVerify(t, blob, payload, pub)
+}
+
+func TestSignWithWrongPassphrase(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPath, _, _ := writeKeyFiles(t, priv, "letmein")
+	_, err = sshsign.Sign(privPath, []byte("p"), func(string) ([]byte, error) {
+		return []byte("wrong"), nil
+	})
+	if err == nil {
+		t.Fatal("expected error for wrong passphrase")
+	}
+}
