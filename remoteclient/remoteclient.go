@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/internal/httpsig"
-	"github.com/draganm/amber-store/internal/keylist"
-	"github.com/draganm/amber-store/key"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -124,15 +122,6 @@ func (c *Client) do(ctx context.Context, method, pathQuery, contentType string, 
 		return resp.StatusCode, respBody, &StatusError{Code: resp.StatusCode, Msg: string(respBody)}
 	}
 	return resp.StatusCode, respBody, nil
-}
-
-// Missing returns the subset of keys the server does not have.
-func (c *Client) Missing(ctx context.Context, keys []key.Key) ([]key.Key, error) {
-	_, body, err := c.do(ctx, http.MethodPost, "/v1/objects/missing", "application/octet-stream", keylist.Flatten(keys))
-	if err != nil {
-		return nil, err
-	}
-	return keylist.Parse(body)
 }
 
 // FetchIdentity fetches the server's public key (SSH wire format) from the
