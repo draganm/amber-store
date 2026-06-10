@@ -15,6 +15,7 @@ import (
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/refstore"
 )
 
 // startDaemon brings up the daemon HTTP handler directly on a fresh unix socket
@@ -30,6 +31,12 @@ func startDaemon(t *testing.T) string {
 	}
 	t.Cleanup(func() { store.Close() })
 
+	refs, err := refstore.Open(filepath.Join(t.TempDir(), "refs"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { refs.Close() })
+
 	// Keep the socket path short: a unix sun_path is capped at ~104 bytes on
 	// macOS/BSD, and t.TempDir() embeds the (long) test name and can overflow it.
 	sockDir, err := os.MkdirTemp("", "amber-sock-*")
@@ -43,7 +50,7 @@ func startDaemon(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.New(store, nil)}
+	srv := &http.Server{Handler: daemon.New(store, refs, nil)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return sock

@@ -16,11 +16,13 @@ import (
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/tarexport"
 )
 
 type handler struct {
 	store *diskstore.Store
+	refs  *refstore.Store
 	log   *slog.Logger
 }
 
@@ -28,16 +30,19 @@ type handler struct {
 // logger (method, path, status, duration), as are per-operation outcomes:
 // rejected uploads at Warn, store failures at Error, completed ingests at Info.
 // A nil logger discards all logging.
-func New(store *diskstore.Store, logger *slog.Logger) http.Handler {
+func New(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	h := &handler{store: store, log: logger}
+	h := &handler{store: store, refs: refs, log: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
 	mux.HandleFunc("GET /v1/ls/{key}", h.getLs)
 	mux.HandleFunc("GET /v1/content-keys/{key}", h.getContentKeys)
+	mux.HandleFunc("PUT /v1/refs", h.putRef)
+	mux.HandleFunc("GET /v1/refs", h.getRefs)
+	mux.HandleFunc("DELETE /v1/refs", h.deleteRef)
 	return logRequests(logger, mux)
 }
 

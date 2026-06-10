@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/refstore"
 	"github.com/urfave/cli/v2"
 )
 
@@ -108,6 +110,12 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	}
 	defer store.Close()
 
+	refs, err := refstore.Open(filepath.Join(cfg.store, "refs"), cfg.sync)
+	if err != nil {
+		return err
+	}
+	defer refs.Close()
+
 	sock := socketpath.Resolve(cfg.socket)
 	// Remove a stale socket from a previous run before binding.
 	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
@@ -120,7 +128,7 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	defer os.Remove(sock)
 
 	srv := &http.Server{
-		Handler: daemon.New(store, logger),
+		Handler: daemon.New(store, refs, logger),
 		// Route the http.Server's own diagnostics (handler panics, accept
 		// errors) through the structured logger.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
