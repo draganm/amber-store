@@ -117,8 +117,12 @@ func TestRefs_PutOverwrites(t *testing.T) {
 	srv, kb := refsServer(t)
 	first := reference.Reference{Name: "n", Key: kb, User: "alice", CreatedAt: 1}
 	second := reference.Reference{Name: "n", Key: kb, User: "bob", CreatedAt: 2}
-	doReq(t, http.MethodPut, refURL(srv.URL, "n"), encodeRef(t, first))
-	doReq(t, http.MethodPut, refURL(srv.URL, "n"), encodeRef(t, second))
+	if resp := doReq(t, http.MethodPut, refURL(srv.URL, "n"), encodeRef(t, first)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("setup PUT first: status = %d, want 204", resp.StatusCode)
+	}
+	if resp := doReq(t, http.MethodPut, refURL(srv.URL, "n"), encodeRef(t, second)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("setup PUT second: status = %d, want 204", resp.StatusCode)
+	}
 
 	resp := doReq(t, http.MethodGet, refURL(srv.URL, "n"), nil)
 	body, _ := io.ReadAll(resp.Body)
@@ -147,6 +151,7 @@ func TestRefs_PutErrors(t *testing.T) {
 		{"bad cbor", refURL(srv.URL, "n"), []byte("garbage"), 422},
 		{"name mismatch", refURL(srv.URL, "other"), encodeRef(t, reference.Reference{Name: "n", Key: kb}), 422},
 		{"dangling key", refURL(srv.URL, "n"), encodeRef(t, reference.Reference{Name: "n", Key: missingKey}), 404},
+		{"body over cap", refURL(srv.URL, "n"), bytes.Repeat([]byte{0xff}, (1<<20)+1), 422},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,13 +166,23 @@ func TestRefs_PutErrors(t *testing.T) {
 	if resp.StatusCode != 422 {
 		t.Fatalf("DELETE without name status = %d, want 422", resp.StatusCode)
 	}
+
+	invalidNameURL := refURL(srv.URL, "a@b")
+	if resp := doReq(t, http.MethodGet, invalidNameURL, nil); resp.StatusCode != 422 {
+		t.Fatalf("GET invalid name status = %d, want 422", resp.StatusCode)
+	}
+	if resp := doReq(t, http.MethodDelete, invalidNameURL, nil); resp.StatusCode != 422 {
+		t.Fatalf("DELETE invalid name status = %d, want 422", resp.StatusCode)
+	}
 }
 
 func TestRefs_ListNDJSON(t *testing.T) {
 	srv, kb := refsServer(t)
 	for _, n := range []string{"zeta", "alpha"} {
 		rec := reference.Reference{Name: n, Key: kb, User: "u", CreatedAt: 1700000000000000000, Signature: []byte{1}}
-		doReq(t, http.MethodPut, refURL(srv.URL, n), encodeRef(t, rec))
+		if resp := doReq(t, http.MethodPut, refURL(srv.URL, n), encodeRef(t, rec)); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("setup PUT %q: status = %d, want 204", n, resp.StatusCode)
+		}
 	}
 	resp := doReq(t, http.MethodGet, srv.URL+"/v1/refs", nil)
 	if resp.StatusCode != http.StatusOK {

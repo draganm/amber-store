@@ -137,18 +137,29 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	// Shut down gracefully on context cancellation (tests) or SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// shutdownDone is closed after srv.Shutdown returns, meaning all in-flight
+	// requests have finished and it is safe to close stores.
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutting down")
 		// No timeout: let in-flight ingests/tar streams finish so a shutdown never
 		// truncates a client mid-operation.
 		_ = srv.Shutdown(context.Background())
+		close(shutdownDone)
 	}()
 
 	logger.Info("daemon listening", "socket", sock, "store", cfg.store)
 	err = srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
+		// Serve returned because Shutdown closed the listener.  Wait until
+		// Shutdown has drained all in-flight requests before the deferred
+		// store/refs Close calls run.
+		<-shutdownDone
 		return nil
 	}
+	// Real listener error — shutdown was never triggered, so shutdownDone will
+	// never be closed; return immediately without waiting.
 	return err
 }
