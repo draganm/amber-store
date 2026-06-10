@@ -6,9 +6,11 @@ require (
 	github.com/PlakarKorp/go-cdc-chunkers v1.0.3
 	github.com/cockroachdb/pebble/v2 v2.1.6
 	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/hiddeco/sshsig v0.2.0
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/zeebo/blake3 v0.2.4
-	golang.org/x/sync v0.7.0
+	golang.org/x/crypto v0.53.0
+	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.46.0
 )
 
@@ -45,6 +47,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
