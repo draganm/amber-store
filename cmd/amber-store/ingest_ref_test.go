@@ -73,3 +73,16 @@ func TestIngestOfflineTakesNoName(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestIngestSignsReferenceWhenConfigured(t *testing.T) {
+	keyPath, pub := writeSigningKey(t)
+	configureTestUserWithKey(t, "ingester", keyPath)
+	sock := startDaemon(t)
+	ingestTestTree(t, sock, "signed/backup")
+
+	rec, err := client.New(sock).GetRef(context.Background(), "signed/backup")
+	if err != nil {
+		t.Fatalf("GetRef: %v", err)
+	}
+	mustVerifyRef(t, rec, pub)
+}
