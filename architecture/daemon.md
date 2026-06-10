@@ -15,9 +15,10 @@ clients:
   the handler is transport-agnostic, so a TCP listener can be added later
   without touching the routes.
 - Every **other command** (`ingest`, `load`, `dump`, `restore`, `ls`,
-  `content-keys`, `ref`, `config-user`) is a client: it connects to the
-  socket, performs one operation, and exits. Clients never open the store
-  directory.
+  `content-keys`, `ref`) is a client: it connects to the socket, performs one
+  operation, and exits. Clients never open the store directory.
+  (`config-user` is the one exception — it only writes the local user config,
+  contacting nothing.)
 
 Single-process store ownership is the point: there is no cross-process locking
 protocol, no reader seeing a half-written object, and crash-durability policy

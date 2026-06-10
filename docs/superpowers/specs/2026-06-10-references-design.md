@@ -84,7 +84,7 @@ keys already present). Store failures are `500`, consistent with existing
 routes.
 
 **Resolution is client-side.** A command given `ref:NAME@PATH` does one
-`GET /v1/refs/{name}`, extracts the key, and calls the existing key routes
+`GET /v1/refs?name=`, extracts the key, and calls the existing key routes
 unchanged. None of the four existing routes change. The resolve-then-read pair
 is not atomic; an overwrite between the two reads a complete, valid tree under
 the old key, which is acceptable.
@@ -107,7 +107,7 @@ missing. Read commands and `ref ls`/`show`/`rm` do not need it.
 | Command | Behaviour |
 | --- | --- |
 | `amber-store config-user NAME` | Write the user config. |
-| `amber-store ingest NAME DIR` | Daemon mode now **requires** a reference name. Check config (before walking anything), stream the pack exactly as today, then `PUT /v1/refs/{NAME}` with the root key, configured user, current time. Root key still printed. |
+| `amber-store ingest NAME DIR` | Daemon mode now **requires** a reference name. Check config (before walking anything), stream the pack exactly as today, then `PUT /v1/refs?name=NAME` with the root key, configured user, current time. Root key still printed. |
 | `amber-store ingest -o FILE DIR` | Unchanged: no name, no reference (no daemon involved). Name the tree later with `ref create` after `load`. |
 | `amber-store ref create NAME KEY` | Point NAME at an existing key (create or overwrite). Needs the user config. |
 | `amber-store ref ls` | One line per ref: name, key, user, date. |
