@@ -87,7 +87,10 @@ func refLsCommand() *cli.Command {
 				return err
 			}
 			for _, info := range infos {
-				if _, err := fmt.Fprintf(c.App.Writer, "%s %s %s %s\n",
+				// Tab-separated: names and users may contain spaces, but control
+				// characters (incl. tab) are rejected by validation, so tabs are
+				// unambiguous column separators.
+				if _, err := fmt.Fprintf(c.App.Writer, "%s\t%s\t%s\t%s\n",
 					info.Name, info.Key, info.User, info.CreatedAt); err != nil {
 					return err
 				}
