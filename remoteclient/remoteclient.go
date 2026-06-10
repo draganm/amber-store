@@ -1,0 +1,168 @@
+// Package remoteclient is the signed HTTP client the local daemon uses to
+// talk to a remote amber-store server: every request is signed with the
+// daemon's SSH identity (internal/httpsig) and every response must verify
+// against the pinned server key recorded at `remote add` — a mismatch aborts
+// the operation.
+package remoteclient
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/draganm/amber-store/internal/httpsig"
+	"github.com/draganm/amber-store/internal/keylist"
+	"github.com/draganm/amber-store/key"
+	"golang.org/x/crypto/ssh"
+)
+
+// maxResponse bounds a buffered (non-streaming) response body.
+const maxResponse = 256 << 20 // 256 MiB
+
+// StatusError is a non-2xx server response: the HTTP status plus the
+// server's (signed) message body.
+type StatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("server responded %d: %s", e.Code, strings.TrimSpace(e.Msg))
+}
+
+// Client talks to one remote server with one client identity and one pinned
+// server key. Safe for concurrent use.
+type Client struct {
+	hc            *http.Client
+	base          string
+	signer        ssh.Signer
+	serverPubWire []byte
+}
+
+// New validates the base URL (http or https) and returns a Client. The
+// pinned server key is the SSH wire-format public key confirmed at
+// `remote add`.
+func New(baseURL string, signer ssh.Signer, serverPubWire []byte) (*Client, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("remote URL: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("remote URL %q must be http(s)://host[:port][/path]", baseURL)
+	}
+	if len(serverPubWire) == 0 {
+		return nil, fmt.Errorf("no pinned server key for %s", baseURL)
+	}
+	return &Client{
+		hc:            &http.Client{},
+		base:          strings.TrimRight(baseURL, "/"),
+		signer:        signer,
+		serverPubWire: serverPubWire,
+	}, nil
+}
+
+func newNonce() ([]byte, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return nil, fmt.Errorf("generating nonce: %w", err)
+	}
+	return b, nil
+}
+
+// signedRequest builds and signs a request; the returned nonce is what the
+// response signature must cover.
+func (c *Client) signedRequest(ctx context.Context, method, pathQuery, contentType string, body []byte) (*http.Request, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+pathQuery, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce, err := newNonce()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := httpsig.SignRequest(req, c.signer, time.Now().UnixNano(), nonce, body); err != nil {
+		return nil, nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return req, nonce, nil
+}
+
+// do sends one signed request with fully-buffered request and response
+// bodies, verifies the response signature against the pinned key, and maps
+// non-2xx statuses to StatusError.
+func (c *Client) do(ctx context.Context, method, pathQuery, contentType string, body []byte) (int, []byte, error) {
+	req, nonce, err := c.signedRequest(ctx, method, pathQuery, contentType, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("contacting remote %s: %w", c.base, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading response: %w", err)
+	}
+	sig := resp.Header.Get(httpsig.HeaderSignature)
+	if sig == "" {
+		sig = resp.Trailer.Get(httpsig.HeaderSignature)
+	}
+	if err := httpsig.VerifyResponse(c.serverPubWire, nonce, resp.StatusCode,
+		httpsig.HashBody(respBody), sig); err != nil {
+		return 0, nil, fmt.Errorf("server identity mismatch for %s: %w", c.base, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return resp.StatusCode, respBody, &StatusError{Code: resp.StatusCode, Msg: string(respBody)}
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// Missing returns the subset of keys the server does not have.
+func (c *Client) Missing(ctx context.Context, keys []key.Key) ([]key.Key, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/v1/objects/missing", "application/octet-stream", keylist.Flatten(keys))
+	if err != nil {
+		return nil, err
+	}
+	return keylist.Parse(body)
+}
+
+// FetchIdentity fetches the server's public key (SSH wire format) from the
+// unauthenticated identity endpoint. The response is self-signed — the
+// returned key verifies its own signature — so trust must come from the user
+// confirming the fingerprint.
+func FetchIdentity(ctx context.Context, baseURL string) ([]byte, error) {
+	base := strings.TrimRight(baseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/identity", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("contacting remote %s: %w", base, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading identity: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &StatusError{Code: resp.StatusCode, Msg: string(body)}
+	}
+	if _, err := ssh.ParsePublicKey(body); err != nil {
+		return nil, fmt.Errorf("server identity is not a valid SSH public key: %w", err)
+	}
+	if err := httpsig.VerifyResponse(body, nil, resp.StatusCode, httpsig.HashBody(body),
+		resp.Header.Get(httpsig.HeaderSignature)); err != nil {
+		return nil, fmt.Errorf("server identity self-signature: %w", err)
+	}
+	return body, nil
+}
