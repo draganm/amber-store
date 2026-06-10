@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +14,11 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/client"
+	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/internal/userconfig"
+	"github.com/draganm/amber-store/reference"
+	"github.com/hiddeco/sshsig"
+	"golang.org/x/crypto/ssh"
 )
 
 // configureTestUser points AMBER_STORE_CONFIG at a fresh file and writes a
@@ -103,5 +111,93 @@ func TestRefCreateNeedsUserConfig(t *testing.T) {
 	err := newApp().Run([]string{"amber-store", "ref", "create", "--socket", sock, "n", strings.Repeat("0", 64)})
 	if err == nil || !strings.Contains(err.Error(), "config-user") {
 		t.Fatalf("ref create without config = %v, want config-user hint", err)
+	}
+}
+
+// writeSigningKey writes an unencrypted ed25519 OpenSSH private key and
+// returns its path and SSH public key.
+func writeSigningKey(t *testing.T) (string, ssh.PublicKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "signing-key")
+	if err := os.WriteFile(p, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, sshPub
+}
+
+// configureTestUserWithKey is configureTestUser plus a signing key path.
+func configureTestUserWithKey(t *testing.T, user, keyPath string) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("AMBER_STORE_CONFIG", p)
+	b, err := json.Marshal(userconfig.Config{User: user, SigningKey: keyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mustVerifyRef checks rec carries a valid SSHSIG by pub over its payload.
+func mustVerifyRef(t *testing.T, rec reference.Reference, pub ssh.PublicKey) {
+	t.Helper()
+	if len(rec.Signature) == 0 {
+		t.Fatal("reference has no signature")
+	}
+	payload, err := rec.SignaturePayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsig.ParseSignature(rec.Signature)
+	if err != nil {
+		t.Fatalf("parsing stored signature: %v", err)
+	}
+	if err := sshsig.Verify(bytes.NewReader(payload), sig, pub, sshsig.HashSHA512, sshsign.Namespace); err != nil {
+		t.Fatalf("verifying stored signature: %v", err)
+	}
+}
+
+func TestRefCreateSignsWhenConfigured(t *testing.T) {
+	configureTestUser(t, "signer")
+	sock := startDaemon(t)
+	root := ingestTestTree(t, sock, "src")
+
+	keyPath, pub := writeSigningKey(t)
+	configureTestUserWithKey(t, "signer", keyPath)
+	if err := newApp().Run([]string{"amber-store", "ref", "create", "--socket", sock, "signed", root}); err != nil {
+		t.Fatalf("ref create: %v", err)
+	}
+	rec, err := client.New(sock).GetRef(context.Background(), "signed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustVerifyRef(t, rec, pub)
+}
+
+func TestRefCreateFailsClosedOnBadSigningKey(t *testing.T) {
+	configureTestUser(t, "signer")
+	sock := startDaemon(t)
+	root := ingestTestTree(t, sock, "src")
+
+	configureTestUserWithKey(t, "signer", filepath.Join(t.TempDir(), "absent-key"))
+	err := newApp().Run([]string{"amber-store", "ref", "create", "--socket", sock, "signed", root})
+	if err == nil {
+		t.Fatal("expected ref create to fail when the configured signing key is unusable")
+	}
+	if _, gerr := client.New(sock).GetRef(context.Background(), "signed"); gerr == nil {
+		t.Fatal("reference was created despite signing failure")
 	}
 }
