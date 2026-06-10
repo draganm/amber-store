@@ -332,8 +332,14 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		}
 		root = res.root
 
-		// Create the reference. Use c.Context, not the progress ctx, which is
-		// cancelled right after this branch.
+		// Tear down progress before signing: interactive prompts (passphrase
+		// entry or hardware-key touch) must not be repainted over by the
+		// progress goroutine's \r\033[K frames. Re-cancelling and waiting on an
+		// already-done group at the end of the function is a no-op.
+		cancel()
+		pwg.Wait()
+
+		// Create the reference. Use c.Context (not the now-cancelled progress ctx).
 		rec := reference.Reference{
 			Name:      refName,
 			Key:       root[:],
