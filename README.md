@@ -65,6 +65,7 @@ store:
 | [`architecture/types.md`](architecture/types.md) | The type model: object types, filesystem entry types, length-field semantics. |
 | [`architecture/fstree.md`](architecture/fstree.md) | On-the-wire CBOR layout of every type, the chunkers, tree construction, and read paths. |
 | [`architecture/daemon.md`](architecture/daemon.md) | The daemon/CLI split: who builds trees, who stores objects, the unix-socket protocol, and the pack-write format. |
+| [`architecture/references.md`](architecture/references.md) | Named pointers to keys: record layout, name rules, storage, routes. |
 
 ## Usage
 
@@ -80,17 +81,20 @@ Ingest a directory — the tree is built (walked, chunked, hashed) client-side
 and streamed to the daemon; the root key (hex) is printed to stdout:
 
 ```sh
-amber-store ingest ./some/dir
+amber-store config-user alice              # once — who creates references
+amber-store ingest backups/home ./some/dir # ingest + name the root
 ```
 
-Inspect and export by key, optionally addressing a subdirectory with
-`KEY/PATH`:
+Inspect and export by key or reference, optionally addressing a subdirectory with
+`KEY/PATH` or `ref:NAME[@PATH]`:
 
 ```sh
 amber-store ls KEY[/PATH]                # list entries, ls -l style (--keys adds content keys)
 amber-store content-keys KEY[/PATH]      # every key needed to fetch the whole content
 amber-store dump KEY[/PATH] -o tree.tar  # PAX tar of the tree (default: stdout)
 amber-store restore KEY[/PATH] ./dest    # recreate the tree on disk
+amber-store ref ls                       # list references
+amber-store ls ref:backups/home@sub/dir  # ref:NAME[@PATH] works wherever KEY[/PATH] does
 ```
 
 For offline operation, `ingest` can write the pack-write stream to a file

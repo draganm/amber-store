@@ -15,8 +15,9 @@ clients:
   the handler is transport-agnostic, so a TCP listener can be added later
   without touching the routes.
 - Every **other command** (`ingest`, `load`, `dump`, `restore`, `ls`,
-  `content-keys`) is a client: it connects to the socket, performs one
-  operation, and exits. Clients never open the store directory.
+  `content-keys`, `ref`, `config-user`) is a client: it connects to the
+  socket, performs one operation, and exits. Clients never open the store
+  directory.
 
 Single-process store ownership is the point: there is no cross-process locking
 protocol, no reader seeing a half-written object, and crash-durability policy
@@ -41,16 +42,17 @@ the store), persists them, and serves the read-side traversals — directory
 listing, path resolution, tar export, and reachable-key walks — which need
 many small random-access `get`s and therefore belong next to the store.
 
-| Command        | Client-side work                                  | Daemon-side work                          |
-|----------------|---------------------------------------------------|-------------------------------------------|
-| `daemon`       | —                                                  | owns the diskstore, serves all routes     |
-| `ingest DIR`   | walk, chunk, hash, encode; stream a pack; print root key | verify + store each object          |
-| `ingest -o F`  | same, but write the pack to a file — no daemon needed | —                                     |
-| `load F`       | stream an existing pack file                       | verify + store each object                |
-| `dump KEY[/P]` | write the tar to stdout/file                       | resolve path, traverse tree, emit PAX tar |
-| `restore KEY[/P] DIR` | extract the tar into DIR (perms, mtimes, xattrs) | resolve path, traverse tree, emit PAX tar |
-| `ls KEY[/P]`   | render `ls -l` style output                        | resolve path, collect entries, emit NDJSON |
-| `content-keys KEY[/P]` | print one key per line                     | resolve path, walk every reachable object |
+| Command                 | Client-side work                                                | Daemon-side work                           |
+|-------------------------|-----------------------------------------------------------------|--------------------------------------------|
+| `daemon`                | —                                                               | owns the diskstore, serves all routes      |
+| `ingest NAME DIR`       | walk, chunk, hash, encode; stream pack; PUT ref; print root key | verify + store each object                 |
+| `ingest -o F`           | same, but write the pack to a file — no daemon needed           | —                                          |
+| `load F`                | stream an existing pack file                                    | verify + store each object                 |
+| `dump KEY[/P]`          | write the tar to stdout/file                                    | resolve path, traverse tree, emit PAX tar  |
+| `restore KEY[/P] DIR`   | extract the tar into DIR (perms, mtimes, xattrs)                | resolve path, traverse tree, emit PAX tar  |
+| `ls KEY[/P]`            | render `ls -l` style output                                     | resolve path, collect entries, emit NDJSON |
+| `content-keys KEY[/P]`  | print one key per line                                          | resolve path, walk every reachable object  |
+| `ref create/ls/show/rm` | render output                                                   | reference CRUD against the refs DB         |
 
 Note `dump` and `restore` share one daemon route: restore is "dump + extract",
 with the tar as the interchange format. The PAX format carries everything the
@@ -87,6 +89,10 @@ needs object fetches).
 | `GET /v1/tar/{key}?path=`          | PAX tar of the directory tree                     |
 | `GET /v1/ls/{key}?path=`           | NDJSON, one directory entry per line, name order  |
 | `GET /v1/content-keys/{key}?path=` | text, one hex key per line, root first, deduped   |
+| `PUT /v1/refs?name=`               | CBOR reference record in → 204                    |
+| `GET /v1/refs?name=`               | CBOR reference record out                         |
+| `GET /v1/refs`                     | NDJSON, one reference per line, name order        |
+| `DELETE /v1/refs?name=`            | 204                                               |
 
 Status mapping: malformed pack streams and hash-verification failures are
 `422`; a key that is not the right object type, a `..` or through-a-file path,
@@ -115,8 +121,9 @@ objects** with no root key — like a git pack. This buys:
   later pack supplies them.
 
 The stream carries no root key by design: the *store* tracks objects, not
-trees. The root key is the client's output (printed by `ingest`), and naming
-or persisting roots is the caller's concern.
+trees. The root key is the client's output (printed by `ingest`); naming roots
+is handled by [references](references.md), which daemon-mode `ingest` creates
+after the upload completes.
 
 ## Trust boundary
 
