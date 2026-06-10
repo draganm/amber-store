@@ -225,3 +225,71 @@ func TestSignAgentUnavailable(t *testing.T) {
 		t.Fatalf("error = %v, want mention of SSH_AUTH_SOCK", err)
 	}
 }
+
+// fakeSKKeyPEM builds an openssh-key-v1 container whose embedded public key
+// announces a FIDO2 sk- type. Only the cleartext header matters for the
+// detection under test; no private section is needed.
+func fakeSKKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	pubBlob := ssh.Marshal(struct {
+		Algo  string
+		Bytes []byte
+	}{"sk-ssh-ed25519@openssh.com", make([]byte, 32)})
+	body := append([]byte("openssh-key-v1\x00"), ssh.Marshal(struct {
+		CipherName, KdfName, KdfOpts string
+		NumKeys                      uint32
+		PubKey                       []byte
+	}{"none", "none", "", 1, pubBlob})...)
+	return pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: body})
+}
+
+func TestSignRejectsSKKeyFileWithHint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "id_ed25519_sk")
+	if err := os.WriteFile(p, fakeSKKeyPEM(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := sshsign.Sign(p, []byte("p"), noPrompt(t))
+	if err == nil || !strings.Contains(err.Error(), ".pub") || !strings.Contains(err.Error(), "agent") {
+		t.Fatalf("error = %v, want sk- hint mentioning agent and .pub", err)
+	}
+}
+
+func TestCheckKeyFile(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainPath, pubPath, _ := writeKeyFiles(t, priv, "")
+	_, encPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encPath, _, _ := writeKeyFiles(t, encPriv, "letmein")
+	skPath := filepath.Join(t.TempDir(), "sk")
+	if err := os.WriteFile(skPath, fakeSKKeyPEM(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	garbagePath := filepath.Join(t.TempDir(), "garbage")
+	if err := os.WriteFile(garbagePath, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path string
+		wantErr    bool
+	}{
+		{"private key", plainPath, false},
+		{"public key", pubPath, false},
+		{"encrypted private key", encPath, false},
+		{"sk private key", skPath, true},
+		{"garbage", garbagePath, true},
+		{"missing", filepath.Join(t.TempDir(), "absent"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sshsign.CheckKeyFile(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("CheckKeyFile(%s) = %v, wantErr %v", tc.path, err, tc.wantErr)
+			}
+		})
+	}
+}
