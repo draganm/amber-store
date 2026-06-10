@@ -17,7 +17,9 @@ import (
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/internal/userconfig"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/reference"
 	"github.com/urfave/cli/v2"
 )
 
@@ -189,8 +191,8 @@ func ingestCommand() *cli.Command {
 	)
 	return &cli.Command{
 		Name:      "ingest",
-		Usage:     "build the content-addressed tree for DIR and store it via the daemon (or write a pack file with --output)",
-		ArgsUsage: "DIR",
+		Usage:     "build the content-addressed tree for DIR, store it via the daemon under reference NAME (or write a pack file with --output, no NAME)",
+		ArgsUsage: "NAME DIR  (with --output: DIR)",
 		Flags:     flags,
 		Action:    func(c *cli.Context) error { return runIngest(c, cfg) },
 	}
@@ -221,9 +223,30 @@ func writePack(dst io.Writer, dir string, cc *chunkConfig, jobs int, p *Progress
 
 // Handles the 'ingest' command.
 func runIngest(c *cli.Context, cfg *ingestConfig) error {
-	dir, err := dirArg(c, "ingest")
-	if err != nil {
-		return err
+	var refName, dir, user string
+	if cfg.output != "" {
+		d, err := dirArg(c, "ingest")
+		if err != nil {
+			return err
+		}
+		dir = d
+	} else {
+		if c.NArg() != 2 {
+			return fmt.Errorf("ingest requires NAME DIR arguments, got %d", c.NArg())
+		}
+		refName = c.Args().Get(0)
+		dir = c.Args().Get(1)
+		if err := reference.ValidateName(refName); err != nil {
+			return err
+		}
+		if err := checkDir(dir); err != nil {
+			return err
+		}
+		ucfg, err := userconfig.Load()
+		if err != nil {
+			return err
+		}
+		user = ucfg.User
 	}
 
 	// Progress (client-side) is sized by a cheap pre-scan, unless disabled.
@@ -278,7 +301,8 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			}
 			resCh <- result{r, err}
 		}()
-		_, ingErr := client.New(socketpath.Resolve(cfg.socket)).Ingest(ctx, pr)
+		cl := client.New(socketpath.Resolve(cfg.socket))
+		_, ingErr := cl.Ingest(ctx, pr)
 		res := <-resCh
 		// A closed-pipe build error is a secondary effect: the transport closes
 		// the body pipe when the daemon replies early (an error status), so the
@@ -295,6 +319,19 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			return res.err
 		}
 		root = res.root
+
+		// Create the reference. Use c.Context, not the progress ctx, which is
+		// cancelled right after this branch.
+		rec := reference.Reference{
+			Name:      refName,
+			Key:       root[:],
+			User:      user,
+			CreatedAt: time.Now().UnixNano(),
+		}
+		if err := cl.PutRef(c.Context, rec); err != nil {
+			return fmt.Errorf("tree stored (root %s) but creating reference %q failed: %w\nretry with: amber-store ref create %q %s",
+				root, refName, err, refName, root)
+		}
 	}
 
 	cancel()

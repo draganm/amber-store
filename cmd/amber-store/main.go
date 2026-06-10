@@ -98,6 +98,18 @@ func chunkFlags(cc *chunkConfig) []cli.Flag {
 	}
 }
 
+// checkDir verifies dir names an existing directory.
+func checkDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	return nil
+}
+
 // dirArg validates that the command received exactly one argument naming an
 // existing directory, and returns it. cmd names the command for error messages.
 func dirArg(c *cli.Context, cmd string) (string, error) {
@@ -105,12 +117,8 @@ func dirArg(c *cli.Context, cmd string) (string, error) {
 		return "", fmt.Errorf("%s requires exactly one DIR argument, got %d", cmd, c.NArg())
 	}
 	dir := c.Args().First()
-	info, err := os.Stat(dir)
-	if err != nil {
+	if err := checkDir(dir); err != nil {
 		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", dir)
 	}
 	return dir, nil
 }

@@ -188,6 +188,7 @@ func TestRunIngest_RejectsNonDirectory(t *testing.T) {
 // still-running build hits io.ErrClosedPipe, and the CLI must surface the
 // server's error — not the secondary closed-pipe artifact.
 func TestRunIngest_ServerErrorNotMaskedByClosedPipe(t *testing.T) {
+	configureTestUser(t, "pipeuser")
 	sockDir, err := os.MkdirTemp("", "amber-sock-*")
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +211,7 @@ func TestRunIngest_ServerErrorNotMaskedByClosedPipe(t *testing.T) {
 	writeDeepTree(t, src)
 
 	app := newApp()
-	err = app.Run([]string{"amber-store", "ingest", "--no-progress", "--socket", sock, src})
+	err = app.Run([]string{"amber-store", "ingest", "--no-progress", "--socket", sock, "deep/tree", src})
 	if err == nil {
 		t.Fatal("expected ingest to fail")
 	}

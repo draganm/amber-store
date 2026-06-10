@@ -42,7 +42,6 @@ func ingestTestTree(t *testing.T, sock, name string) string {
 }
 
 func TestRefCreateShowLsRm(t *testing.T) {
-	t.Skip("enabled by ingest NAME DIR task")
 	configureTestUser(t, "tester")
 	sock := startDaemon(t)
 	root := ingestTestTree(t, sock, "first")

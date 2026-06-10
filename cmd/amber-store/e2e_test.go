@@ -11,6 +11,7 @@ import (
 // `ingest` streams a tree to it over the socket, and `restore` reconstructs the
 // tree faithfully from a `dump`-equivalent tar.
 func TestEndToEnd_IngestStreamThenRestore(t *testing.T) {
+	configureTestUser(t, "e2e")
 	src := buildSourceTree(t)
 	sock := startDaemon(t)
 
@@ -19,7 +20,7 @@ func TestEndToEnd_IngestStreamThenRestore(t *testing.T) {
 	var rootBuf bytes.Buffer
 	app := newApp()
 	app.Writer = &rootBuf
-	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "--socket", sock, src}); err != nil {
+	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "--socket", sock, "e2e/tree", src}); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 	root := strings.TrimSpace(rootBuf.String())
