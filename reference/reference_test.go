@@ -52,6 +52,34 @@ func TestValidateName(t *testing.T) {
 	}
 }
 
+func TestValidateUser(t *testing.T) {
+	long := strings.Repeat("u", 1025)
+	cases := []struct {
+		name    string
+		user    string
+		wantErr bool
+	}{
+		{"simple name", "alice", false},
+		{"email address", "alice@example.com", false},
+		{"at sign accepted", "user@host", false},
+		{"max length", strings.Repeat("u", 1024), false},
+		{"empty rejected", "", true},
+		{"too long rejected", long, true},
+		{"control char rejected", "a\x01b", true},
+		{"newline rejected", "a\nb", true},
+		{"del char rejected", "a\x7fb", true},
+		{"invalid utf8 rejected", string([]byte{0xff, 0xfe}), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reference.ValidateUser(tc.user)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateUser(%q) error = %v, wantErr %v", tc.user, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	r := reference.Reference{
 		Name:      "backups/home",

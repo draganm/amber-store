@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/internal/userconfig"
@@ -39,5 +40,23 @@ func TestLoadEmptyUserIsErrNotConfigured(t *testing.T) {
 	}
 	if _, err := userconfig.Load(); !errors.Is(err, userconfig.ErrNotConfigured) {
 		t.Fatalf("Load = %v, want ErrNotConfigured", err)
+	}
+}
+
+func TestLoadMalformedJSONError(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("AMBER_STORE_CONFIG", p)
+	if err := os.WriteFile(p, []byte(`{not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := userconfig.Load()
+	if err == nil {
+		t.Fatal("Load = nil, want error for malformed JSON")
+	}
+	if errors.Is(err, userconfig.ErrNotConfigured) {
+		t.Fatalf("Load = ErrNotConfigured, want a parse error")
+	}
+	if !strings.Contains(err.Error(), p) {
+		t.Fatalf("error %q does not mention the config path %q", err.Error(), p)
 	}
 }

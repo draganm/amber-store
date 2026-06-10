@@ -71,6 +71,31 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// ValidateUser checks the user-identity rules used both by config-user and by
+// Reference records: 1..MaxUserLen bytes of valid UTF-8 with no control
+// characters. '@' is explicitly allowed so that e-mail addresses are valid.
+//
+// Note: an empty User in a Reference record remains valid at the record level
+// (ValidateUser is only called from validate() when r.User != ""). ValidateUser
+// itself rejects empty so that config-user always stores a usable identity.
+func ValidateUser(user string) error {
+	if user == "" {
+		return errors.New("user must not be empty")
+	}
+	if len(user) > MaxUserLen {
+		return fmt.Errorf("user exceeds %d bytes", MaxUserLen)
+	}
+	if !utf8.ValidString(user) {
+		return errors.New("user must be valid UTF-8")
+	}
+	for _, r := range user {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("user must not contain control characters")
+		}
+	}
+	return nil
+}
+
 // validate checks the whole record: name rules plus a canonical key, and
 // bounds on the User and Signature fields.
 func (r Reference) validate() error {
@@ -80,8 +105,10 @@ func (r Reference) validate() error {
 	if _, err := key.Parse(r.Key); err != nil {
 		return fmt.Errorf("reference key: %w", err)
 	}
-	if len(r.User) > MaxUserLen {
-		return fmt.Errorf("reference user exceeds %d bytes", MaxUserLen)
+	if r.User != "" {
+		if err := ValidateUser(r.User); err != nil {
+			return fmt.Errorf("reference user: %w", err)
+		}
 	}
 	if len(r.Signature) > MaxSignatureLen {
 		return fmt.Errorf("reference signature exceeds %d bytes", MaxSignatureLen)

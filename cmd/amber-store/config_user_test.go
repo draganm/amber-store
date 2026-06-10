@@ -27,3 +27,17 @@ func TestConfigUserRequiresOneArg(t *testing.T) {
 		t.Fatal("expected error without NAME")
 	}
 }
+
+func TestConfigUserRejectsEmptyName(t *testing.T) {
+	t.Setenv("AMBER_STORE_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if err := newApp().Run([]string{"amber-store", "config-user", ""}); err == nil {
+		t.Fatal("expected error for empty NAME")
+	}
+}
+
+func TestConfigUserRejectsControlChar(t *testing.T) {
+	t.Setenv("AMBER_STORE_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	if err := newApp().Run([]string{"amber-store", "config-user", "a\nb"}); err == nil {
+		t.Fatal("expected error for NAME containing newline")
+	}
+}

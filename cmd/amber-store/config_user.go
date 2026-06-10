@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/draganm/amber-store/internal/userconfig"
+	"github.com/draganm/amber-store/reference"
 	"github.com/urfave/cli/v2"
 )
 
@@ -16,7 +17,11 @@ func configUserCommand() *cli.Command {
 			if c.NArg() != 1 {
 				return fmt.Errorf("config-user requires exactly one NAME argument, got %d", c.NArg())
 			}
-			if err := userconfig.Save(userconfig.Config{User: c.Args().First()}); err != nil {
+			name := c.Args().First()
+			if err := reference.ValidateUser(name); err != nil {
+				return fmt.Errorf("invalid user name: %w", err)
+			}
+			if err := userconfig.Save(userconfig.Config{User: name}); err != nil {
 				return err
 			}
 			p, err := userconfig.Path()
