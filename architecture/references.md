@@ -16,11 +16,17 @@ same convention as fstree objects) with integer keys:
 | 1 | key | 32-byte byte string | pointed-to key, canonical per [keys.md](keys.md) |
 | 2 | user | text string | creator, from the user config (`amber-store config-user`) |
 | 3 | created_at | int64 | ns since the Unix epoch |
-| 4 | signature | byte string, omitted when absent | opaque bytes; reserved |
+| 4 | signature | byte string, omitted when absent | raw SSHSIG blob (see below) |
 
 The **signature payload** is the deterministic encoding of the record without
-key 4 — the canonical bytes of `{0,1,2,3}`. Nothing currently produces or
-verifies signatures; the daemon stores the field opaquely.
+key 4 — the canonical bytes of `{0,1,2,3}`. When the user config carries a
+signing key, clients store an **SSHSIG v1** signature (the `ssh-keygen -Y
+sign` / git SSH-signing format) over this payload in key 4: namespace
+`amber-store-ref`, SHA-512 message hash, raw binary blob (not PEM-armored).
+The key may be a private-key file (passphrase-protected ones prompt on the
+terminal) or a `.pub` resolved through the ssh-agent. Signing failures abort
+the command — a configured key never silently yields an unsigned reference.
+Verification is not yet implemented; the daemon stores the field opaquely.
 
 **Name rules:** 1–1024 bytes of valid UTF-8; no `@` (the ref/path separator)
 and no control characters (< 0x20 or 0x7F). `/` is allowed
@@ -61,7 +67,7 @@ references. Resolution of `ref:NAME@PATH` is client-side: one
 ## CLI
 
 ```sh
-amber-store config-user NAME             # required once before creating refs
+amber-store config-user NAME [--signing-key PATH]   # required once before creating refs; a key signs them
 amber-store ingest NAME DIR              # daemon ingest names its root
 amber-store ref create NAME KEY          # name an existing key (e.g. after load)
 amber-store ref ls                       # name, key, user, date (tab-separated)
