@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 
 	"github.com/hiddeco/sshsig"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
 
@@ -29,6 +31,9 @@ func Sign(keyPath string, payload []byte, prompt PassphrasePrompt) ([]byte, erro
 	b, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading signing key: %w", err)
+	}
+	if pub, _, _, _, perr := ssh.ParseAuthorizedKey(b); perr == nil {
+		return signWithAgent(pub, payload)
 	}
 	signer, err := ssh.ParsePrivateKey(b)
 	if err != nil {
@@ -68,4 +73,28 @@ func rawSign(signer ssh.Signer, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("signing: %w", err)
 	}
 	return sig.Marshal(), nil
+}
+
+// signWithAgent signs with the agent key matching pub.
+func signWithAgent(pub ssh.PublicKey, payload []byte) ([]byte, error) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return nil, errors.New("signing key is a public key, but no ssh-agent is available ($SSH_AUTH_SOCK is not set)")
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to ssh-agent: %w", err)
+	}
+	defer conn.Close()
+	signers, err := agent.NewClient(conn).Signers()
+	if err != nil {
+		return nil, fmt.Errorf("listing ssh-agent keys: %w", err)
+	}
+	want := pub.Marshal()
+	for _, s := range signers {
+		if bytes.Equal(s.PublicKey().Marshal(), want) {
+			return rawSign(s, payload)
+		}
+	}
+	return nil, fmt.Errorf("signing key %s is not loaded in the ssh-agent", ssh.FingerprintSHA256(pub))
 }

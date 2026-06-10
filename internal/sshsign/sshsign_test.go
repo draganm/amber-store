@@ -7,13 +7,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/pem"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/hiddeco/sshsig"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // noPrompt fails the test if the passphrase prompt is invoked.
@@ -137,5 +140,88 @@ func TestSignWithWrongPassphrase(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for wrong passphrase")
+	}
+}
+
+// startTestAgent serves an in-memory ssh-agent holding keys over a unix
+// socket and points $SSH_AUTH_SOCK at it.
+func startTestAgent(t *testing.T, keys ...crypto.PrivateKey) {
+	t.Helper()
+	kr := agent.NewKeyring()
+	for _, k := range keys {
+		if err := kr.Add(agent.AddedKey{PrivateKey: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Short dir: unix sun_path is capped at ~104 bytes on macOS/BSD and
+	// t.TempDir() embeds the long test name.
+	dir, err := os.MkdirTemp("", "amber-agent-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "agent.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go agent.ServeAgent(kr, conn)
+		}
+	}()
+	t.Setenv("SSH_AUTH_SOCK", sock)
+}
+
+func TestSignWithAgentKey(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pubPath, pub := writeKeyFiles(t, priv, "")
+	startTestAgent(t, priv)
+	payload := []byte("payload bytes")
+	blob, err := sshsign.Sign(pubPath, payload, noPrompt(t))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	mustVerify(t, blob, payload, pub)
+}
+
+func TestSignAgentKeyNotLoaded(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pubPath, pub := writeKeyFiles(t, priv, "")
+	startTestAgent(t, otherPriv) // agent holds a different key
+	_, err = sshsign.Sign(pubPath, []byte("p"), noPrompt(t))
+	if err == nil {
+		t.Fatal("expected error when key absent from agent")
+	}
+	if want := ssh.FingerprintSHA256(pub); !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not name fingerprint %s", err, want)
+	}
+}
+
+func TestSignAgentUnavailable(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pubPath, _ := writeKeyFiles(t, priv, "")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	_, err = sshsign.Sign(pubPath, []byte("p"), noPrompt(t))
+	if err == nil || !strings.Contains(err.Error(), "SSH_AUTH_SOCK") {
+		t.Fatalf("error = %v, want mention of SSH_AUTH_SOCK", err)
 	}
 }
