@@ -87,6 +87,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		User:      "dragan",
 		CreatedAt: 1765432100123456789,
 		Signature: []byte{1, 2, 3},
+		PublicKey: []byte{4, 5, 6},
 	}
 	b, err := r.Encode()
 	if err != nil {
@@ -97,7 +98,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Name != r.Name || !bytes.Equal(got.Key, r.Key) || got.User != r.User ||
-		got.CreatedAt != r.CreatedAt || !bytes.Equal(got.Signature, r.Signature) {
+		got.CreatedAt != r.CreatedAt || !bytes.Equal(got.Signature, r.Signature) ||
+		!bytes.Equal(got.PublicKey, r.PublicKey) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, r)
 	}
 }
@@ -132,6 +134,34 @@ func TestSignaturePayloadExcludesSignature(t *testing.T) {
 	}
 	if !bytes.Equal(payload, unsignedEnc) {
 		t.Fatal("SignaturePayload differs from the encoding of the unsigned record")
+	}
+}
+
+func TestSignaturePayloadIncludesPublicKey(t *testing.T) {
+	withKey := reference.Reference{Name: "n", Key: testKey(t), User: "u", CreatedAt: 42, PublicKey: []byte{7, 7, 7}}
+	signed := withKey
+	signed.Signature = []byte{9, 9, 9}
+
+	withKeyEnc, err := withKey.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := signed.SignaturePayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(payload, withKeyEnc) {
+		t.Fatal("SignaturePayload differs from the encoding of the unsigned record with its public key")
+	}
+
+	withoutKey := withKey
+	withoutKey.PublicKey = nil
+	withoutKeyEnc, err := withoutKey.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(payload, withoutKeyEnc) {
+		t.Fatal("SignaturePayload does not cover the public key")
 	}
 }
 
@@ -201,6 +231,18 @@ func TestEncodeRejectsTooLongUserAndSignature(t *testing.T) {
 	longSig := make([]byte, reference.MaxSignatureLen+1)
 	if _, err := (reference.Reference{Name: "n", Key: k, Signature: longSig}).Encode(); err == nil {
 		t.Fatal("expected error for signature exceeding MaxSignatureLen")
+	}
+
+	// Public key exactly at the limit is accepted.
+	okPub := make([]byte, reference.MaxPublicKeyLen)
+	if _, err := (reference.Reference{Name: "n", Key: k, PublicKey: okPub}).Encode(); err != nil {
+		t.Fatalf("public key at MaxPublicKeyLen should be accepted: %v", err)
+	}
+
+	// Public key one byte over the limit is rejected.
+	longPub := make([]byte, reference.MaxPublicKeyLen+1)
+	if _, err := (reference.Reference{Name: "n", Key: k, PublicKey: longPub}).Encode(); err == nil {
+		t.Fatal("expected error for public key exceeding MaxPublicKeyLen")
 	}
 }
 

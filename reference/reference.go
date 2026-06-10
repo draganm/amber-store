@@ -23,6 +23,9 @@ const MaxUserLen = 1024
 // MaxSignatureLen is the maximum Signature field length in bytes (64 KiB).
 const MaxSignatureLen = 64 << 10
 
+// MaxPublicKeyLen is the maximum PublicKey field length in bytes (16 KiB).
+const MaxPublicKeyLen = 16 << 10
+
 // encMode is the shared deterministic encoder, mirroring fstree.encMode.
 var encMode cbor.EncMode
 
@@ -37,14 +40,16 @@ func init() {
 }
 
 // Reference is the record stored under a name. Fields are encoded as a
-// canonical CBOR map with integer keys 0-4; Signature (key 4) is omitted when
-// absent so the unsigned encoding doubles as the signature payload.
+// canonical CBOR map with integer keys 0-5; Signature (key 4) and PublicKey
+// (key 5) are omitted when absent. The signature payload is the encoding
+// without key 4 only, so a signature covers the public key it was made with.
 type Reference struct {
 	Name      string `cbor:"0,keyasint"`
 	Key       []byte `cbor:"1,keyasint"` // 32-byte canonical store key
 	User      string `cbor:"2,keyasint"`
 	CreatedAt int64  `cbor:"3,keyasint"` // ns since the Unix epoch
 	Signature []byte `cbor:"4,keyasint,omitempty"`
+	PublicKey []byte `cbor:"5,keyasint,omitempty"` // signer's key, SSH wire format
 }
 
 // ValidateName checks the reference-name rules: 1..MaxNameLen bytes of valid
@@ -113,6 +118,9 @@ func (r Reference) validate() error {
 	if len(r.Signature) > MaxSignatureLen {
 		return fmt.Errorf("reference signature exceeds %d bytes", MaxSignatureLen)
 	}
+	if len(r.PublicKey) > MaxPublicKeyLen {
+		return fmt.Errorf("reference public key exceeds %d bytes", MaxPublicKeyLen)
+	}
 	return nil
 }
 
@@ -147,7 +155,8 @@ func Decode(b []byte) (Reference, error) {
 }
 
 // SignaturePayload returns the bytes a signature runs over: the deterministic
-// encoding of the record without its Signature field.
+// encoding of the record without its Signature field. PublicKey stays in, so
+// the payload binds the signer's key; set it before computing the payload.
 func (r Reference) SignaturePayload() ([]byte, error) {
 	r.Signature = nil
 	return r.Encode()
