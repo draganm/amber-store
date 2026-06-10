@@ -18,7 +18,7 @@ func restoreCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "restore",
 		Usage:     "restore the filesystem tree rooted at KEY (fetched from the daemon), or at the subdirectory PATH within it, into DIR; accepts a reference as ref:NAME[@PATH]",
-		ArgsUsage: "KEY[/PATH] | ref:NAME[@PATH] DIR",
+		ArgsUsage: "(KEY[/PATH] | ref:NAME[@PATH]) DIR",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",

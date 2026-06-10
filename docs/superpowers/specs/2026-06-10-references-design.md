@@ -128,7 +128,8 @@ validation, is a client-side usage error.
 - If the ref `PUT` fails after a successful ingest upload, the error message
   includes the root key and the exact `amber-store ref create NAME KEY`
   command to retry — uploaded objects are not wasted.
-- `ref:NAME` resolution failure surfaces as `reference "NAME" not found`.
+- `ref:NAME` resolution failure surfaces as `reference "NAME": reference not
+  found`.
 - Daemon-side name validation is authoritative; client-side validation exists
   only to fail fast with friendlier messages.
 
