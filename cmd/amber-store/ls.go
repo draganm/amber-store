@@ -21,8 +21,8 @@ func lsCommand() *cli.Command {
 	cfg := &lsConfig{}
 	return &cli.Command{
 		Name:      "ls",
-		Usage:     "list the entries of the directory object KEY (fetched from the daemon), or of the subdirectory PATH within it",
-		ArgsUsage: "KEY[/PATH]",
+		Usage:     "list the entries of the directory object KEY (fetched from the daemon), or of the subdirectory PATH within it; accepts a reference as ref:NAME[@PATH]",
+		ArgsUsage: "KEY[/PATH] | ref:NAME[@PATH]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -43,11 +43,12 @@ func runLs(c *cli.Context, cfg *lsConfig) error {
 	if c.NArg() != 1 {
 		return fmt.Errorf("ls requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	k, path, err := parseKeyPath(c.Args().First())
+	cl := client.New(socketpath.Resolve(cfg.socket))
+	k, path, err := resolveSpec(c.Context, cl, c.Args().First())
 	if err != nil {
 		return err
 	}
-	entries, err := client.New(socketpath.Resolve(cfg.socket)).Ls(c.Context, k, path)
+	entries, err := cl.Ls(c.Context, k, path)
 	if err != nil {
 		return err
 	}

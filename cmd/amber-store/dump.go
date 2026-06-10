@@ -22,8 +22,8 @@ func dumpCommand() *cli.Command {
 	cfg := &dumpConfig{}
 	return &cli.Command{
 		Name:      "dump",
-		Usage:     "fetch the directory tar for KEY from the daemon, or for the subdirectory PATH within it",
-		ArgsUsage: "KEY[/PATH]",
+		Usage:     "fetch the directory tar for KEY from the daemon, or for the subdirectory PATH within it; accepts a reference as ref:NAME[@PATH]",
+		ArgsUsage: "KEY[/PATH] | ref:NAME[@PATH]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -45,12 +45,13 @@ func runDump(c *cli.Context, cfg *dumpConfig) error {
 	if c.NArg() != 1 {
 		return fmt.Errorf("dump requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	k, path, err := parseKeyPath(c.Args().First())
+	cl := client.New(socketpath.Resolve(cfg.socket))
+	k, path, err := resolveSpec(c.Context, cl, c.Args().First())
 	if err != nil {
 		return err
 	}
 
-	body, err := client.New(socketpath.Resolve(cfg.socket)).Tar(c.Context, k, path)
+	body, err := cl.Tar(c.Context, k, path)
 	if err != nil {
 		return err
 	}

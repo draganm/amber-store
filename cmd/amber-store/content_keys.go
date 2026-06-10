@@ -16,8 +16,8 @@ func contentKeysCommand() *cli.Command {
 	cfg := &contentKeysConfig{}
 	return &cli.Command{
 		Name:      "content-keys",
-		Usage:     "list the keys of every object reachable from KEY (fetched from the daemon), or from the subdirectory PATH within it — the set needed to fetch the whole content",
-		ArgsUsage: "KEY[/PATH]",
+		Usage:     "list the keys of every object reachable from KEY (fetched from the daemon), or from the subdirectory PATH within it — the set needed to fetch the whole content; accepts a reference as ref:NAME[@PATH]",
+		ArgsUsage: "KEY[/PATH] | ref:NAME[@PATH]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:        "socket",
@@ -33,11 +33,12 @@ func runContentKeys(c *cli.Context, cfg *contentKeysConfig) error {
 	if c.NArg() != 1 {
 		return fmt.Errorf("content-keys requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	k, path, err := parseKeyPath(c.Args().First())
+	cl := client.New(socketpath.Resolve(cfg.socket))
+	k, path, err := resolveSpec(c.Context, cl, c.Args().First())
 	if err != nil {
 		return err
 	}
-	keys, err := client.New(socketpath.Resolve(cfg.socket)).ContentKeys(c.Context, k, path)
+	keys, err := cl.ContentKeys(c.Context, k, path)
 	if err != nil {
 		return err
 	}
