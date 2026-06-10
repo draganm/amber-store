@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/internal/keylist"
+	"github.com/zeebo/blake3"
 )
 
 // uploadResponse mirrors the local daemon's ingest stats shape.
@@ -86,6 +91,60 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request, a *authedR
 	h.signAndWrite(w, a.nonce, http.StatusOK, "application/json", body)
 }
 
+// postObjectsGet streams an amberpack of the requested keys. Existence is
+// checked for every key before the first body byte (the project-wide
+// do-the-work-before-streaming convention), so an absent key is a clean 404
+// naming the missing keys. The response signature travels in an HTTP trailer
+// because the body hash is only known at the end; a mid-stream failure cuts
+// the stream, which clients surface as a missing/invalid trailer signature.
 func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	h.signError(w, a.nonce, http.StatusNotImplemented, "not implemented")
+	keys, err := keylist.Parse(a.body)
+	if err != nil {
+		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	var missing []string
+	for _, k := range keys {
+		has, err := h.store.Has(k)
+		if err != nil {
+			h.log.Error("objects/get lookup failed", "key", k, "error", err)
+			h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !has {
+			missing = append(missing, k.String())
+		}
+	}
+	if len(missing) > 0 {
+		h.signError(w, a.nonce, http.StatusNotFound, "objects not found:\n"+strings.Join(missing, "\n"))
+		return
+	}
+	// Declare the trailer name up-front so HTTP/1.1 chunked encoding includes
+	// it; http.TrailerPrefix alone is only sufficient for HTTP/2.
+	w.Header().Set("Trailer", httpsig.HeaderSignature)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	hasher := blake3.New()
+	pw := amberpack.NewWriter(io.MultiWriter(w, hasher))
+	for _, k := range keys {
+		data, err := h.store.Get(k)
+		if err != nil {
+			// Bytes are already in flight; cut the stream without a trailer.
+			h.log.Error("objects/get stream aborted", "key", k, "error", err)
+			return
+		}
+		if err := pw.Add(fstree.Object{Key: k, Bytes: data}); err != nil {
+			h.log.Error("objects/get stream aborted", "key", k, "error", err)
+			return
+		}
+	}
+	if err := pw.Close(); err != nil {
+		h.log.Error("objects/get stream aborted", "error", err)
+		return
+	}
+	sig, err := httpsig.SignResponse(h.identity, a.nonce, http.StatusOK, hasher.Sum(nil))
+	if err != nil {
+		h.log.Error("signing objects/get trailer failed", "error", err)
+		return
+	}
+	w.Header().Set(http.TrailerPrefix+httpsig.HeaderSignature, sig)
 }
