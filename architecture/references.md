@@ -28,8 +28,9 @@ payload in key 4: namespace `amber-store-ref`, SHA-512 message hash, raw
 binary blob (not PEM-armored). The signing key may be a private-key file
 (passphrase-protected ones prompt on the terminal) or a `.pub` resolved
 through the ssh-agent. Signing failures abort the command — a configured key
-never silently yields an unsigned reference. Verification is not yet
-implemented; the daemon stores both fields opaquely.
+never silently yields an unsigned reference. `ref verify-signature` checks a
+stored signature client-side against the recorded public key (integrity
+only; no trust model yet). The daemon stores both fields opaquely.
 
 **Name rules:** 1–1024 bytes of valid UTF-8; no `@` (the ref/path separator)
 and no control characters (< 0x20 or 0x7F). `/` is allowed
@@ -75,6 +76,7 @@ amber-store ingest NAME DIR              # daemon ingest names its root
 amber-store ref create NAME KEY          # name an existing key (e.g. after load)
 amber-store ref ls                       # name, key, user, date (tab-separated)
 amber-store ref show NAME                # full record as JSON
+amber-store ref verify-signature NAME    # check the stored signature (integrity only)
 amber-store ref rm NAME                  # delete the name; objects stay
 amber-store ls ref:NAME[@PATH]           # any KEY[/PATH] argument accepts this
 ```
