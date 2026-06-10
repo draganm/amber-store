@@ -30,6 +30,7 @@ func newApp() *cli.App {
 			lsCommand(),
 			contentKeysCommand(),
 			configUserCommand(),
+			refCommand(),
 		},
 	}
 }
