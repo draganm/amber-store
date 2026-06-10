@@ -5,6 +5,7 @@
 package reference
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -83,14 +84,24 @@ func (r Reference) Encode() ([]byte, error) {
 	return encMode.Marshal(r)
 }
 
-// Decode parses and validates a record.
+// Decode parses and validates a record. It rejects non-canonical encodings:
+// the input must be byte-for-byte identical to what encMode would produce for
+// the same record (extra map keys, indefinite-length items, and non-minimal
+// integer/length encodings are all rejected).
 func Decode(b []byte) (Reference, error) {
 	var r Reference
 	if err := cbor.Unmarshal(b, &r); err != nil {
 		return Reference{}, fmt.Errorf("decoding reference: %w", err)
 	}
 	if err := r.validate(); err != nil {
-		return Reference{}, err
+		return Reference{}, fmt.Errorf("invalid reference: %w", err)
+	}
+	canonical, err := encMode.Marshal(r)
+	if err != nil {
+		return Reference{}, fmt.Errorf("re-encoding reference: %w", err)
+	}
+	if !bytes.Equal(canonical, b) {
+		return Reference{}, fmt.Errorf("reference encoding is not canonical")
 	}
 	return r, nil
 }

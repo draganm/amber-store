@@ -2,6 +2,7 @@ package reference_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -118,5 +119,40 @@ func TestEncodeRejectsInvalid(t *testing.T) {
 func TestDecodeRejectsGarbage(t *testing.T) {
 	if _, err := reference.Decode([]byte("not cbor at all")); err == nil {
 		t.Fatal("expected error for garbage input")
+	}
+}
+
+// goldenHex is the canonical CBOR encoding of Reference{Name:"n", Key:<EncodeBlob("hello")>, User:"u", CreatedAt:42}.
+// It pins the wire format so a CBOR library upgrade cannot silently change encodings that
+// signatures and persistence depend on.
+const goldenHex = "a400616e0158200005ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a6702617503182a"
+
+func TestGoldenVector(t *testing.T) {
+	r := reference.Reference{Name: "n", Key: testKey(t), User: "u", CreatedAt: 42}
+	b, err := r.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString(goldenHex)
+	if !bytes.Equal(b, want) {
+		t.Fatalf("encoding changed!\n got: %s\nwant: %s", hex.EncodeToString(b), goldenHex)
+	}
+}
+
+func TestDecodeRejectsExtraMapKey(t *testing.T) {
+	// Golden bytes with map header changed from a4 (4 items) to a5 (5 items)
+	// and an extra key-value pair (09 = int 9, 61 78 = text "x") appended.
+	extra, _ := hex.DecodeString("a500616e0158200005ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a6702617503182a096178")
+	if _, err := reference.Decode(extra); err == nil {
+		t.Fatal("expected error for encoding with extra map key")
+	}
+}
+
+func TestDecodeRejectsNonCanonicalEncoding(t *testing.T) {
+	// Golden bytes with the last two bytes (18 2a = uint 42) replaced by
+	// 19 00 2a (two-byte encoding of 42) — valid CBOR but not minimal.
+	nonCanon, _ := hex.DecodeString("a400616e0158200005ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a670261750319002a")
+	if _, err := reference.Decode(nonCanon); err == nil {
+		t.Fatal("expected error for non-canonical (non-minimal integer) encoding")
 	}
 }
