@@ -83,6 +83,26 @@ func SignWith(signer ssh.Signer, payload []byte) ([]byte, error) {
 	return sig.Marshal(), nil
 }
 
+// Verify checks that blob is a valid SSHSIG over payload in the amber-store
+// namespace, made by the key pubWire (SSH wire format). It returns the
+// signer's public key on success. This is an integrity check only — it does
+// not establish that the key belongs to anyone in particular.
+func Verify(payload, blob, pubWire []byte) (ssh.PublicKey, error) {
+	sig, err := sshsig.ParseSignature(blob)
+	if err != nil {
+		return nil, fmt.Errorf("parsing signature: %w", err)
+	}
+	if !bytes.Equal(sig.PublicKey.Marshal(), pubWire) {
+		return nil, errors.New("recorded public key differs from the signature's")
+	}
+	// The blob's declared hash algorithm is part of the signed structure, so
+	// honoring it (rather than pinning SHA-512) does not weaken the check.
+	if err := sshsig.Verify(bytes.NewReader(payload), sig, sig.PublicKey, sig.HashAlgorithm, Namespace); err != nil {
+		return nil, err
+	}
+	return sig.PublicKey, nil
+}
+
 // skKeyError returns a tailored error when b is an OpenSSH private key whose
 // (cleartext) public-key header announces a FIDO2 sk-* type: pure Go cannot
 // drive the FIDO2 touch flow, so these keys are usable only via an agent.

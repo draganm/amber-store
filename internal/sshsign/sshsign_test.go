@@ -306,6 +306,44 @@ func TestSignatureVerifiesWithOpenSSH(t *testing.T) {
 	}
 }
 
+func TestVerify(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privPath, _, pub := writeKeyFiles(t, priv, "")
+	payload := []byte("payload bytes")
+	blob, _ := mustSign(t, privPath, payload, noPrompt(t))
+
+	got, err := sshsign.Verify(payload, blob, pub.Marshal())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !bytes.Equal(got.Marshal(), pub.Marshal()) {
+		t.Fatal("Verify returned a different public key")
+	}
+
+	if _, err := sshsign.Verify([]byte("tampered"), blob, pub.Marshal()); err == nil {
+		t.Fatal("expected error for tampered payload")
+	}
+
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSigner, err := ssh.NewSignerFromKey(otherPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sshsign.Verify(payload, blob, otherSigner.PublicKey().Marshal()); err == nil {
+		t.Fatal("expected error for mismatched public key")
+	}
+
+	if _, err := sshsign.Verify(payload, []byte("not an sshsig"), pub.Marshal()); err == nil {
+		t.Fatal("expected error for garbage signature blob")
+	}
+}
+
 func TestCheckKeyFile(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
