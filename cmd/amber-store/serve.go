@@ -186,6 +186,8 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		adminHandler, err := admin.New(admin.Config{
 			Password: cfg.adminPassword,
 			Keys:     keys,
+			Objects:  store,
+			Refs:     refs,
 			UI:       ui,
 			Log:      logger,
 			Secure:   cfg.tlsCert != "",

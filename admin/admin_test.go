@@ -54,7 +54,11 @@ func testServer(t *testing.T) (*httptest.Server, *allowstore.Store) {
 	if err := keys.Add(line, false); err != nil {
 		t.Fatal(err)
 	}
-	h, err := admin.New(admin.Config{Password: password, Keys: keys, UI: testUI})
+	h, err := admin.New(admin.Config{
+		Password: password, Keys: keys,
+		Objects: memObjects{}, Refs: memRefs{},
+		UI: testUI,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,5 +291,16 @@ func TestServesSPA(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("GET %s body %q does not contain %q", path, b, want)
 		}
+	}
+}
+
+func TestNewRequiresStores(t *testing.T) {
+	keys, err := allowstore.Open(filepath.Join(t.TempDir(), "allowed-keys"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = keys.Close() })
+	if _, err := admin.New(admin.Config{Password: password, Keys: keys, UI: testUI}); err == nil {
+		t.Fatal("want error when Objects/Refs are missing")
 	}
 }

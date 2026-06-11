@@ -1,7 +1,8 @@
 // Package admin serves the server's admin SPA and its JSON API: a
 // password-protected browser UI (under /admin/) where an operator
 // inspects, adds and removes the SSH keys allowed to talk to the
-// server. The password comes from the environment; sessions live in
+// server, and browses the server's references and their file trees.
+// The password comes from the environment; sessions live in
 // memory, so a restart logs every admin out.
 package admin
 
@@ -37,6 +38,8 @@ const (
 type Config struct {
 	Password  string            // required; the UI is only mounted when set
 	Keys      *allowstore.Store // the live allowed-keys store
+	Objects   ObjectGetter      // required; read-only object access for the ref browser
+	Refs      RefStore          // required; read-only reference access for the ref browser
 	UI        fs.FS             // built SPA; index.html at the root
 	Log       *slog.Logger      // nil discards
 	Secure    bool              // mark the session cookie Secure (serving TLS)
@@ -46,6 +49,8 @@ type Config struct {
 type handler struct {
 	password  []byte // sha256 of the password, for constant-time compare
 	keys      *allowstore.Store
+	objects   ObjectGetter
+	refs      RefStore
 	ui        fs.FS
 	log       *slog.Logger
 	secure    bool
@@ -60,6 +65,9 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.Password == "" {
 		return nil, errors.New("admin UI requires a password")
 	}
+	if cfg.Objects == nil || cfg.Refs == nil {
+		return nil, errors.New("admin UI requires the object and reference stores")
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -72,6 +80,8 @@ func New(cfg Config) (http.Handler, error) {
 	h := &handler{
 		password:  pw[:],
 		keys:      cfg.Keys,
+		objects:   cfg.Objects,
+		refs:      cfg.Refs,
 		ui:        cfg.UI,
 		log:       log,
 		secure:    cfg.Secure,
