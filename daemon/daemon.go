@@ -39,7 +39,7 @@ type RemoteConfig struct {
 }
 
 // signerFor picks the identity for a remote: the per-remote override, else
-// the default, else an error telling the operator to configure one.
+// the default, else an error.
 func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
 	if s, ok := rc.Signers[name]; ok {
 		return s, nil
