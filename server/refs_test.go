@@ -8,6 +8,7 @@ import (
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"golang.org/x/crypto/ssh"
 )
@@ -80,6 +81,76 @@ func TestRefPutRequiresPointedToKey(t *testing.T) {
 	rec := signedRef(t, "dangling", absent.Key[:], testSigner(t))
 	if code, _ := ts.signedDo(t, ts.client, "PUT", "/v1/refs?name=dangling", rec); code != 404 {
 		t.Fatalf("status = %d, want 404", code)
+	}
+}
+
+func TestRefPutRequiresCompleteContent(t *testing.T) {
+	ts := newTestServer(t)
+	blobA, err := fstree.EncodeBlob([]byte("chunk a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobB, err := fstree.EncodeBlob([]byte("chunk b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileNode, err := fstree.EncodeFileNode([]key.Key{blobA.Key, blobB.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the root and one chunk are present, the other chunk is missing
+	for _, o := range []fstree.Object{fileNode, blobA} {
+		if err := ts.store.Put(o.Key, o.Bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner := testSigner(t)
+	rec := signedRef(t, "partial", fileNode.Key[:], owner)
+	code, body := ts.signedDo(t, ts.client, "PUT", "/v1/refs?name=partial", rec)
+	if code != 404 {
+		t.Fatalf("status = %d: %s, want 404 for a missing leaf", code, body)
+	}
+	if !strings.Contains(string(body), blobB.Key.String()) {
+		t.Fatalf("404 body does not name the missing object: %s", body)
+	}
+	// completing the content makes the same put succeed
+	if err := ts.store.Put(blobB.Key, blobB.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := ts.signedDo(t, ts.client, "PUT", "/v1/refs?name=partial", rec); code != 204 {
+		t.Fatalf("status = %d: %s, want 204 once content is complete", code, body)
+	}
+}
+
+func TestRefPutRequiresCompleteContent_MissingInteriorNode(t *testing.T) {
+	ts := newTestServer(t)
+	blob, err := fstree.EncodeBlob([]byte("file content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileNode, err := fstree.EncodeFileNode([]key.Key{blob.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("f"), Mode: 0o100644, ContentKey: fileNode.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the root leaf and the blob are present, the FileNode between them is not
+	for _, o := range []fstree.Object{leaf, blob} {
+		if err := ts.store.Put(o.Key, o.Bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := signedRef(t, "torn", leaf.Key[:], testSigner(t))
+	code, body := ts.signedDo(t, ts.client, "PUT", "/v1/refs?name=torn", rec)
+	if code != 404 {
+		t.Fatalf("status = %d: %s, want 404 for a missing interior node", code, body)
+	}
+	if !strings.Contains(string(body), fileNode.Key.String()) {
+		t.Fatalf("404 body does not name the missing object: %s", body)
 	}
 }
 

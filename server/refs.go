@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
@@ -29,8 +31,8 @@ func refName(r *http.Request) (string, error) {
 // canonical record matching the query name; a verifying signature (the
 // record MUST be signed — the signer key owns the name); ownership — an
 // existing name may only be overwritten by the same signer key, unless the
-// transport key is an admin; and the pointed-to key must exist (push
-// objects before the ref).
+// transport key is an admin; and the pointed-to content must be complete —
+// every object reachable from the key exists (push objects before the ref).
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	name, err := refName(r)
 	if err != nil {
@@ -83,13 +85,20 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	has, err := h.store.Has(k)
-	if err != nil {
-		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+	// The referenced content must be complete: every object reachable from
+	// the key must exist in the store. The walk runs parallel lookups —
+	// referenced trees can be large.
+	err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
+	var miss *fstree.MissingObjectError
+	switch {
+	case errors.As(err, &miss):
+		h.signError(w, a.nonce, http.StatusNotFound, "referenced content is incomplete: "+miss.Key.String()+" is missing — push objects before the ref")
 		return
-	}
-	if !has {
-		h.signError(w, a.nonce, http.StatusNotFound, "referenced key not found on the server — push objects before the ref")
+	case errors.Is(err, diskstore.ErrNotFound):
+		h.signError(w, a.nonce, http.StatusNotFound, "referenced content is incomplete: "+err.Error()+" — push objects before the ref")
+		return
+	case err != nil:
+		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := h.refs.Put(name, a.body); err != nil {

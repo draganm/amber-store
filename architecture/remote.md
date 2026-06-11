@@ -214,9 +214,10 @@ The server enforces a five-step validation on `PUT /v1/refs`, in order:
    signing identity owns the name; the same user may update their reference from
    any of their amber instances. A different signer → `403`. Keys marked `admin`
    in the allowlist bypass this check.
-5. **No dangling references** — the pointed-to key must exist in the server's
-   store. This enforces the natural transfer order: push objects, then the
-   reference.
+5. **No dangling references** — the pointed-to content must be complete: the
+   server walks the tree under the referenced key and rejects the record with
+   `404` if any reachable object is missing from its store. This enforces the
+   natural transfer order: push objects, then the reference.
 
 **Deletion is admin-only.** Ownership lives in the reference signature, but a
 `DELETE` request carries no record to sign, so the server cannot tie a deletion

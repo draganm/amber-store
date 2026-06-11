@@ -102,7 +102,8 @@ override for lockout or migration.
 cannot verify the signing identity of the caller. Deletion is therefore
 restricted to `admin` transport keys.
 
-**No dangling references.** The pointed-to key must exist in the server's store
-before the `PUT` is accepted — the same rule as the local daemon. This enforces
-the natural transfer order: `remote push-objects` (or `remote pull-objects`
-locally) before `remote push-ref` (or `remote pull-ref` locally).
+**No dangling references.** The pointed-to content must be complete in the
+server's store before the `PUT` is accepted: the server walks the tree under
+the referenced key and rejects the record if any reachable object is missing.
+This enforces the natural transfer order: `remote push-objects` (or `remote
+pull-objects` locally) before `remote push-ref` (or `remote pull-ref` locally).
