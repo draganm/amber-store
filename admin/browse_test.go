@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -115,4 +116,65 @@ func browseServer(t *testing.T, objs memObjects, refs memRefs) (*httptest.Server
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, login(t, srv)
+}
+
+type refInfoJSON struct {
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	User      string `json:"user"`
+	CreatedAt string `json:"created_at"`
+	Kind      string `json:"kind"`
+}
+
+func TestListRefs(t *testing.T) {
+	objs := memObjects{}
+	root, hello := seedTree(t, objs)
+	refs := memRefs{
+		"backup/daily": mustRef(t, "backup/daily", root, "alice@example.com"),
+		"motd":         mustRef(t, "motd", hello, "bob"),
+		"zzz-bad":      []byte{0x42}, // undecodable record
+	}
+	srv, cookie := browseServer(t, objs, refs)
+
+	resp := do(t, "GET", srv.URL+"/admin/api/refs", cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refs = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Refs []refInfoJSON `json:"refs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Refs) != 3 {
+		t.Fatalf("got %d refs, want 3: %+v", len(out.Refs), out.Refs)
+	}
+	if r := out.Refs[0]; r.Name != "backup/daily" || r.Kind != "dir" ||
+		r.User != "alice@example.com" || r.Key == "" ||
+		r.CreatedAt != "1970-01-01T00:00:00.000012345Z" {
+		t.Fatalf("refs[0] = %+v", r)
+	}
+	if r := out.Refs[1]; r.Name != "motd" || r.Kind != "file" || r.User != "bob" {
+		t.Fatalf("refs[1] = %+v", r)
+	}
+	if r := out.Refs[2]; r.Name != "zzz-bad" || r.Kind != "invalid" || r.Key != "" {
+		t.Fatalf("refs[2] = %+v", r)
+	}
+}
+
+func TestListRefsEmpty(t *testing.T) {
+	srv, cookie := browseServer(t, memObjects{}, memRefs{})
+	resp := do(t, "GET", srv.URL+"/admin/api/refs", cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refs = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Refs []refInfoJSON `json:"refs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Refs == nil || len(out.Refs) != 0 {
+		t.Fatalf("refs = %#v, want an empty (non-null) array", out.Refs)
+	}
 }
