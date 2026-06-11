@@ -129,6 +129,14 @@ tunable with `--min/--avg/--max` (ultracdc byte chunking) and `--item-bits`
 (index/entry chunking); `--xattr-inline-max` controls when extended attributes
 spill to an `XattrSet` object.
 
+`.amberignore` files exclude entries from ingestion, with `.gitignore`
+semantics: negation (`!pattern`), `**` globs, directory-only (`name/`) and
+anchored (`/name`) patterns; a file in any subdirectory applies to that
+subtree and composes with inherited patterns (last match wins). Ignored
+directories are pruned without being read. The `.amberignore` files
+themselves are always stored, so a restored tree re-ingests to the same
+root. `--no-ignore` disables all ignore processing.
+
 ## Development
 
 The repository uses a [Nix](https://nixos.org/) flake (with
