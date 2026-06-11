@@ -17,11 +17,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// writeServeFixtures writes an identity key and an allowed-keys file.
-func writeServeFixtures(t *testing.T) (identityPath, allowedPath string) {
+// writeIdentityFixture writes an unencrypted SSH identity key file.
+func writeIdentityFixture(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,38 +28,23 @@ func writeServeFixtures(t *testing.T) (identityPath, allowedPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identityPath = filepath.Join(dir, "identity")
+	identityPath := filepath.Join(t.TempDir(), "identity")
 	if err := os.WriteFile(identityPath, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sshPub, err := ssh.NewPublicKey(pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	allowedPath = filepath.Join(dir, "allowed")
-	if err := os.WriteFile(allowedPath, ssh.MarshalAuthorizedKey(sshPub), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return identityPath, allowedPath
+	return identityPath
 }
 
-func TestServeRequiresFlags(t *testing.T) {
-	identity, allowed := writeServeFixtures(t)
-	cases := [][]string{
-		{"amber-store", "serve", "--store", t.TempDir(), "--identity", identity},    // no allowed-keys
-		{"amber-store", "serve", "--identity", identity, "--allowed-keys", allowed}, // no store
-	}
-	for _, args := range cases {
-		if err := newApp().Run(args); err == nil {
-			t.Fatalf("serve %v succeeded, want missing-flag error", args[2:])
-		}
+func TestServeRequiresStoreFlag(t *testing.T) {
+	identity := writeIdentityFixture(t)
+	if err := newApp().Run([]string{"amber-store", "serve", "--identity", identity}); err == nil {
+		t.Fatal("serve without --store succeeded, want missing-flag error")
 	}
 }
 
 // TestServeAutoIdentity starts serve without --identity and checks that the
 // served identity matches the auto-generated <store>/identity.pub.
 func TestServeAutoIdentity(t *testing.T) {
-	_, allowed := writeServeFixtures(t)
 	storeDir := filepath.Join(t.TempDir(), "store")
 
 	// Reserve a port so the test can find the server.
@@ -77,7 +61,7 @@ func TestServeAutoIdentity(t *testing.T) {
 	go func() {
 		done <- newApp().RunContext(ctx, []string{
 			"amber-store", "serve", "--store", storeDir,
-			"--allowed-keys", allowed, "--listen", addr, "--sync=false",
+			"--listen", addr, "--sync=false",
 		})
 	}()
 
@@ -113,10 +97,10 @@ func TestServeAutoIdentity(t *testing.T) {
 }
 
 func TestServeRejectsTLSHalfConfig(t *testing.T) {
-	identity, allowed := writeServeFixtures(t)
+	identity := writeIdentityFixture(t)
 	err := newApp().Run([]string{
 		"amber-store", "serve", "--store", t.TempDir(),
-		"--identity", identity, "--allowed-keys", allowed,
+		"--identity", identity,
 		"--tls-cert", "/nonexistent/cert.pem",
 	})
 	if err == nil || !strings.Contains(err.Error(), "tls") {
@@ -125,7 +109,6 @@ func TestServeRejectsTLSHalfConfig(t *testing.T) {
 }
 
 func TestServeRejectsEncryptedIdentityFile(t *testing.T) {
-	_, allowed := writeServeFixtures(t)
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +123,7 @@ func TestServeRejectsEncryptedIdentityFile(t *testing.T) {
 	}
 	err = newApp().Run([]string{
 		"amber-store", "serve", "--store", t.TempDir(),
-		"--identity", encPath, "--allowed-keys", allowed,
+		"--identity", encPath,
 	})
 	if err == nil || !strings.Contains(err.Error(), "agent") {
 		t.Fatalf("err = %v, want agent-hint error for passphrase-protected key", err)

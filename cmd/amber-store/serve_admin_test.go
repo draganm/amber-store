@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // startServe runs the serve command against fresh fixtures and waits
@@ -17,7 +21,7 @@ func startServe(t *testing.T, adminPassword string) (baseURL string) {
 	if adminPassword != "" {
 		t.Setenv("AMBER_ADMIN_PASSWORD", adminPassword)
 	}
-	identity, allowed := writeServeFixtures(t)
+	identity := writeIdentityFixture(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -31,7 +35,7 @@ func startServe(t *testing.T, adminPassword string) (baseURL string) {
 	go func() {
 		done <- newApp().RunContext(ctx, []string{
 			"amber-store", "serve", "--store", t.TempDir(),
-			"--identity", identity, "--allowed-keys", allowed,
+			"--identity", identity,
 			"--listen", addr, "--sync=false",
 		})
 	}()
@@ -91,7 +95,31 @@ func TestServeAdminUI(t *testing.T) {
 		t.Fatal("no session cookie set")
 	}
 
-	req, err := http.NewRequest("GET", base+"/admin/api/keys", nil)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
+	req, err := http.NewRequest("POST", base+"/admin/api/keys",
+		strings.NewReader(`{"line":"`+line+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(session)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("add key = %d, want 204", resp.StatusCode)
+	}
+
+	req, err = http.NewRequest("GET", base+"/admin/api/keys", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +131,7 @@ func TestServeAdminUI(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "ssh-ed25519") {
-		t.Fatalf("keys = %d %q, want the fixture key listed", resp.StatusCode, body)
+		t.Fatalf("keys = %d %q, want the added key listed", resp.StatusCode, body)
 	}
 }
 

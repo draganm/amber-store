@@ -15,7 +15,7 @@ import (
 
 	"github.com/draganm/amber-store/admin"
 	"github.com/draganm/amber-store/diskstore"
-	"github.com/draganm/amber-store/internal/allowfile"
+	"github.com/draganm/amber-store/internal/allowstore"
 	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/refstore"
@@ -27,7 +27,6 @@ import (
 type serveConfig struct {
 	store         string
 	listen        string
-	allowedKeys   string
 	identity      string
 	tlsCert       string
 	tlsKey        string
@@ -56,12 +55,6 @@ func serveCommand() *cli.Command {
 				Value:       ":8590",
 				Usage:       "TCP listen address",
 				Destination: &cfg.listen,
-			},
-			&cli.StringFlag{
-				Name:        "allowed-keys",
-				Usage:       "authorized_keys-format file of allowed client keys ('admin' option marks ops keys); reloaded on SIGHUP",
-				Required:    true,
-				Destination: &cfg.allowedKeys,
 			},
 			&cli.StringFlag{
 				Name:        "identity",
@@ -148,23 +141,6 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 	defer closeIdentity()
 
-	keys, err := allowfile.Open(cfg.allowedKeys)
-	if err != nil {
-		return err
-	}
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
-	go func() {
-		for range hup {
-			if err := keys.Reload(); err != nil {
-				logger.Error("allowlist reload failed; keeping the previous list", "error", err)
-				continue
-			}
-			logger.Info("allowlist reloaded", "path", cfg.allowedKeys)
-		}
-	}()
-
 	store, err := diskstore.Open(cfg.store, diskstore.WithSync(cfg.sync))
 	if err != nil {
 		return err
@@ -175,6 +151,19 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return err
 	}
 	defer refs.Close()
+
+	keys, err := allowstore.Open(filepath.Join(cfg.store, "allowed-keys"), cfg.sync)
+	if err != nil {
+		return err
+	}
+	defer keys.Close()
+	if len(keys.List()) == 0 {
+		if cfg.adminPassword == "" {
+			logger.Warn("the allowlist is empty and the admin UI is disabled; this server cannot authorize anyone (set AMBER_ADMIN_PASSWORD to manage keys)")
+		} else {
+			logger.Warn("the allowlist is empty; add keys via the admin UI at /admin/")
+		}
+	}
 
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
