@@ -487,6 +487,52 @@ func TestRawMissingObject(t *testing.T) {
 	}
 }
 
+// TestRawHTMLSandboxed pins the stored-HTML defense: whether typed by
+// extension or by content sniffing, HTML renders only inside an opaque
+// CSP sandbox.
+func TestRawHTMLSandboxed(t *testing.T) {
+	objs := memObjects{}
+	html, err := fstree.EncodeBlob([]byte("<html><script>document.title='pwned'</script></html>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(html)
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("page.html"), Mode: 0o100644, Mtime: 1, ContentKey: html.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(leaf)
+	refs := memRefs{
+		"site":     mustRef(t, "site", leaf.Key, "alice"),
+		"htmlblob": mustRef(t, "htmlblob", html.Key, "alice"), // extensionless: sniffed
+	}
+	srv, cookie := browseServer(t, objs, refs)
+
+	for name, params := range map[string]map[string]string{
+		"by extension": {"ref": "site", "path": "page.html"},
+		"by sniffing":  {"ref": "htmlblob", "path": ""},
+	} {
+		resp := do(t, "GET", rawURL(srv, params), cookie, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", name, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Fatalf("%s Content-Type = %q, want text/html*", name, ct)
+		}
+		if csp := resp.Header.Get("Content-Security-Policy"); csp != "sandbox" {
+			t.Fatalf("%s CSP = %q, want exactly sandbox", name, csp)
+		}
+		if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s missing nosniff", name)
+		}
+		if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", name, cc)
+		}
+	}
+}
+
 // leafContentKey stores a small blob and returns its key bytes.
 func leafContentKey(t *testing.T, objs memObjects) []byte {
 	t.Helper()

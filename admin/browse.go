@@ -347,6 +347,10 @@ func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
 		}
 		filename = fileBaseName(r.URL.Query().Get("ref"))
 	case t.entry.Mode&unix.S_IFMT == unix.S_IFREG:
+		if t.key.Type() != key.Blob && t.key.Type() != key.FileNode {
+			jsonError(w, http.StatusInternalServerError, "file entry does not reference file content")
+			return
+		}
 		filename = fileBaseName(string(t.entry.Name))
 	default:
 		jsonError(w, http.StatusBadRequest, "not a regular file")
@@ -374,6 +378,7 @@ func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatUint(t.key.Length(), 10))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition",
 		mime.FormatMediaType(disposition, map[string]string{"filename": filename}))
 	if err := h.writeFileContent(w, t.key); err != nil {
