@@ -47,6 +47,15 @@ A `.pub` path signs via ssh-agent (reusing `internal/sshsign`).
 checks and are permitted to delete references. The file is loaded at start and
 reloaded on SIGHUP without restarting the server.
 
+**Admin UI.** Setting `AMBER_ADMIN_PASSWORD` (or `--admin-password`) enables a
+browser console at `/admin/` — a solid-js SPA embedded in the binary
+(`go generate ./cmd/amber-store` rebuilds it) — where an operator signs in
+with that password and inspects, adds, and removes allowed keys. Edits go
+through atomic rewrites of the `--allowed-keys` file and take effect
+immediately; the file stays the source of truth, so hand edits plus SIGHUP
+keep working. Sessions are in-memory cookies (12h); when the password is not
+configured, the `/admin/` surface does not exist.
+
 **Default identities.** When no key flag is given, each service generates an
 ed25519 keypair on first start and persists it in its store directory as
 `identity` (0600) and `identity.pub` (0644). The same key is loaded on every

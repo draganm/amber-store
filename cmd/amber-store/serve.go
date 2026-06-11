@@ -10,12 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/draganm/amber-store/admin"
 	"github.com/draganm/amber-store/diskstore"
-	"github.com/draganm/amber-store/internal/allowlist"
+	"github.com/draganm/amber-store/internal/allowfile"
 	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/refstore"
@@ -25,16 +25,17 @@ import (
 )
 
 type serveConfig struct {
-	store       string
-	listen      string
-	allowedKeys string
-	identity    string
-	tlsCert     string
-	tlsKey      string
-	authWindow  time.Duration
-	sync        bool
-	logLevel    string
-	logFormat   string
+	store         string
+	listen        string
+	allowedKeys   string
+	identity      string
+	tlsCert       string
+	tlsKey        string
+	authWindow    time.Duration
+	sync          bool
+	adminPassword string
+	logLevel      string
+	logFormat     string
 }
 
 func serveCommand() *cli.Command {
@@ -90,6 +91,12 @@ func serveCommand() *cli.Command {
 				Destination: &cfg.sync,
 			},
 			&cli.StringFlag{
+				Name:        "admin-password",
+				Usage:       "enable the /admin/ web UI for managing allowed keys; set via the environment so the password stays out of process listings",
+				EnvVars:     []string{"AMBER_ADMIN_PASSWORD"},
+				Destination: &cfg.adminPassword,
+			},
+			&cli.StringFlag{
 				Name:        "log-level",
 				Value:       "info",
 				Usage:       "log level: debug, info, warn or error",
@@ -141,23 +148,19 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 	defer closeIdentity()
 
-	initial, err := allowlist.Load(cfg.allowedKeys)
+	keys, err := allowfile.Open(cfg.allowedKeys)
 	if err != nil {
 		return err
 	}
-	var allow atomic.Pointer[allowlist.List]
-	allow.Store(initial)
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			l, err := allowlist.Load(cfg.allowedKeys)
-			if err != nil {
+			if err := keys.Reload(); err != nil {
 				logger.Error("allowlist reload failed; keeping the previous list", "error", err)
 				continue
 			}
-			allow.Store(l)
 			logger.Info("allowlist reloaded", "path", cfg.allowedKeys)
 		}
 	}()
@@ -178,15 +181,39 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return fmt.Errorf("listening on %s: %w", cfg.listen, err)
 	}
 
-	srv := &http.Server{
-		Handler: server.New(server.Config{
-			Store:    store,
-			Refs:     refs,
-			Allow:    func() *allowlist.List { return allow.Load() },
-			Identity: signer,
+	handler := server.New(server.Config{
+		Store:    store,
+		Refs:     refs,
+		Allow:    keys.Current,
+		Identity: signer,
+		Log:      logger,
+		Window:   cfg.authWindow,
+	})
+	if cfg.adminPassword != "" {
+		ui, err := adminUI()
+		if err != nil {
+			return fmt.Errorf("loading the embedded admin UI: %w", err)
+		}
+		adminHandler, err := admin.New(admin.Config{
+			Password: cfg.adminPassword,
+			Keys:     keys,
+			UI:       ui,
 			Log:      logger,
-			Window:   cfg.authWindow,
-		}),
+			Secure:   cfg.tlsCert != "",
+		})
+		if err != nil {
+			return err
+		}
+		root := http.NewServeMux()
+		root.Handle("/admin/", adminHandler)
+		root.Handle("/admin", adminHandler)
+		root.Handle("/", handler)
+		handler = root
+		logger.Info("admin UI enabled", "path", "/admin/")
+	}
+
+	srv := &http.Server{
+		Handler: handler,
 		// Route the http.Server's own diagnostics (handler panics, accept
 		// errors) through the structured logger, like the daemon does.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),

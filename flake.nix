@@ -21,7 +21,8 @@
           '';
           hardeningDisable = [ "all" ];
 
-          packages = with pkgs; [ go  ];
+          # nodejs builds the embedded admin SPA (go generate ./cmd/amber-store)
+          packages = with pkgs; [ go nodejs ];
         };
       });
     };
