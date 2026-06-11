@@ -19,7 +19,7 @@ type store map[string][]byte
 // keyed by key hex, and returns it with the root key.
 func loadStore(t *testing.T, dir string) (store, key.Key) {
 	t.Helper()
-	root, objs := collectSequential(t, dir, chunkers.NewItemChunker(7), nil, 256)
+	root, objs := collectSequential(t, dir, nil, chunkers.NewItemChunker(7), nil, 256)
 	s := store{}
 	for k, v := range objs {
 		s[k.String()] = v

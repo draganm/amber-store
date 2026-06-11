@@ -17,6 +17,7 @@ import (
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/amberignore"
 	"github.com/draganm/amber-store/internal/socketpath"
 	"github.com/draganm/amber-store/internal/userconfig"
 	"github.com/draganm/amber-store/key"
@@ -40,7 +41,7 @@ var errIngestStopped = errors.New("ingest: consumer stopped")
 //
 // Once the walk completes successfully the resolved root key is written to
 // *root; a build error is yielded to the consumer instead.
-func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[fstree.Object, error] {
+func ingestObjects(dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[fstree.Object, error] {
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -69,7 +70,7 @@ func ingestObjects(dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteO
 				emit: emit,
 				sem:  make(chan struct{}, jobs),
 			}
-			rk, err := b.buildDir(dir, emit)
+			rk, err := b.buildDir(dir, ign, emit)
 			if err != nil {
 				// errIngestStopped means the consumer quit; not a real error.
 				if !errors.Is(err, errIngestStopped) {
@@ -110,24 +111,32 @@ type pbuilder struct {
 	sem chan struct{}
 }
 
-// buildDir builds the directory at path and returns its root key. Sibling
-// entries are built concurrently; the directory's leaf/index objects are then
-// emitted in sorted-entry order, identical to the sequential walk.
-func (b *pbuilder) buildDir(path string, emit fstree.Emit) (key.Key, error) {
+// buildDir builds the directory at path and returns its root key. Entries
+// excluded by ign are skipped (excluded directories are pruned without being
+// read). Sibling entries are built concurrently; the directory's leaf/index
+// objects are then emitted in sorted-entry order, identical to the sequential
+// walk.
+func (b *pbuilder) buildDir(path string, ign *amberignore.Matcher, emit fstree.Emit) (key.Key, error) {
 	ents, err := os.ReadDir(path) // sorted bytewise by name
 	if err != nil {
 		return key.Key{}, err
 	}
+	kept := make([]os.DirEntry, 0, len(ents))
+	for _, de := range ents {
+		if !ign.Ignored(de.Name(), de.IsDir()) {
+			kept = append(kept, de)
+		}
+	}
 
-	entries := make([]fstree.Entry, len(ents))
-	errs := make([]error, len(ents))
+	entries := make([]fstree.Entry, len(kept))
+	errs := make([]error, len(kept))
 	var wg sync.WaitGroup
 
-	for i, de := range ents {
+	for i, de := range kept {
 		full := filepath.Join(path, de.Name())
 		name := de.Name()
 		build := func(i int, full, name string) {
-			entries[i], errs[i] = b.d.buildEntry(full, name, b.emit, b.buildDir)
+			entries[i], errs[i] = b.d.buildEntry(full, name, ign, b.emit, b.buildDir)
 		}
 		select {
 		case b.sem <- struct{}{}:
@@ -201,14 +210,14 @@ func ingestCommand() *cli.Command {
 
 // writePack builds the tree at dir and serializes every object into dst as a
 // pack-write stream, returning the resolved root key.
-func writePack(dst io.Writer, dir string, cc *chunkConfig, jobs int, p *Progress) (key.Key, error) {
+func writePack(dst io.Writer, dir string, ign *amberignore.Matcher, cc *chunkConfig, jobs int, p *Progress) (key.Key, error) {
 	byteOpts, err := cc.byteOpts()
 	if err != nil {
 		return key.Key{}, err
 	}
 	pw := amberpack.NewWriter(dst)
 	var root key.Key
-	for o, err := range ingestObjects(dir, cc.itemChunker(), byteOpts, cc.xattrInlineMax, jobs, p, &root) {
+	for o, err := range ingestObjects(dir, ign, cc.itemChunker(), byteOpts, cc.xattrInlineMax, jobs, p, &root) {
 		if err != nil {
 			return key.Key{}, err
 		}
@@ -286,7 +295,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		if err != nil {
 			return err
 		}
-		root, err = writePack(f, dir, &cfg.chunk, cfg.jobs, prog)
+		root, err = writePack(f, dir, nil, &cfg.chunk, cfg.jobs, prog)
 		if err != nil {
 			f.Close()
 			return err
@@ -304,7 +313,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		}
 		resCh := make(chan result, 1)
 		go func() {
-			r, err := writePack(pw, dir, &cfg.chunk, cfg.jobs, prog)
+			r, err := writePack(pw, dir, nil, &cfg.chunk, cfg.jobs, prog)
 			if err != nil {
 				pw.CloseWithError(err)
 			} else {

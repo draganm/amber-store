@@ -16,13 +16,14 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/amberignore"
 	"github.com/draganm/amber-store/key"
 )
 
 // collectSequential builds the tree at dir with the sequential driver and returns
 // the root plus a map of every emitted object's key to its bytes. It is the
 // reference oracle the parallel build and the CLI are checked against.
-func collectSequential(t *testing.T, dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int) (key.Key, map[key.Key][]byte) {
+func collectSequential(t *testing.T, dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int) (key.Key, map[key.Key][]byte) {
 	t.Helper()
 	objs := map[key.Key][]byte{}
 	emit := func(o fstree.Object) error {
@@ -30,7 +31,7 @@ func collectSequential(t *testing.T, dir string, ic chunkers.ItemChunker, byteOp
 		return nil
 	}
 	d := &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax}
-	root, err := d.buildDir(dir, emit)
+	root, err := d.buildDir(dir, ign, emit)
 	if err != nil {
 		t.Fatalf("sequential build: %v", err)
 	}
@@ -38,11 +39,11 @@ func collectSequential(t *testing.T, dir string, ic chunkers.ItemChunker, byteOp
 }
 
 // collectParallel drains ingestObjects into a key->bytes map and returns the root.
-func collectParallel(t *testing.T, dir string, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax, jobs int) (key.Key, map[key.Key][]byte) {
+func collectParallel(t *testing.T, dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax, jobs int) (key.Key, map[key.Key][]byte) {
 	t.Helper()
 	objs := map[key.Key][]byte{}
 	var root key.Key
-	for o, err := range ingestObjects(dir, ic, byteOpts, xattrInlineMax, jobs, nil, &root) {
+	for o, err := range ingestObjects(dir, ign, ic, byteOpts, xattrInlineMax, jobs, nil, &root) {
 		if err != nil {
 			t.Fatalf("parallel build: %v", err)
 		}
@@ -82,8 +83,8 @@ func TestIngestObjects_ParityWithSequential(t *testing.T) {
 	}
 
 	ic := chunkers.NewItemChunker(7)
-	seqRoot, seqObjs := collectSequential(t, dir, ic, nil, 256)
-	parRoot, parObjs := collectParallel(t, dir, ic, nil, 256, 4)
+	seqRoot, seqObjs := collectSequential(t, dir, nil, ic, nil, 256)
+	parRoot, parObjs := collectParallel(t, dir, nil, ic, nil, 256, 4)
 	if seqRoot != parRoot {
 		t.Fatalf("parallel root %s != sequential root %s", parRoot, seqRoot)
 	}
@@ -94,9 +95,9 @@ func TestIngestObjects_ParallelParityDeepTree(t *testing.T) {
 	dir := t.TempDir()
 	writeDeepTree(t, dir)
 	ic := chunkers.NewItemChunker(7)
-	seqRoot, seqObjs := collectSequential(t, dir, ic, nil, 256)
+	seqRoot, seqObjs := collectSequential(t, dir, nil, ic, nil, 256)
 	jobs := max(runtime.NumCPU(), 4)
-	parRoot, parObjs := collectParallel(t, dir, ic, nil, 256, jobs)
+	parRoot, parObjs := collectParallel(t, dir, nil, ic, nil, 256, jobs)
 	if seqRoot != parRoot {
 		t.Fatalf("parallel root %s != sequential root %s", parRoot, seqRoot)
 	}
@@ -233,7 +234,7 @@ func TestIngestObjects_ReportsProgress(t *testing.T) {
 	}
 	p := NewProgress(2, 11)
 	var root key.Key
-	for _, err := range ingestObjects(dir, chunkers.NewItemChunker(7), nil, 256, 2, p, &root) {
+	for _, err := range ingestObjects(dir, nil, chunkers.NewItemChunker(7), nil, 256, 2, p, &root) {
 		if err != nil {
 			t.Fatal(err)
 		}

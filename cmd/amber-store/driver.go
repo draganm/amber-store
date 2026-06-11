@@ -7,6 +7,7 @@ import (
 
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/amberignore"
 	"github.com/draganm/amber-store/internal/cborx"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
@@ -20,16 +21,20 @@ type driver struct {
 }
 
 // buildDir builds the directory at path and returns its root key, emitting every
-// object in its subtree (children before parents).
-func (d *driver) buildDir(path string, emit fstree.Emit) (key.Key, error) {
+// object in its subtree (children before parents). Entries excluded by ign are
+// skipped; excluded directories are pruned without being read.
+func (d *driver) buildDir(path string, ign *amberignore.Matcher, emit fstree.Emit) (key.Key, error) {
 	ents, err := os.ReadDir(path) // sorted bytewise by name
 	if err != nil {
 		return key.Key{}, err
 	}
 	db := fstree.NewDirBuilder(d.ic)
 	for _, de := range ents {
+		if ign.Ignored(de.Name(), de.IsDir()) {
+			continue
+		}
 		full := filepath.Join(path, de.Name())
-		e, err := d.buildEntry(full, de.Name(), emit, d.buildDir)
+		e, err := d.buildEntry(full, de.Name(), ign, emit, d.buildDir)
 		if err != nil {
 			return key.Key{}, err
 		}
@@ -45,7 +50,7 @@ func (d *driver) buildDir(path string, emit fstree.Emit) (key.Key, error) {
 // links and special files. buildDir is the function used to build a
 // subdirectory: d.buildDir for the sequential pack walk, or the parallel
 // builder's buildDir for concurrent ingestion.
-func (d *driver) buildEntry(full, name string, emit fstree.Emit, buildDir func(string, fstree.Emit) (key.Key, error)) (fstree.Entry, error) {
+func (d *driver) buildEntry(full, name string, ign *amberignore.Matcher, emit fstree.Emit, buildDir func(string, *amberignore.Matcher, fstree.Emit) (key.Key, error)) (fstree.Entry, error) {
 	info, err := os.Lstat(full)
 	if err != nil {
 		return fstree.Entry{}, err
@@ -68,7 +73,11 @@ func (d *driver) buildEntry(full, name string, emit fstree.Emit, buildDir func(s
 		e.ContentKey = ck[:]
 		d.p.FileDone()
 	case unix.S_IFDIR:
-		ck, err := buildDir(full, emit)
+		sub, err := ign.Descend(full, name)
+		if err != nil {
+			return fstree.Entry{}, err
+		}
+		ck, err := buildDir(full, sub, emit)
 		if err != nil {
 			return fstree.Entry{}, err
 		}

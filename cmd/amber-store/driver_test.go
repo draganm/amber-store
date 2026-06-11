@@ -20,7 +20,7 @@ func TestBuildDir_FailFastOnUnreadableFile(t *testing.T) {
 	}
 	d := &driver{ic: chunkers.NewItemChunker(7), xattrInlineMax: 256}
 	emit := func(fstree.Object) error { return nil }
-	if _, err := d.buildDir(dir, emit); err == nil {
+	if _, err := d.buildDir(dir, nil, emit); err == nil {
 		t.Errorf("expected buildDir to fail on an unreadable file")
 	}
 }
