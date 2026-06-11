@@ -206,14 +206,14 @@ func entryJSON(e fstree.Entry) treeEntry {
 	name := string(e.Name)
 	invalid := !utf8.ValidString(name)
 	if invalid {
-		name = strings.ToValidUTF8(name, "")
+		name = strings.ToValidUTF8(name, "�")
 	}
 	out := treeEntry{
 		Name:        name,
 		Kind:        entryKind(e.Mode),
 		Mode:        e.Mode,
 		Mtime:       e.Mtime,
-		Target:      strings.ToValidUTF8(string(e.LinkTarget), ""),
+		Target:      strings.ToValidUTF8(string(e.LinkTarget), "�"),
 		NameInvalid: invalid,
 	}
 	if len(e.ContentKey) == key.Size {
