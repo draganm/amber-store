@@ -526,3 +526,86 @@ a.ref-row__name:hover {
   gap: 8px;
   flex-shrink: 0;
 }
+
+/* ---- tree browser ---- */
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  margin: 6px 0 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+}
+.crumbs a {
+  color: #111;
+  text-decoration: none;
+}
+.crumbs a:hover {
+  color: #2db6be;
+}
+.crumbs__sep {
+  color: #999;
+}
+.browser-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tree {
+  display: flex;
+  flex-direction: column;
+  border: 1.5px solid #111;
+  background: #fff;
+}
+.tree-head,
+.tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 90px 170px 70px 170px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+}
+.tree-head {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #666;
+  border-bottom: 1.5px solid #111;
+}
+.tree-row + .tree-row {
+  border-top: 1px solid #e2e2e2;
+}
+.tree-row__name {
+  font-weight: 600;
+  color: #111;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+a.tree-row__name:hover {
+  color: #2db6be;
+}
+.tree-row__name--invalid {
+  color: #d23;
+}
+.tree-row__target {
+  color: #666;
+  font-weight: 400;
+}
+.tree-row__meta {
+  color: #666;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.tree-row__mode {
+  font-family: 'JetBrains Mono', monospace;
+}
+.tree-row__actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.load-more {
+  margin: 10px 14px;
+  align-self: center;
+}
