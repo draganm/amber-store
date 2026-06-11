@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -255,6 +258,130 @@ func (h *handler) tree(w http.ResponseWriter, r *http.Request) {
 	default:
 		st := entryJSON(*t.entry)
 		writeJSON(w, map[string]any{"kind": st.Kind, "stat": st})
+	}
+}
+
+// fileBaseName returns the last slash-separated segment of s, lossily
+// UTF-8-cleaned for use in a Content-Disposition filename.
+func fileBaseName(s string) string {
+	base := s[strings.LastIndexByte(s, '/')+1:]
+	base = strings.ToValidUTF8(base, "_")
+	if base == "" {
+		return "file"
+	}
+	return base
+}
+
+// firstBytes returns up to n leading bytes of the file content at k,
+// reading only the leftmost path of its FileNode tree.
+func (h *handler) firstBytes(k key.Key, n int) ([]byte, error) {
+	for {
+		data, err := h.objects.Get(k)
+		if err != nil {
+			return nil, err
+		}
+		switch k.Type() {
+		case key.Blob:
+			if len(data) > n {
+				data = data[:n]
+			}
+			return data, nil
+		case key.FileNode:
+			children, err := fstree.DecodeFileNode(data)
+			if err != nil {
+				return nil, err
+			}
+			if len(children) == 0 {
+				return nil, nil
+			}
+			k = children[0]
+		default:
+			return nil, fmt.Errorf("%s is not a file-content object (type %v)", k, k.Type())
+		}
+	}
+}
+
+// writeFileContent streams the file content at k, descending FileNode
+// levels and concatenating Blob leaves in order.
+func (h *handler) writeFileContent(w io.Writer, k key.Key) error {
+	data, err := h.objects.Get(k)
+	if err != nil {
+		return err
+	}
+	switch k.Type() {
+	case key.Blob:
+		_, err := w.Write(data)
+		return err
+	case key.FileNode:
+		children, err := fstree.DecodeFileNode(data)
+		if err != nil {
+			return err
+		}
+		for _, ck := range children {
+			if err := h.writeFileContent(w, ck); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s is not a file-content object (type %v)", k, k.Type())
+	}
+}
+
+// raw streams a regular file's bytes: inline for viewing (the default) or
+// as an attachment (?dl=1). Stored content is untrusted, so every response
+// is sandboxed — a stored HTML file must not script against the admin
+// session.
+func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
+	t, status, err := h.resolveTarget(r)
+	if err != nil {
+		jsonError(w, status, err.Error())
+		return
+	}
+	var filename string
+	switch {
+	case t.entry == nil:
+		if t.key.Type() != key.Blob && t.key.Type() != key.FileNode {
+			jsonError(w, http.StatusBadRequest, "not a file")
+			return
+		}
+		filename = fileBaseName(r.URL.Query().Get("ref"))
+	case t.entry.Mode&unix.S_IFMT == unix.S_IFREG:
+		filename = fileBaseName(string(t.entry.Name))
+	default:
+		jsonError(w, http.StatusBadRequest, "not a regular file")
+		return
+	}
+
+	ctype := mime.TypeByExtension(path.Ext(filename))
+	if ctype == "" {
+		head, err := h.firstBytes(t.key, 512)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, diskstore.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			jsonError(w, status, err.Error())
+			return
+		}
+		ctype = http.DetectContentType(head)
+	}
+	disposition := "inline"
+	if r.URL.Query().Get("dl") != "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Length", strconv.FormatUint(t.key.Length(), 10))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("Content-Disposition",
+		mime.FormatMediaType(disposition, map[string]string{"filename": filename}))
+	if err := h.writeFileContent(w, t.key); err != nil {
+		// Headers are sent; the only honest move is to abort the
+		// connection so the client sees a truncated transfer, not a
+		// silently short "success".
+		h.log.Error("aborting raw file stream", "error", err)
+		panic(http.ErrAbortHandler)
 	}
 }
 

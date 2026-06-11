@@ -3,12 +3,14 @@ package admin_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/admin"
@@ -359,6 +361,129 @@ func TestTreeInvalidName(t *testing.T) {
 	}
 	if e := got.Entries[1]; e.Name != "ok" || e.NameInvalid || e.Target != "t�" {
 		t.Fatalf("ok entry = %+v", e)
+	}
+}
+
+func rawURL(srv *httptest.Server, params map[string]string) string {
+	q := url.Values{}
+	for k, v := range params {
+		q.Set(k, v)
+	}
+	return srv.URL + "/admin/api/raw?" + q.Encode()
+}
+
+func TestRawFile(t *testing.T) {
+	objs := memObjects{}
+	root, hello := seedTree(t, objs)
+	refs := memRefs{
+		"backup/daily": mustRef(t, "backup/daily", root, "alice@example.com"),
+		"motd":         mustRef(t, "motd", hello, "bob"),
+	}
+	srv, cookie := browseServer(t, objs, refs)
+
+	// View: inline disposition, typed by extension, sandboxed.
+	resp := do(t, "GET", rawURL(srv, map[string]string{"ref": "backup/daily", "path": "hello.txt"}), cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("raw = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello, amber" {
+		t.Fatalf("raw body = %q", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain*", ct)
+	}
+	if resp.Header.Get("Content-Security-Policy") != "sandbox" {
+		t.Fatalf("CSP = %q, want sandbox", resp.Header.Get("Content-Security-Policy"))
+	}
+	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("missing nosniff")
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "12" {
+		t.Fatalf("Content-Length = %q, want 12", cl)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "inline") || !strings.Contains(cd, "hello.txt") {
+		t.Fatalf("Content-Disposition = %q, want inline with filename", cd)
+	}
+
+	// Download: attachment disposition.
+	resp = do(t, "GET", rawURL(srv, map[string]string{"ref": "backup/daily", "path": "hello.txt", "dl": "1"}), cookie, "")
+	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+		t.Fatalf("dl Content-Disposition = %q, want attachment", cd)
+	}
+
+	// A ref pointing straight at a file streams with the ref basename and a
+	// sniffed type (no extension).
+	resp = do(t, "GET", rawURL(srv, map[string]string{"ref": "motd", "path": ""}), cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("file-ref raw = %d, want 200", resp.StatusCode)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	if string(body) != "hello, amber" {
+		t.Fatalf("file-ref raw body = %q", body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("sniffed Content-Type = %q, want text/plain*", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "motd") {
+		t.Fatalf("file-ref Content-Disposition = %q, want the ref basename", cd)
+	}
+
+	// Non-files are 400.
+	for _, path := range []string{"sub", "sub/link"} {
+		resp = do(t, "GET", rawURL(srv, map[string]string{"ref": "backup/daily", "path": path}), cookie, "")
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("raw %s = %d, want 400", path, resp.StatusCode)
+		}
+	}
+}
+
+func TestRawChunkedFile(t *testing.T) {
+	objs := memObjects{}
+	first, err := fstree.EncodeBlob([]byte("first-"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(first)
+	second, err := fstree.EncodeBlob([]byte("second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(second)
+	node, err := fstree.EncodeFileNode([]key.Key{first.Key, second.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(node)
+	refs := memRefs{"chunked": mustRef(t, "chunked", node.Key, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	resp := do(t, "GET", rawURL(srv, map[string]string{"ref": "chunked", "path": ""}), cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("raw = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "first-second" {
+		t.Fatalf("chunked body = %q, want first-second", body)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "12" {
+		t.Fatalf("Content-Length = %q, want 12", cl)
+	}
+}
+
+func TestRawMissingObject(t *testing.T) {
+	objs := memObjects{}
+	// A ref whose target object was never stored.
+	ghost, err := fstree.EncodeBlob([]byte("never stored"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := memRefs{"ghost": mustRef(t, "ghost", ghost.Key, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	resp := do(t, "GET", rawURL(srv, map[string]string{"ref": "ghost", "path": ""}), cookie, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("raw missing object = %d, want 404", resp.StatusCode)
 	}
 }
 

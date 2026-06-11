@@ -99,6 +99,7 @@ func New(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("DELETE /admin/api/keys", h.sameOrigin(h.authed(h.removeKey)))
 	mux.HandleFunc("GET /admin/api/refs", h.authed(h.listRefs))
 	mux.HandleFunc("GET /admin/api/tree", h.authed(h.tree))
+	mux.HandleFunc("GET /admin/api/raw", h.authed(h.raw))
 	mux.HandleFunc("GET /admin/", h.serveUI)
 	mux.Handle("GET /admin", http.RedirectHandler("/admin/", http.StatusMovedPermanently))
 	return mux, nil
