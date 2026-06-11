@@ -6,11 +6,13 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/draganm/amber-store/admin"
+	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowstore"
@@ -177,5 +179,158 @@ func TestListRefsEmpty(t *testing.T) {
 	}
 	if out.Refs == nil || len(out.Refs) != 0 {
 		t.Fatalf("refs = %#v, want an empty (non-null) array", out.Refs)
+	}
+}
+
+type treeEntryJSON struct {
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Size        uint64 `json:"size"`
+	Mode        uint64 `json:"mode"`
+	Mtime       int64  `json:"mtime"`
+	Target      string `json:"target"`
+	NameInvalid bool   `json:"raw_name_invalid"`
+}
+
+type treeJSON struct {
+	Kind    string          `json:"kind"`
+	Entries []treeEntryJSON `json:"entries"`
+	More    bool            `json:"more"`
+	Stat    *treeEntryJSON  `json:"stat"`
+}
+
+func treeURL(srv *httptest.Server, params map[string]string) string {
+	q := url.Values{}
+	for k, v := range params {
+		q.Set(k, v)
+	}
+	return srv.URL + "/admin/api/tree?" + q.Encode()
+}
+
+func getTree(t *testing.T, srv *httptest.Server, cookie *http.Cookie, params map[string]string, wantStatus int) treeJSON {
+	t.Helper()
+	resp := do(t, "GET", treeURL(srv, params), cookie, "")
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("tree %v = %d, want %d", params, resp.StatusCode, wantStatus)
+	}
+	var out treeJSON
+	if wantStatus == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return out
+}
+
+func TestTreeListing(t *testing.T) {
+	objs := memObjects{}
+	root, hello := seedTree(t, objs)
+	refs := memRefs{
+		"backup/daily": mustRef(t, "backup/daily", root, "alice@example.com"),
+		"motd":         mustRef(t, "motd", hello, "bob"),
+	}
+	srv, cookie := browseServer(t, objs, refs)
+
+	// Root listing: full metadata, name order.
+	got := getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": ""}, http.StatusOK)
+	if got.Kind != "dir" || got.More || len(got.Entries) != 2 {
+		t.Fatalf("root tree = %+v", got)
+	}
+	if e := got.Entries[0]; e.Name != "hello.txt" || e.Kind != "file" ||
+		e.Size != 12 || e.Mode != 0o100644 || e.Mtime != 1 {
+		t.Fatalf("entries[0] = %+v", e)
+	}
+	if e := got.Entries[1]; e.Name != "sub" || e.Kind != "dir" || e.Mode != 0o040755 {
+		t.Fatalf("entries[1] = %+v", e)
+	}
+
+	// Subdirectory: symlink carries its target.
+	got = getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": "sub"}, http.StatusOK)
+	if len(got.Entries) != 2 || got.Entries[0].Kind != "symlink" || got.Entries[0].Target != "../hello.txt" {
+		t.Fatalf("sub tree = %+v", got)
+	}
+
+	// A file path returns its stat.
+	got = getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": "sub/nested.txt"}, http.StatusOK)
+	if got.Kind != "file" || got.Stat == nil || got.Stat.Size != 6 || got.Stat.Name != "nested.txt" {
+		t.Fatalf("file tree = %+v", got)
+	}
+
+	// A ref that points straight at a file: stat from the key alone.
+	got = getTree(t, srv, cookie, map[string]string{"ref": "motd", "path": ""}, http.StatusOK)
+	if got.Kind != "file" || got.Stat == nil || got.Stat.Size != 12 {
+		t.Fatalf("file-ref tree = %+v", got)
+	}
+
+	// Errors.
+	getTree(t, srv, cookie, map[string]string{"ref": "nope", "path": ""}, http.StatusNotFound)
+	getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": "ghost"}, http.StatusNotFound)
+	getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": "hello.txt/x"}, http.StatusBadRequest)
+	getTree(t, srv, cookie, map[string]string{"ref": "motd", "path": "x"}, http.StatusBadRequest)
+	getTree(t, srv, cookie, map[string]string{"path": "x"}, http.StatusBadRequest)
+	getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "limit": "0"}, http.StatusBadRequest)
+	getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "limit": "junk"}, http.StatusBadRequest)
+}
+
+// bigDirRef seeds a 1200-entry directory (multi-level prolly tree) under a
+// "big" ref and returns the server.
+func bigDirRef(t *testing.T) (*httptest.Server, *http.Cookie) {
+	t.Helper()
+	objs := memObjects{}
+	blob, err := fstree.EncodeBlob([]byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(blob)
+	db := fstree.NewDirBuilder(chunkers.NewItemChunker(3))
+	emit := func(o fstree.Object) error { objs.put(o); return nil }
+	for i := range 1200 {
+		e := fstree.Entry{Name: fmt.Appendf(nil, "e%05d", i), Mode: 0o100644, ContentKey: blob.Key[:]}
+		if err := db.AddEntry(emit, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := db.Finish(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := memRefs{"big": mustRef(t, "big", root, "alice")}
+	return browseServer(t, objs, refs)
+}
+
+func TestTreePagination(t *testing.T) {
+	srv, cookie := bigDirRef(t)
+
+	// Page through with limit=500 (the default): 500 + 500 + 200.
+	var names []string
+	after := ""
+	for page := 0; ; page++ {
+		params := map[string]string{"ref": "big", "path": "", "after": after}
+		got := getTree(t, srv, cookie, params, http.StatusOK)
+		for _, e := range got.Entries {
+			names = append(names, e.Name)
+		}
+		if !got.More {
+			break
+		}
+		if page > 3 {
+			t.Fatal("more=true never cleared")
+		}
+		after = got.Entries[len(got.Entries)-1].Name
+	}
+	if len(names) != 1200 || names[0] != "e00000" || names[1199] != "e01199" {
+		t.Fatalf("paged %d names, first %q last %q", len(names), names[0], names[len(names)-1])
+	}
+
+	// Explicit small limit.
+	got := getTree(t, srv, cookie, map[string]string{"ref": "big", "after": "e00009", "limit": "5"}, http.StatusOK)
+	if len(got.Entries) != 5 || got.Entries[0].Name != "e00010" || !got.More {
+		t.Fatalf("limited page = %+v", got)
+	}
+
+	// Limits above the cap are clamped to 1000, not rejected.
+	got = getTree(t, srv, cookie, map[string]string{"ref": "big", "limit": "5000"}, http.StatusOK)
+	if len(got.Entries) != 1000 || !got.More {
+		t.Fatalf("clamped page: len=%d more=%v, want 1000 true", len(got.Entries), got.More)
 	}
 }
