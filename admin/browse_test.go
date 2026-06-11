@@ -334,3 +334,126 @@ func TestTreePagination(t *testing.T) {
 		t.Fatalf("clamped page: len=%d more=%v, want 1000 true", len(got.Entries), got.More)
 	}
 }
+
+// TestTreeInvalidName pins the lossy-name contract: invalid UTF-8 is
+// replaced with U+FFFD and flagged, never dropped or hidden.
+func TestTreeInvalidName(t *testing.T) {
+	objs := memObjects{}
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("a\x80b"), Mode: 0o100644, Mtime: 1, ContentKey: leafContentKey(t, objs)},
+		{Name: []byte("ok"), Mode: 0o120777, Mtime: 2, LinkTarget: []byte("t\x80")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(leaf)
+	refs := memRefs{"weird": mustRef(t, "weird", leaf.Key, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	got := getTree(t, srv, cookie, map[string]string{"ref": "weird"}, http.StatusOK)
+	if len(got.Entries) != 2 {
+		t.Fatalf("entries = %+v", got.Entries)
+	}
+	if e := got.Entries[0]; e.Name != "a�b" || !e.NameInvalid {
+		t.Fatalf("invalid-name entry = %+v", e)
+	}
+	if e := got.Entries[1]; e.Name != "ok" || e.NameInvalid || e.Target != "t�" {
+		t.Fatalf("ok entry = %+v", e)
+	}
+}
+
+// leafContentKey stores a small blob and returns its key bytes.
+func leafContentKey(t *testing.T, objs memObjects) []byte {
+	t.Helper()
+	blob, err := fstree.EncodeBlob([]byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(blob)
+	return blob.Key[:]
+}
+
+func TestTreeDotDotPath(t *testing.T) {
+	objs := memObjects{}
+	root, _ := seedTree(t, objs)
+	refs := memRefs{"backup/daily": mustRef(t, "backup/daily", root, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+	for _, p := range []string{"..", "sub/..", "../sub"} {
+		getTree(t, srv, cookie, map[string]string{"ref": "backup/daily", "path": p}, http.StatusBadRequest)
+	}
+}
+
+func TestTreeUnbrowsableRef(t *testing.T) {
+	objs := memObjects{}
+	xattrs, err := fstree.EncodeXattrSet(map[string][]byte{"user.a": []byte("v")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(xattrs)
+	refs := memRefs{"odd": mustRef(t, "odd", xattrs.Key, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+	getTree(t, srv, cookie, map[string]string{"ref": "odd"}, http.StatusBadRequest)
+}
+
+// TestTreeNextCursor pages a directory whose names include invalid UTF-8
+// using the server-supplied raw cursor; the walk must visit every entry
+// exactly once and terminate.
+func TestTreeNextCursor(t *testing.T) {
+	objs := memObjects{}
+	ck := leafContentKey(t, objs)
+	// Bytewise-sorted names, two of them invalid UTF-8.
+	rawNames := [][]byte{[]byte("ab"), []byte("a\x80"), []byte("a\xff"), []byte("b")}
+	entries := make([]fstree.Entry, len(rawNames))
+	for i, n := range rawNames {
+		entries[i] = fstree.Entry{Name: n, Mode: 0o100644, Mtime: int64(i), ContentKey: ck}
+	}
+	leaf, err := fstree.EncodeDirLeaf(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(leaf)
+	refs := memRefs{"weird": mustRef(t, "weird", leaf.Key, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	var mtimes []int64
+	next := ""
+	for page := 0; ; page++ {
+		u := treeURL(srv, map[string]string{"ref": "weird", "limit": "1"})
+		if next != "" {
+			u += "&after=" + next // next is pre-encoded by the server
+		}
+		resp := do(t, "GET", u, cookie, "")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("page %d = %d, want 200", page, resp.StatusCode)
+		}
+		var out struct {
+			Entries []treeEntryJSON `json:"entries"`
+			More    bool            `json:"more"`
+			Next    string          `json:"next"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range out.Entries {
+			mtimes = append(mtimes, e.Mtime)
+		}
+		if !out.More {
+			if out.Next != "" {
+				t.Fatalf("page %d: next %q set without more", page, out.Next)
+			}
+			break
+		}
+		if out.Next == "" {
+			t.Fatalf("page %d: more without next", page)
+		}
+		next = out.Next
+		if page > 5 {
+			t.Fatal("cursor never terminated")
+		}
+	}
+	// Mtimes are unique per entry, so they prove each entry arrived
+	// exactly once and in order despite the lossy JSON names.
+	if len(mtimes) != 4 || mtimes[0] != 0 || mtimes[1] != 1 || mtimes[2] != 2 || mtimes[3] != 3 {
+		t.Fatalf("paged mtimes = %v, want [0 1 2 3]", mtimes)
+	}
+}

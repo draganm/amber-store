@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -136,9 +137,17 @@ func (h *handler) resolveTarget(r *http.Request) (browseTarget, int, error) {
 		return browseTarget{}, http.StatusInternalServerError, fmt.Errorf("stored reference key: %w", err)
 	}
 	path := r.URL.Query().Get("path")
+	for comp := range strings.SplitSeq(path, "/") {
+		if comp == ".." {
+			return browseTarget{}, http.StatusBadRequest, errors.New("\"..\" is not supported in paths")
+		}
+	}
 	if root.Type() != key.DirLeaf && root.Type() != key.DirNode {
 		// The ref points straight at a file (or something odd); only the
 		// empty path can address it.
+		if root.Type() != key.Blob && root.Type() != key.FileNode {
+			return browseTarget{}, http.StatusBadRequest, fmt.Errorf("reference %q does not point at browsable content", name)
+		}
 		if hasComponents(path) {
 			return browseTarget{}, http.StatusBadRequest, fmt.Errorf("reference %q does not point at a directory", name)
 		}
@@ -274,5 +283,11 @@ func (h *handler) treeDir(w http.ResponseWriter, r *http.Request, dir key.Key) {
 	for i, e := range entries {
 		out[i] = entryJSON(e)
 	}
-	writeJSON(w, map[string]any{"kind": "dir", "entries": out, "more": more})
+	resp := map[string]any{"kind": "dir", "entries": out, "more": more}
+	if more {
+		// The JSON names are lossy for non-UTF-8 bytes; next carries the
+		// raw last name percent-encoded, ready to append as &after=.
+		resp["next"] = url.QueryEscape(string(entries[len(entries)-1].Name))
+	}
+	writeJSON(w, resp)
 }

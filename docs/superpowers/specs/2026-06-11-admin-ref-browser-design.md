@@ -85,7 +85,7 @@ path segments. All endpoints are GET, under `/admin/api/`, authed.
 | Route | Behavior |
 | --- | --- |
 | `GET /admin/api/refs` | `{"refs":[{name, key, user, created_at, kind}]}` sorted by name (refstore order). `kind` from the key's type: DirLeaf/DirNode → `"dir"`, Blob/FileNode → `"file"`, anything else → `"invalid"`. Records that fail `reference.Decode` also appear as `kind:"invalid"` so the operator can see them. |
-| `GET /admin/api/tree?ref=N&path=P&after=A&limit=L` | Directory: `{"kind":"dir","entries":[…],"more":bool}`; entries carry `name, kind (dir/file/symlink/fifo/char/block/socket), size, mode, mtime, target` (symlinks). File path: `{"kind":"file","stat":{…}}`. `limit` defaults to 500, clamped to 1..1000; `after` is the last entry name of the previous page. Sizes come from the content key's encoded length; mtime is ns since epoch, formatted client-side. |
+| `GET /admin/api/tree?ref=N&path=P&after=A&limit=L` | Directory: `{"kind":"dir","entries":[…],"more":bool}`, plus `"next"` (the raw last entry name, percent-encoded, ready to append as `&after=`) when `more` is true — JSON names are lossy for non-UTF-8 bytes, so clients page with `"next"`, never with the displayed name; entries carry `name, kind (dir/file/symlink/fifo/char/block/socket), size, mode, mtime, target` (symlinks). File path: `{"kind":"file","stat":{…}}`. `limit` defaults to 500, clamped to 1..1000; `after` is the last entry name of the previous page. Sizes come from the content key's encoded length; mtime is ns since epoch, formatted client-side. |
 | `GET /admin/api/raw?ref=N&path=P[&dl=1]` | Streams file bytes (FileNode descent, Blob concatenation). Content-Type from the filename extension, else sniffed from the first 512 bytes. `Content-Length` from the key length. Without `dl`: `Content-Disposition: inline` (the View action); with `dl=1`: `attachment` with a sanitized filename. Regular files only — anything else is a 400. |
 
 A ref may point directly at a file (its key is Blob/FileNode). Then
@@ -127,7 +127,8 @@ responses are attachments and carry `nosniff` as well.
   them faithfully. Such entries are listed with a lossily decoded name
   and marked unnavigable (`"raw_name_invalid":true`) rather than
   hidden; the tar download still preserves their exact names, so the
-  data remains reachable.
+  data remains reachable. Pagination stays sound for such names via
+  the `"next"` cursor.
 
 ### UI
 
