@@ -15,8 +15,14 @@ export function parseRoute() {
   const h = raw.replace(/^\/?/, '');
   if (h === 'refs') return { page: 'refs' };
   if (h.startsWith('refs/')) {
-    const segs = h.slice('refs/'.length).split('/').map(decodeURIComponent);
-    return { page: 'browser', refName: segs[0], path: segs.slice(1).join('/') };
+    try {
+      const segs = h.slice('refs/'.length).split('/').map(decodeURIComponent);
+      if (!segs[0]) return { page: 'refs' };
+      return { page: 'browser', refName: segs[0], path: segs.slice(1).join('/') };
+    } catch {
+      // malformed percent-encoding in a pasted URL; fall back to the list
+      return { page: 'refs' };
+    }
   }
   return { page: 'keys' };
 }

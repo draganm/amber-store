@@ -26,14 +26,25 @@ export default function BrowserPage(props) {
   const [more, setMore] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal('');
+  const [pageError, setPageError] = createSignal('');
+
+  // Fix 1: stale-response guard — module-instance request token
+  let token = 0;
 
   const load = async (afterRaw) => {
+    const t = ++token;
     setLoading(true);
     setError('');
+    setPageError('');
     try {
       const res = await api.listTree(props.refName, props.path, afterRaw);
+      if (t !== token) return;
       if (res.kind === 'dir') {
-        setEntries(afterRaw ? entries().concat(res.entries ?? []) : res.entries ?? []);
+        if (afterRaw) {
+          setEntries((prev) => prev.concat(res.entries ?? []));
+        } else {
+          setEntries(res.entries ?? []);
+        }
         setMore(res.more);
         setNext(res.next ?? '');
         setStat(null);
@@ -44,10 +55,16 @@ export default function BrowserPage(props) {
         setNext('');
       }
     } catch (err) {
+      if (t !== token) return;
       if (err instanceof UnauthorizedError) props.onSignOut();
-      setError(err.message);
+      // Fix 3: pagination errors go into pageError, not error
+      if (afterRaw) {
+        setPageError(err.message);
+      } else {
+        setError(err.message);
+      }
     } finally {
-      setLoading(false);
+      if (t === token) setLoading(false);
     }
   };
 
@@ -57,6 +74,7 @@ export default function BrowserPage(props) {
       setEntries([]);
       setStat(null);
       setNext('');
+      setPageError('');
       load();
     },
   ));
@@ -89,7 +107,8 @@ export default function BrowserPage(props) {
         </For>
       </nav>
 
-      <Show when={!stat() && !error()}>
+      {/* Fix 5: only show archive buttons once we know target is a dir */}
+      <Show when={!stat() && !error() && (!loading() || entries().length > 0)}>
         <div class="browser-actions">
           <a class="btn btn--ghost" href={api.archiveURL(props.refName, props.path, 'tar')}>
             Download .tar
@@ -109,7 +128,8 @@ export default function BrowserPage(props) {
           <div class="tree-row">
             <span class="tree-row__name">{stat().stat?.name || props.refName}</span>
             <span class="badge">{stat().kind}</span>
-            <span class="tree-row__meta">{fmtSize(stat().stat?.size)}</span>
+            {/* Fix 4: 0-byte files show "0 B" not "—" */}
+            <span class="tree-row__meta">{fmtSize(stat().kind === 'file' ? (stat().stat?.size ?? 0) : stat().stat?.size)}</span>
             <span class="tree-row__meta" />
             <span class="tree-row__meta" />
             <span class="tree-row__actions">
@@ -166,7 +186,8 @@ export default function BrowserPage(props) {
                   </a>
                 </Show>
                 <span class="badge">{e.kind}</span>
-                <span class="tree-row__meta">{e.kind === 'file' ? fmtSize(e.size) : '—'}</span>
+                {/* Fix 4: 0-byte files show "0 B" not "—" */}
+                <span class="tree-row__meta">{e.kind === 'file' ? fmtSize(e.size ?? 0) : '—'}</span>
                 <span class="tree-row__meta">{fmtTime(e.mtime)}</span>
                 <span class="tree-row__meta tree-row__mode">{fmtMode(e.mode)}</span>
                 <span class="tree-row__actions">
@@ -184,6 +205,10 @@ export default function BrowserPage(props) {
           </For>
           <Show when={loading()}>
             <div class="empty">Loading…</div>
+          </Show>
+          {/* Fix 3: show pagination error inline; keep Load more button so user can retry */}
+          <Show when={pageError() && !loading()}>
+            <div class="help help--error load-more">{pageError()}</div>
           </Show>
           <Show when={more() && !loading()}>
             <button class="btn btn--ghost load-more" onClick={() => load(next())}>

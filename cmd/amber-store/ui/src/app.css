@@ -471,14 +471,14 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   text-decoration: none;
-  color: #111;
+  color: var(--ffr-ink-800);
   border: 1.5px solid transparent;
 }
 .site-nav__link--active {
-  border-color: #111;
+  border-color: var(--ffr-ink-800);
 }
 .site-nav__link:hover {
-  border-color: #2db6be;
+  border-color: var(--ffr-teal);
 }
 
 /* ---- refs list ---- */
@@ -498,7 +498,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px;
-  border: 1.5px solid #111;
+  border: 1.5px solid var(--ffr-ink-800);
   background: #fff;
 }
 .ref-row__main {
@@ -509,15 +509,15 @@ body {
 }
 .ref-row__name {
   font-weight: 600;
-  color: #111;
+  color: var(--ffr-ink-800);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 a.ref-row__name:hover {
-  color: #2db6be;
+  color: var(--ffr-teal);
 }
 .ref-row__meta {
-  color: #666;
+  color: var(--ffr-ink-300);
   font-size: 13px;
   white-space: nowrap;
 }
@@ -534,18 +534,18 @@ a.ref-row__name:hover {
   gap: 6px;
   align-items: baseline;
   margin: 6px 0 14px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--ffr-font-mono);
   font-size: 14px;
 }
 .crumbs a {
-  color: #111;
+  color: var(--ffr-ink-800);
   text-decoration: none;
 }
 .crumbs a:hover {
-  color: #2db6be;
+  color: var(--ffr-teal);
 }
 .crumbs__sep {
-  color: #999;
+  color: var(--ffr-ink-200);
 }
 .browser-actions {
   display: flex;
@@ -555,8 +555,9 @@ a.ref-row__name:hover {
 .tree {
   display: flex;
   flex-direction: column;
-  border: 1.5px solid #111;
+  border: 1.5px solid var(--ffr-ink-800);
   background: #fff;
+  overflow-x: auto;
 }
 .tree-head,
 .tree-row {
@@ -570,35 +571,35 @@ a.ref-row__name:hover {
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #666;
-  border-bottom: 1.5px solid #111;
+  color: var(--ffr-ink-300);
+  border-bottom: 1.5px solid var(--ffr-ink-800);
 }
 .tree-row + .tree-row {
-  border-top: 1px solid #e2e2e2;
+  border-top: 1px solid var(--ffr-ink-050);
 }
 .tree-row__name {
   font-weight: 600;
-  color: #111;
+  color: var(--ffr-ink-800);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 a.tree-row__name:hover {
-  color: #2db6be;
+  color: var(--ffr-teal);
 }
 .tree-row__name--invalid {
-  color: #d23;
+  color: var(--ffr-error);
 }
 .tree-row__target {
-  color: #666;
+  color: var(--ffr-ink-300);
   font-weight: 400;
 }
 .tree-row__meta {
-  color: #666;
+  color: var(--ffr-ink-300);
   font-size: 13px;
   white-space: nowrap;
 }
 .tree-row__mode {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--ffr-font-mono);
 }
 .tree-row__actions {
   display: flex;
