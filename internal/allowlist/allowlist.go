@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -23,6 +24,13 @@ type Entry struct {
 // Lookup keys are SSH wire-format public keys.
 type List struct {
 	entries map[string]Entry
+}
+
+// New builds a List from wire-format key → Entry pairs, copying the map.
+func New(entries map[string]Entry) *List {
+	m := make(map[string]Entry, len(entries))
+	maps.Copy(m, entries)
+	return &List{entries: m}
 }
 
 // Parse reads an authorized_keys-format buffer. Lines that are blank or

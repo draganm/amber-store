@@ -78,6 +78,19 @@ func TestDuplicateKeyLastWins(t *testing.T) {
 	}
 }
 
+func TestNewCopiesEntries(t *testing.T) {
+	pub := testPub(t)
+	entries := map[string]allowlist.Entry{
+		string(pub.Marshal()): {Admin: true},
+	}
+	l := allowlist.New(entries)
+	// mutating the caller's map must not affect the built list
+	delete(entries, string(pub.Marshal()))
+	if e, ok := l.Lookup(pub.Marshal()); !ok || !e.Admin {
+		t.Fatalf("key: ok=%v admin=%v, want ok, admin", ok, e.Admin)
+	}
+}
+
 func TestParseEmpty(t *testing.T) {
 	l, err := allowlist.Parse(nil)
 	if err != nil {
