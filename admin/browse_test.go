@@ -786,3 +786,24 @@ func TestArchiveErrors(t *testing.T) {
 		t.Fatalf("dot-path Content-Disposition = %q, want sub.tar", cd)
 	}
 }
+
+// TestBrowseRequiresSession is the spec's authentication gate: no live
+// session cookie, no content — on every browse endpoint.
+func TestBrowseRequiresSession(t *testing.T) {
+	objs := memObjects{}
+	root, _ := seedTree(t, objs)
+	refs := memRefs{"backup/daily": mustRef(t, "backup/daily", root, "alice")}
+	srv, _ := browseServer(t, objs, refs)
+
+	for _, path := range []string{
+		"/admin/api/refs",
+		"/admin/api/tree?ref=backup/daily",
+		"/admin/api/raw?ref=backup/daily&path=hello.txt",
+		"/admin/api/archive?ref=backup/daily",
+	} {
+		resp := do(t, "GET", srv.URL+path, nil, "")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("GET %s without session = %d, want 401", path, resp.StatusCode)
+		}
+	}
+}

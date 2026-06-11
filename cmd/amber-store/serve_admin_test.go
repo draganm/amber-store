@@ -133,6 +133,21 @@ func TestServeAdminUI(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "ssh-ed25519") {
 		t.Fatalf("keys = %d %q, want the added key listed", resp.StatusCode, body)
 	}
+
+	req, err = http.NewRequest("GET", base+"/admin/api/refs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(session)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"refs":[]}` {
+		t.Fatalf("refs = %d %q, want an empty refs listing", resp.StatusCode, body)
+	}
 }
 
 // TestServeAdminUIDisabled checks that without the password the admin
