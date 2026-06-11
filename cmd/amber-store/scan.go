@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/draganm/amber-store/internal/amberignore"
 )
 
 // scanTree walks the tree at dir concurrently (ReadDir + Lstat only, no content
@@ -16,13 +18,14 @@ import (
 // The fan-out mirrors the parallel build: each entry may run on a pooled
 // goroutine, but when the pool is full the work runs inline on the current
 // goroutine, so the recursion cannot deadlock waiting on a slot held by a
-// descendant.
-func scanTree(dir string, jobs int) (files int64, bytes int64, err error) {
+// descendant. Entries excluded by ign are skipped, mirroring the build walk,
+// so the progress totals match what ingest actually reads.
+func scanTree(dir string, ign *amberignore.Matcher, jobs int) (files int64, bytes int64, err error) {
 	if jobs < 1 {
 		jobs = 1
 	}
 	s := &scanner{sem: make(chan struct{}, jobs)}
-	s.walk(dir)
+	s.walk(dir, ign)
 	if e := s.err(); e != nil {
 		return 0, 0, e
 	}
@@ -52,7 +55,7 @@ func (s *scanner) err() error {
 	return s.firstErr
 }
 
-func (s *scanner) walk(dir string) {
+func (s *scanner) walk(dir string, ign *amberignore.Matcher) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		s.setErr(err)
@@ -60,8 +63,12 @@ func (s *scanner) walk(dir string) {
 	}
 	var wg sync.WaitGroup
 	for _, de := range ents {
+		if ign.Ignored(de.Name(), de.IsDir()) {
+			continue
+		}
 		full := filepath.Join(dir, de.Name())
-		do := func(full string) {
+		name := de.Name()
+		do := func(full, name string) {
 			info, err := os.Lstat(full)
 			if err != nil {
 				s.setErr(err)
@@ -69,7 +76,12 @@ func (s *scanner) walk(dir string) {
 			}
 			switch info.Mode() & os.ModeType {
 			case os.ModeDir:
-				s.walk(full)
+				sub, err := ign.Descend(full, name)
+				if err != nil {
+					s.setErr(err)
+					return
+				}
+				s.walk(full, sub)
 			case 0: // regular file
 				s.files.Add(1)
 				s.bytes.Add(info.Size())
@@ -80,13 +92,13 @@ func (s *scanner) walk(dir string) {
 		select {
 		case s.sem <- struct{}{}:
 			wg.Add(1)
-			go func(full string) {
+			go func(full, name string) {
 				defer wg.Done()
 				defer func() { <-s.sem }()
-				do(full)
-			}(full)
+				do(full, name)
+			}(full, name)
 		default:
-			do(full)
+			do(full, name)
 		}
 	}
 	wg.Wait()

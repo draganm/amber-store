@@ -9,6 +9,7 @@ import (
 
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/internal/amberignore"
+	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )
 
@@ -142,5 +143,50 @@ func TestBuildDir_NilMatcherIngestsEverything(t *testing.T) {
 	prunedRoot, _ := collectSequential(t, prunedDir, nil, ic, nil, 256)
 	if fullRoot == prunedRoot {
 		t.Fatal("nil matcher must ingest the ignored entries")
+	}
+}
+
+// TestScanTree_HonorsAmberignore: the pre-scan must count exactly the entries
+// the filtered ingest will read.
+func TestScanTree_HonorsAmberignore(t *testing.T) {
+	dir := t.TempDir()
+	writeIgnoredTree(t, dir, false)
+	prunedDir := t.TempDir()
+	writeIgnoredTree(t, prunedDir, true)
+
+	gotFiles, gotBytes, err := scanTree(dir, rootMatcher(t, dir), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFiles, wantBytes, err := scanTree(prunedDir, nil, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFiles != wantFiles || gotBytes != wantBytes {
+		t.Errorf("scanTree = (%d files, %d bytes), want (%d, %d)", gotFiles, gotBytes, wantFiles, wantBytes)
+	}
+}
+
+// TestProgressTotalsMatchIngestWithAmberignore: end-to-end consistency — the
+// scan's totals equal what the filtered ingest actually processes.
+func TestProgressTotalsMatchIngestWithAmberignore(t *testing.T) {
+	dir := t.TempDir()
+	writeIgnoredTree(t, dir, false)
+	files, bytes, err := scanTree(dir, rootMatcher(t, dir), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProgress(files, bytes)
+	var root key.Key
+	for _, err := range ingestObjects(dir, rootMatcher(t, dir), chunkers.NewItemChunker(7), nil, 256, 2, p, &root) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := p.filesDone.Load(); int64(got) != files {
+		t.Errorf("filesDone = %d, scan predicted %d", got, files)
+	}
+	if got := p.bytesDone.Load(); int64(got) != bytes {
+		t.Errorf("bytesDone = %d, scan predicted %d", got, bytes)
 	}
 }

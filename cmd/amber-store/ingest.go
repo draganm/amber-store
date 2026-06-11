@@ -278,7 +278,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	defer pwg.Wait()
 	defer cancel()
 	if !cfg.noProgress {
-		totalFiles, totalBytes, err := scanTree(dir, cfg.jobs)
+		totalFiles, totalBytes, err := scanTree(dir, nil, cfg.jobs)
 		if err != nil {
 			return err
 		}

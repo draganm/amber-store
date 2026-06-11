@@ -22,7 +22,7 @@ func TestScanTree_CountsRegularFileBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, bytes, err := scanTree(dir, 4)
+	files, bytes, err := scanTree(dir, nil, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestScanTree_ExcludesSymlinks(t *testing.T) {
 	if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	files, bytes, err := scanTree(dir, 2)
+	files, bytes, err := scanTree(dir, nil, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestScanTree_ExcludesSymlinks(t *testing.T) {
 }
 
 func TestScanTree_EmptyDir(t *testing.T) {
-	files, bytes, err := scanTree(t.TempDir(), 4)
+	files, bytes, err := scanTree(t.TempDir(), nil, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
