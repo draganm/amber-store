@@ -451,11 +451,24 @@ func (h *handler) archive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Probe the root object before committing headers, so a dangling ref
+	// is a clean 404 rather than an aborted connection.
+	if _, err := h.objects.Get(t.key); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, diskstore.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		jsonError(w, status, err.Error())
+		return
+	}
+
 	// The filename derives from what was archived: the path's basename,
 	// or the ref's for the root.
 	base := r.URL.Query().Get("ref")
-	if p := strings.Trim(r.URL.Query().Get("path"), "/"); p != "" {
-		base = p
+	for comp := range strings.SplitSeq(r.URL.Query().Get("path"), "/") {
+		if comp != "" && comp != "." {
+			base = comp
+		}
 	}
 	base = fileBaseName(base)
 

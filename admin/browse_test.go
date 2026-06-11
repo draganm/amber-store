@@ -704,6 +704,9 @@ func TestArchiveTar(t *testing.T) {
 	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", cc)
 	}
+	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("missing nosniff")
+	}
 	wantSeedTreeMembers(t, tarNames(t, resp.Body))
 
 	// A subdirectory archive contains only that subtree.
@@ -732,6 +735,9 @@ func TestArchiveTgz(t *testing.T) {
 	}
 	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "daily.tar.gz") {
 		t.Fatalf("Content-Disposition = %q, want daily.tar.gz", cd)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
 	}
 	gz, err := gzip.NewReader(resp.Body)
 	if err != nil {
@@ -762,5 +768,21 @@ func TestArchiveErrors(t *testing.T) {
 	resp := do(t, "GET", archiveURL(srv, map[string]string{"ref": "nope"}), cookie, "")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown ref = %d, want 404", resp.StatusCode)
+	}
+
+	// A dangling ref (object never stored) is a clean 404, not an abort.
+	ghostDir, err := fstree.EncodeDirLeaf([]fstree.Entry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs["dangling"] = mustRef(t, "dangling", ghostDir.Key, "alice")
+	resp = do(t, "GET", archiveURL(srv, map[string]string{"ref": "dangling"}), cookie, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("dangling ref = %d, want 404", resp.StatusCode)
+	}
+	// And filenames for "." paths fall back sensibly.
+	resp = do(t, "GET", archiveURL(srv, map[string]string{"ref": "backup/daily", "path": "./sub/."}), cookie, "")
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "sub.tar") || strings.Contains(cd, "..tar") {
+		t.Fatalf("dot-path Content-Disposition = %q, want sub.tar", cd)
 	}
 }
