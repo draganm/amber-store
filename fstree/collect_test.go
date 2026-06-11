@@ -154,3 +154,66 @@ func TestResolvePath(t *testing.T) {
 		t.Fatal("expected error for \"..\" component")
 	}
 }
+
+func TestResolveEntry(t *testing.T) {
+	blob, err := fstree.EncodeBlob([]byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := mustDirLeaf(t, []fstree.Entry{
+		{Name: []byte("file"), Mode: 0o100644, ContentKey: blob.Key[:]},
+	})
+	mid := mustDirLeaf(t, []fstree.Entry{
+		{Name: []byte("inner"), Mode: 0o040755, ContentKey: inner.Key[:]},
+		{Name: []byte("link"), Mode: 0o120777, LinkTarget: []byte("inner")},
+	})
+	root := mustDirLeaf(t, []fstree.Entry{
+		{Name: []byte("file"), Mode: 0o100644, ContentKey: blob.Key[:]},
+		{Name: []byte("mid"), Mode: 0o040755, ContentKey: mid.Key[:]},
+	})
+	get := mapGetter(blob, inner, mid, root)
+
+	// The empty path (and "." chains) is the root itself: no entry.
+	for _, p := range []string{"", ".", "./"} {
+		ent, err := fstree.ResolveEntry(root.Key, p, get)
+		if err != nil || ent != nil {
+			t.Fatalf("ResolveEntry(%q) = %v, %v, want nil, nil", p, ent, err)
+		}
+	}
+
+	// A file at the end is returned with its metadata.
+	ent, err := fstree.ResolveEntry(root.Key, "mid/inner/file", get)
+	if err != nil {
+		t.Fatalf("ResolveEntry(mid/inner/file): %v", err)
+	}
+	if string(ent.Name) != "file" || ent.Mode != 0o100644 {
+		t.Fatalf("ResolveEntry(mid/inner/file) = %+v", ent)
+	}
+
+	// A directory at the end is returned as its entry.
+	ent, err = fstree.ResolveEntry(root.Key, "mid/inner", get)
+	if err != nil || string(ent.Name) != "inner" {
+		t.Fatalf("ResolveEntry(mid/inner) = %+v, %v", ent, err)
+	}
+
+	// A symlink at the end is returned, not followed.
+	ent, err = fstree.ResolveEntry(root.Key, "mid/link", get)
+	if err != nil || string(ent.LinkTarget) != "inner" {
+		t.Fatalf("ResolveEntry(mid/link) = %+v, %v", ent, err)
+	}
+
+	// Missing final component.
+	if _, err := fstree.ResolveEntry(root.Key, "mid/nope", get); !errors.Is(err, fstree.ErrNotFound) {
+		t.Fatalf("missing component: err = %v, want ErrNotFound", err)
+	}
+
+	// Descending through a non-directory.
+	if _, err := fstree.ResolveEntry(root.Key, "file/x", get); !errors.Is(err, fstree.ErrNotDir) {
+		t.Fatalf("through a file: err = %v, want ErrNotDir", err)
+	}
+
+	// ".." is rejected.
+	if _, err := fstree.ResolveEntry(root.Key, "mid/..", get); err == nil {
+		t.Fatal("expected error for \"..\" component")
+	}
+}

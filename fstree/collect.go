@@ -29,19 +29,9 @@ func ResolvePath(root key.Key, path string, get func(key.Key) ([]byte, error)) (
 		if comp == ".." {
 			return key.Key{}, fmt.Errorf("fstree: %q: \"..\" is not supported", path)
 		}
-		entries, err := CollectEntries(k, get)
+		found, err := LookupEntry(k, []byte(comp), get)
 		if err != nil {
 			return key.Key{}, err
-		}
-		var found *Entry
-		for i := range entries {
-			if string(entries[i].Name) == comp {
-				found = &entries[i]
-				break
-			}
-		}
-		if found == nil {
-			return key.Key{}, fmt.Errorf("fstree: %q: %w", comp, ErrNotFound)
 		}
 		if found.Mode&unix.S_IFMT != unix.S_IFDIR {
 			return key.Key{}, fmt.Errorf("fstree: %q: %w", comp, ErrNotDir)
@@ -53,6 +43,42 @@ func ResolvePath(root key.Key, path string, get func(key.Key) ([]byte, error)) (
 		k = ck
 	}
 	return k, nil
+}
+
+// ResolveEntry descends from the directory object root along the
+// slash-separated path and returns the entry the final component names — of
+// any kind (file, directory, symlink, device, …), carrying its metadata. The
+// empty path (or chains of "" and ".") returns nil: the root directory is not
+// an entry and has no metadata of its own. Intermediate components must name
+// directories (ErrNotDir otherwise); a missing component wraps ErrNotFound;
+// ".." is rejected.
+func ResolveEntry(root key.Key, path string, get func(key.Key) ([]byte, error)) (*Entry, error) {
+	dir := root
+	var cur *Entry // entry of dir; nil while dir is the root
+	for comp := range strings.SplitSeq(path, "/") {
+		if comp == "" || comp == "." {
+			continue
+		}
+		if comp == ".." {
+			return nil, fmt.Errorf("fstree: %q: \"..\" is not supported", path)
+		}
+		if cur != nil {
+			if cur.Mode&unix.S_IFMT != unix.S_IFDIR {
+				return nil, fmt.Errorf("fstree: %q: %w", cur.Name, ErrNotDir)
+			}
+			ck, err := key.Parse(cur.ContentKey)
+			if err != nil {
+				return nil, fmt.Errorf("fstree: %q: content key: %w", cur.Name, err)
+			}
+			dir = ck
+		}
+		ent, err := LookupEntry(dir, []byte(comp), get)
+		if err != nil {
+			return nil, err
+		}
+		cur = &ent
+	}
+	return cur, nil
 }
 
 // CollectEntries returns the directory entries reachable from k, descending
