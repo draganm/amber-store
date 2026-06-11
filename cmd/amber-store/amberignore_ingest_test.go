@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,5 +190,40 @@ func TestProgressTotalsMatchIngestWithAmberignore(t *testing.T) {
 	}
 	if got := p.bytesDone.Load(); int64(got) != bytes {
 		t.Errorf("bytesDone = %d, scan predicted %d", got, bytes)
+	}
+}
+
+// ingestRootHex runs `amber-store ingest --no-progress -o <tmp> [args...]`
+// through the real CLI and returns the printed root key (hex).
+func ingestRootHex(t *testing.T, args ...string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	app := newApp()
+	app.Writer = &buf
+	out := filepath.Join(t.TempDir(), "p.amberpack")
+	full := append([]string{"amber-store", "ingest", "--no-progress", "-o", out}, args...)
+	if err := app.Run(full); err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+func TestRunIngest_HonorsAmberignore(t *testing.T) {
+	full := t.TempDir()
+	writeIgnoredTree(t, full, false)
+	prunedDir := t.TempDir()
+	writeIgnoredTree(t, prunedDir, true)
+	if got, want := ingestRootHex(t, full), ingestRootHex(t, prunedDir); got != want {
+		t.Errorf("ingest root %s != pruned tree root %s", got, want)
+	}
+}
+
+func TestRunIngest_NoIgnoreFlag(t *testing.T) {
+	full := t.TempDir()
+	writeIgnoredTree(t, full, false)
+	withIgnore := ingestRootHex(t, full)
+	withoutIgnore := ingestRootHex(t, "--no-ignore", full)
+	if withIgnore == withoutIgnore {
+		t.Error("--no-ignore must include the ignored entries")
 	}
 }

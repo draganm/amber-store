@@ -169,6 +169,7 @@ type ingestConfig struct {
 	socket     string
 	output     string
 	jobs       int
+	noIgnore   bool
 	noProgress bool
 }
 
@@ -192,6 +193,11 @@ func ingestCommand() *cli.Command {
 			Value:       runtime.GOMAXPROCS(0),
 			Usage:       "concurrent workers building the tree (default: number of CPUs)",
 			Destination: &cfg.jobs,
+		},
+		&cli.BoolFlag{
+			Name:        "no-ignore",
+			Usage:       "do not honor .amberignore files",
+			Destination: &cfg.noIgnore,
 		},
 		&cli.BoolFlag{
 			Name:        "no-progress",
@@ -269,6 +275,17 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		signingKey = ucfg.SigningKey
 	}
 
+	// .amberignore filtering applies to the build walk and the progress
+	// pre-scan alike, so the bar's totals match what is actually ingested.
+	var ign *amberignore.Matcher
+	if !cfg.noIgnore {
+		m, err := amberignore.Root(dir)
+		if err != nil {
+			return err
+		}
+		ign = m
+	}
+
 	// Progress (client-side) is sized by a cheap pre-scan, unless disabled.
 	var prog *Progress
 	var pwg sync.WaitGroup
@@ -278,7 +295,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	defer pwg.Wait()
 	defer cancel()
 	if !cfg.noProgress {
-		totalFiles, totalBytes, err := scanTree(dir, nil, cfg.jobs)
+		totalFiles, totalBytes, err := scanTree(dir, ign, cfg.jobs)
 		if err != nil {
 			return err
 		}
@@ -295,7 +312,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		if err != nil {
 			return err
 		}
-		root, err = writePack(f, dir, nil, &cfg.chunk, cfg.jobs, prog)
+		root, err = writePack(f, dir, ign, &cfg.chunk, cfg.jobs, prog)
 		if err != nil {
 			f.Close()
 			return err
@@ -313,7 +330,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		}
 		resCh := make(chan result, 1)
 		go func() {
-			r, err := writePack(pw, dir, nil, &cfg.chunk, cfg.jobs, prog)
+			r, err := writePack(pw, dir, ign, &cfg.chunk, cfg.jobs, prog)
 			if err != nil {
 				pw.CloseWithError(err)
 			} else {
