@@ -3,8 +3,6 @@ package allowlist_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/draganm/amber-store/internal/allowlist"
@@ -47,21 +45,6 @@ func TestParseLookupAndAdmin(t *testing.T) {
 func TestParseRejectsGarbageLine(t *testing.T) {
 	if _, err := allowlist.Parse([]byte("not a key\n")); err == nil {
 		t.Fatal("want parse error")
-	}
-}
-
-func TestLoad(t *testing.T) {
-	pub := testPub(t)
-	p := filepath.Join(t.TempDir(), "allowed")
-	if err := os.WriteFile(p, ssh.MarshalAuthorizedKey(pub), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	l, err := allowlist.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := l.Lookup(pub.Marshal()); !ok {
-		t.Fatal("loaded key not found")
 	}
 }
 

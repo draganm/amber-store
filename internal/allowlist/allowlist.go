@@ -1,7 +1,7 @@
-// Package allowlist parses the remote server's allowed-keys file: standard
-// authorized_keys format, one public key per line, comments and blank lines
-// allowed. The options field may carry "admin", marking keys that bypass
-// reference ownership and may delete references.
+// Package allowlist is the remote server's allowed-keys lookup set: SSH
+// wire-format public key → entry. Parse builds one from authorized_keys-
+// format content; New builds one from explicit entries. A key marked
+// "admin" bypasses reference ownership and may delete references.
 package allowlist
 
 import (
@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
-	"os"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -61,19 +60,6 @@ func Parse(b []byte) (*List, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("allowed-keys line %d: %w", lineNo+1, err)
-	}
-	return l, nil
-}
-
-// Load reads and parses the file at path.
-func Load(path string) (*List, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading allowed keys: %w", err)
-	}
-	l, err := Parse(b)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return l, nil
 }
