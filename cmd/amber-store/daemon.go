@@ -15,6 +15,7 @@ import (
 
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/internal/socketpath"
 	"github.com/draganm/amber-store/refstore"
@@ -78,12 +79,23 @@ func daemonCommand() *cli.Command {
 				Name: "remote-key",
 				Usage: "SSH identity for remote sync: PATH (default for all remotes) " +
 					"or NAME=PATH (per-remote override); repeatable. Passphrase-protected " +
-					"keys must be used via the ssh-agent (.pub path).",
+					"keys must be used via the ssh-agent (.pub path). Default: an " +
+					"auto-generated identity stored in the store directory.",
 				Destination: &cfg.remoteKeys,
 			},
 		},
 		Action: func(c *cli.Context) error { return runDaemon(c, cfg) },
 	}
+}
+
+// defaultRemoteSigner returns the daemon's default remote-sync signer: the
+// configured one when --remote-key gave a bare PATH, otherwise the store's
+// auto-generated identity.
+func defaultRemoteSigner(configured ssh.Signer, storeDir string) (ssh.Signer, error) {
+	if configured != nil {
+		return configured, nil
+	}
+	return identity.LoadOrCreate(storeDir)
 }
 
 // parseRemoteKeys resolves --remote-key flags into signers held for the
@@ -162,6 +174,10 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	if err != nil {
 		return err
 	}
+	defSigner, err = defaultRemoteSigner(defSigner, cfg.store)
+	if err != nil {
+		return err
+	}
 	registry, err := remotes.Open(filepath.Join(cfg.store, "remotes"))
 	if err != nil {
 		return err
@@ -205,7 +221,8 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 		close(shutdownDone)
 	}()
 
-	logger.Info("daemon listening", "socket", sock, "store", cfg.store)
+	logger.Info("daemon listening", "socket", sock, "store", cfg.store,
+		"identity", ssh.FingerprintSHA256(defSigner.PublicKey()))
 	err = srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
 		// Serve returned because Shutdown closed the listener.  Wait until

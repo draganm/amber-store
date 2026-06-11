@@ -236,3 +236,46 @@ func TestRemoteArgParsing(t *testing.T) {
 		t.Fatal("add without URL succeeded")
 	}
 }
+
+// TestRemotePushWithAutoIdentity pushes through a daemon whose transport
+// signer is the auto-generated store identity, against a server whose
+// allowlist holds the generated identity.pub.
+func TestRemotePushWithAutoIdentity(t *testing.T) {
+	storeDir := t.TempDir()
+	signer, err := defaultRemoteSigner(nil, storeDir) // what runDaemon does without --remote-key
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pubBytes, err := os.ReadFile(filepath.Join(storeDir, "identity.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := startRemoteServer(t, pub)
+	sock := startDaemonWithRemotes(t, signer)
+
+	refKeyPath, _ := writeSigningKey(t)
+	configureTestUserWithKey(t, "tester", refKeyPath)
+
+	if _, err := runApp(t, "", "remote", "add", "--socket", sock, "--yes", "origin", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("auto identity"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runApp(t, "", "ingest", "--no-progress", "--socket", sock, "snap", dir); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	out, err := runApp(t, "", "remote", "push-objects", "--socket", sock, "origin", "snap")
+	if err != nil {
+		t.Fatalf("push-objects: %v", err)
+	}
+	if !strings.Contains(out, "pushed") {
+		t.Fatalf("push-objects output: %q", out)
+	}
+}
