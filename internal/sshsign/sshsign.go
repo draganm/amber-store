@@ -73,21 +73,27 @@ func TTYPrompt(path string) ([]byte, error) {
 	return term.ReadPassword(int(tty.Fd()))
 }
 
-// SignWith signs payload with signer, returning a raw (un-armored) SSHSIG
-// blob in the amber-store namespace.
-func SignWith(signer ssh.Signer, payload []byte) ([]byte, error) {
-	sig, err := sshsig.Sign(bytes.NewReader(payload), signer, sshsig.HashSHA512, Namespace)
+// SignNamespace signs payload in the given SSHSIG namespace, returning a raw
+// (un-armored) SSHSIG blob.
+func SignNamespace(signer ssh.Signer, payload []byte, namespace string) ([]byte, error) {
+	sig, err := sshsig.Sign(bytes.NewReader(payload), signer, sshsig.HashSHA512, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("signing: %w", err)
 	}
 	return sig.Marshal(), nil
 }
 
-// Verify checks that blob is a valid SSHSIG over payload in the amber-store
-// namespace, made by the key pubWire (SSH wire format). It returns the
+// SignWith signs payload with signer, returning a raw (un-armored) SSHSIG
+// blob in the amber-store reference namespace.
+func SignWith(signer ssh.Signer, payload []byte) ([]byte, error) {
+	return SignNamespace(signer, payload, Namespace)
+}
+
+// VerifyNamespace checks that blob is a valid SSHSIG over payload in the
+// given namespace, made by the key pubWire (SSH wire format). It returns the
 // signer's public key on success. This is an integrity check only — it does
 // not establish that the key belongs to anyone in particular.
-func Verify(payload, blob, pubWire []byte) (ssh.PublicKey, error) {
+func VerifyNamespace(payload, blob, pubWire []byte, namespace string) (ssh.PublicKey, error) {
 	sig, err := sshsig.ParseSignature(blob)
 	if err != nil {
 		return nil, fmt.Errorf("parsing signature: %w", err)
@@ -97,10 +103,18 @@ func Verify(payload, blob, pubWire []byte) (ssh.PublicKey, error) {
 	}
 	// The blob's declared hash algorithm is part of the signed structure, so
 	// honoring it (rather than pinning SHA-512) does not weaken the check.
-	if err := sshsig.Verify(bytes.NewReader(payload), sig, sig.PublicKey, sig.HashAlgorithm, Namespace); err != nil {
+	if err := sshsig.Verify(bytes.NewReader(payload), sig, sig.PublicKey, sig.HashAlgorithm, namespace); err != nil {
 		return nil, err
 	}
 	return sig.PublicKey, nil
+}
+
+// Verify checks that blob is a valid SSHSIG over payload in the amber-store
+// reference namespace, made by the key pubWire (SSH wire format). It returns
+// the signer's public key on success. This is an integrity check only — it
+// does not establish that the key belongs to anyone in particular.
+func Verify(payload, blob, pubWire []byte) (ssh.PublicKey, error) {
+	return VerifyNamespace(payload, blob, pubWire, Namespace)
 }
 
 // skKeyError returns a tailored error when b is an OpenSSH private key whose

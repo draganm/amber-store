@@ -80,3 +80,29 @@ amber-store ref verify-signature NAME    # check the stored signature (integrity
 amber-store ref rm NAME                  # delete the name; objects stay
 amber-store ls ref:NAME[@PATH]           # any KEY[/PATH] argument accepts this
 ```
+
+## References on a remote server
+
+The remote server adds several constraints on top of the local rules (see
+[remote.md](remote.md) for the full protocol):
+
+**Signed records only.** The server rejects any `PUT /v1/refs` whose record
+lacks CBOR keys 4 (signature) and 5 (public key), or whose signature does not
+verify against the embedded key. The local daemon never allows an unsigned ref
+to go over the wire — `push-ref` fails client-side with a clear error before
+any network traffic.
+
+**Signer-key ownership.** The signer key (CBOR key 5) owns the reference name
+on the server. An existing name may only be overwritten by a record carrying the
+same signer key. A different signer → `403`. Transport keys marked `admin` in
+the server's `--allowed-keys` file bypass this check — they are the operations
+override for lockout or migration.
+
+**Admin-only deletion.** A `DELETE` request carries no record, so the server
+cannot verify the signing identity of the caller. Deletion is therefore
+restricted to `admin` transport keys.
+
+**No dangling references.** The pointed-to key must exist in the server's store
+before the `PUT` is accepted — the same rule as the local daemon. This enforces
+the natural transfer order: `remote push-objects` (or `remote pull-objects`
+locally) before `remote push-ref` (or `remote pull-ref` locally).

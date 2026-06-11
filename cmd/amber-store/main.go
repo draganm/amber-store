@@ -23,6 +23,7 @@ func newApp() *cli.App {
 		Usage: "content-addressed filesystem tree store",
 		Commands: []*cli.Command{
 			daemonCommand(),
+			serveCommand(),
 			ingestCommand(),
 			loadCommand(),
 			dumpCommand(),
@@ -31,6 +32,7 @@ func newApp() *cli.App {
 			contentKeysCommand(),
 			configUserCommand(),
 			refCommand(),
+			remoteCommand(),
 		},
 	}
 }

@@ -15,15 +15,39 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/tarexport"
+	"golang.org/x/crypto/ssh"
 )
 
 type handler struct {
-	store *diskstore.Store
-	refs  *refstore.Store
-	log   *slog.Logger
+	store   *diskstore.Store
+	refs    *refstore.Store
+	log     *slog.Logger
+	remotes *RemoteConfig
+}
+
+// RemoteConfig wires the daemon's remote-sync support: the persistent remote
+// registry and the SSH identities (held in memory, resolved at daemon start)
+// used to sign requests to remote servers.
+type RemoteConfig struct {
+	Registry      *remotes.Registry
+	DefaultSigner ssh.Signer            // used for remotes without an override; may be nil
+	Signers       map[string]ssh.Signer // per-remote overrides by remote name
+}
+
+// signerFor picks the identity for a remote: the per-remote override, else
+// the default, else an error telling the operator to configure one.
+func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
+	if s, ok := rc.Signers[name]; ok {
+		return s, nil
+	}
+	if rc.DefaultSigner != nil {
+		return rc.DefaultSigner, nil
+	}
+	return nil, errors.New("no remote signing key configured — start the daemon with --remote-key")
 }
 
 // New returns an http.Handler serving the store. Every request is logged to
@@ -31,10 +55,16 @@ type handler struct {
 // rejected uploads at Warn, store failures at Error, completed ingests at Info.
 // A nil logger discards all logging.
 func New(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
+	return NewWithRemotes(store, refs, logger, nil)
+}
+
+// NewWithRemotes additionally registers the /v1/remotes and /v1/remote/*
+// routes backed by rc.
+func NewWithRemotes(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	h := &handler{store: store, refs: refs, log: logger}
+	h := &handler{store: store, refs: refs, log: logger, remotes: rc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
@@ -43,6 +73,17 @@ func New(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger) http
 	mux.HandleFunc("PUT /v1/refs", h.putRef)
 	mux.HandleFunc("GET /v1/refs", h.getRefs)
 	mux.HandleFunc("DELETE /v1/refs", h.deleteRef)
+	if rc != nil {
+		mux.HandleFunc("POST /v1/remotes/preflight", h.remotePreflight)
+		mux.HandleFunc("PUT /v1/remotes", h.putRemote)
+		mux.HandleFunc("GET /v1/remotes", h.listRemotes)
+		mux.HandleFunc("DELETE /v1/remotes", h.deleteRemote)
+		mux.HandleFunc("POST /v1/remote/push-objects", h.remotePushObjects)
+		mux.HandleFunc("POST /v1/remote/pull-objects", h.remotePullObjects)
+		mux.HandleFunc("POST /v1/remote/push-ref", h.remotePushRef)
+		mux.HandleFunc("POST /v1/remote/pull-ref", h.remotePullRef)
+		mux.HandleFunc("GET /v1/remote/refs", h.remoteLsRefs)
+	}
 	return logRequests(logger, mux)
 }
 

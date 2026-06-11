@@ -66,6 +66,7 @@ store:
 | [`architecture/fstree.md`](architecture/fstree.md) | On-the-wire CBOR layout of every type, the chunkers, tree construction, and read paths. |
 | [`architecture/daemon.md`](architecture/daemon.md) | The daemon/CLI split: who builds trees, who stores objects, the unix-socket protocol, and the pack-write format. |
 | [`architecture/references.md`](architecture/references.md) | Named pointers to keys: record layout, name rules, storage, routes. |
+| [`architecture/remote.md`](architecture/remote.md) | The remote server (`amber-store serve`): identity, signed HTTP protocol, wire routes, sync algorithms. |
 
 ## Usage
 
@@ -95,6 +96,23 @@ amber-store dump KEY[/PATH] -o tree.tar  # PAX tar of the tree (default: stdout)
 amber-store restore KEY[/PATH] ./dest    # recreate the tree on disk
 amber-store ref ls                       # list references
 amber-store ls ref:backups/home@sub/dir  # ref:NAME[@PATH] works wherever KEY[/PATH] does
+```
+
+To share a store over the network, run a remote server and register it with
+each local daemon:
+
+```sh
+# on the server host — owns its own store, signs every response
+amber-store serve --store /path/to/remote-store --listen :8590 \
+  --allowed-keys /etc/amber/allowed_keys --identity /etc/amber/server_key
+
+# on a client host — confirm fingerprint once, then push/pull by reference
+amber-store remote add origin https://store.example.com:8590
+amber-store remote push-objects origin backups/home  # push objects, then the ref
+amber-store remote push-ref     origin backups/home
+amber-store remote pull-objects origin backups/home  # pull objects, then the ref
+amber-store remote pull-ref     origin backups/home
+amber-store remote ls-refs      origin               # list all refs on the remote
 ```
 
 For offline operation, `ingest` can write the pack-write stream to a file

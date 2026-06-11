@@ -10,13 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/internal/socketpath"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/crypto/ssh"
 )
 
 type daemonConfig struct {
@@ -26,6 +29,7 @@ type daemonConfig struct {
 	sync            bool
 	logLevel        string
 	logFormat       string
+	remoteKeys      cli.StringSlice
 }
 
 func daemonCommand() *cli.Command {
@@ -70,9 +74,47 @@ func daemonCommand() *cli.Command {
 				Usage:       "log format: text or json",
 				Destination: &cfg.logFormat,
 			},
+			&cli.StringSliceFlag{
+				Name: "remote-key",
+				Usage: "SSH identity for remote sync: PATH (default for all remotes) " +
+					"or NAME=PATH (per-remote override); repeatable. Passphrase-protected " +
+					"keys must be used via the ssh-agent (.pub path).",
+				Destination: &cfg.remoteKeys,
+			},
 		},
 		Action: func(c *cli.Context) error { return runDaemon(c, cfg) },
 	}
+}
+
+// parseRemoteKeys resolves --remote-key flags into signers held for the
+// daemon's lifetime. A bare PATH is the default identity (at most one);
+// NAME=PATH overrides per remote. Closers are tied to the process — agent
+// connections stay open as long as the daemon runs.
+func parseRemoteKeys(entries []string) (ssh.Signer, map[string]ssh.Signer, error) {
+	var def ssh.Signer
+	overrides := map[string]ssh.Signer{}
+	for _, e := range entries {
+		name, path, isOverride := strings.Cut(e, "=")
+		if !isOverride {
+			path, name = e, ""
+		}
+		signer, _, err := remoteIdentitySigner(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--remote-key %s: %w", e, err)
+		}
+		if name == "" {
+			if def != nil {
+				return nil, nil, errors.New("--remote-key: only one default (NAME-less) key is allowed")
+			}
+			def = signer
+			continue
+		}
+		if _, dup := overrides[name]; dup {
+			return nil, nil, fmt.Errorf("--remote-key: duplicate override for remote %q", name)
+		}
+		overrides[name] = signer
+	}
+	return def, overrides, nil
 }
 
 // buildLogger constructs the daemon's slog logger on stderr from the
@@ -116,6 +158,15 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	}
 	defer refs.Close()
 
+	defSigner, overrides, err := parseRemoteKeys(cfg.remoteKeys.Value())
+	if err != nil {
+		return err
+	}
+	registry, err := remotes.Open(filepath.Join(cfg.store, "remotes"))
+	if err != nil {
+		return err
+	}
+
 	sock := socketpath.Resolve(cfg.socket)
 	// Remove a stale socket from a previous run before binding.
 	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
@@ -128,7 +179,11 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	defer os.Remove(sock)
 
 	srv := &http.Server{
-		Handler: daemon.New(store, refs, logger),
+		Handler: daemon.NewWithRemotes(store, refs, logger, &daemon.RemoteConfig{
+			Registry:      registry,
+			DefaultSigner: defSigner,
+			Signers:       overrides,
+		}),
 		// Route the http.Server's own diagnostics (handler panics, accept
 		// errors) through the structured logger.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),

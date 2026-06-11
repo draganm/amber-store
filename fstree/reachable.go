@@ -28,55 +28,13 @@ func ReachableKeys(root key.Key, get func(key.Key) ([]byte, error)) ([]key.Key, 
 		if err != nil {
 			return fmt.Errorf("fstree: reading %s: %w", k, err)
 		}
-		switch k.Type() {
-		case key.FileNode:
-			children, err := DecodeFileNode(data)
-			if err != nil {
-				return fmt.Errorf("fstree: decoding FileNode %s: %w", k, err)
-			}
-			for _, ck := range children {
-				if err := walk(ck); err != nil {
-					return err
-				}
-			}
-		case key.DirNode:
-			pairs, err := DecodeDirNode(data)
-			if err != nil {
-				return fmt.Errorf("fstree: decoding DirNode %s: %w", k, err)
-			}
-			for _, p := range pairs {
-				ck, err := key.Parse(p.ChildKey)
-				if err != nil {
-					return fmt.Errorf("fstree: child key in DirNode %s: %w", k, err)
-				}
-				if err := walk(ck); err != nil {
-					return err
-				}
-			}
-		case key.DirLeaf:
-			entries, err := DecodeDirLeaf(data)
-			if err != nil {
-				return fmt.Errorf("fstree: decoding DirLeaf %s: %w", k, err)
-			}
-			for _, ent := range entries {
-				if len(ent.ContentKey) > 0 {
-					ck, err := key.Parse(ent.ContentKey)
-					if err != nil {
-						return fmt.Errorf("fstree: %q: content key: %w", ent.Name, err)
-					}
-					if err := walk(ck); err != nil {
-						return err
-					}
-				}
-				if len(ent.XattrsKey) > 0 {
-					xk, err := key.Parse(ent.XattrsKey)
-					if err != nil {
-						return fmt.Errorf("fstree: %q: xattrs key: %w", ent.Name, err)
-					}
-					if err := walk(xk); err != nil {
-						return err
-					}
-				}
+		children, err := ChildKeys(k, data)
+		if err != nil {
+			return err
+		}
+		for _, ck := range children {
+			if err := walk(ck); err != nil {
+				return err
 			}
 		}
 		return nil
