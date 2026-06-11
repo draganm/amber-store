@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
+	"github.com/draganm/amber-store/tarexport"
 	"golang.org/x/sys/unix"
 )
 
@@ -422,4 +424,65 @@ func (h *handler) treeDir(w http.ResponseWriter, r *http.Request, dir key.Key) {
 		resp["next"] = url.QueryEscape(string(entries[len(entries)-1].Name))
 	}
 	writeJSON(w, resp)
+}
+
+// archive streams the directory at ref+path as a tar (format=tar, the
+// default) or gzipped tar (format=tgz) attachment.
+func (h *handler) archive(w http.ResponseWriter, r *http.Request) {
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "tar"
+	}
+	if format != "tar" && format != "tgz" {
+		jsonError(w, http.StatusBadRequest, "format must be tar or tgz")
+		return
+	}
+	t, status, err := h.resolveTarget(r)
+	if err != nil {
+		jsonError(w, status, err.Error())
+		return
+	}
+	if t.entry != nil && t.entry.Mode&unix.S_IFMT != unix.S_IFDIR {
+		jsonError(w, http.StatusBadRequest, "not a directory")
+		return
+	}
+	if t.key.Type() != key.DirLeaf && t.key.Type() != key.DirNode {
+		jsonError(w, http.StatusBadRequest, "not a directory")
+		return
+	}
+
+	// The filename derives from what was archived: the path's basename,
+	// or the ref's for the root.
+	base := r.URL.Query().Get("ref")
+	if p := strings.Trim(r.URL.Query().Get("path"), "/"); p != "" {
+		base = p
+	}
+	base = fileBaseName(base)
+
+	abort := func(err error) {
+		h.log.Error("aborting archive stream", "error", err)
+		panic(http.ErrAbortHandler)
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	switch format {
+	case "tar":
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": base + ".tar"}))
+		if err := tarexport.Write(w, t.key, h.objects.Get); err != nil {
+			abort(err)
+		}
+	case "tgz":
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": base + ".tar.gz"}))
+		gz := gzip.NewWriter(w)
+		if err := tarexport.Write(gz, t.key, h.objects.Get); err != nil {
+			abort(err)
+		}
+		if err := gz.Close(); err != nil {
+			abort(err)
+		}
+	}
 }

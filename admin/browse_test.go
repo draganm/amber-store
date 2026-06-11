@@ -1,6 +1,8 @@
 package admin_test
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -626,5 +628,139 @@ func TestTreeNextCursor(t *testing.T) {
 	// exactly once and in order despite the lossy JSON names.
 	if len(mtimes) != 4 || mtimes[0] != 0 || mtimes[1] != 1 || mtimes[2] != 2 || mtimes[3] != 3 {
 		t.Fatalf("paged mtimes = %v, want [0 1 2 3]", mtimes)
+	}
+}
+
+func archiveURL(srv *httptest.Server, params map[string]string) string {
+	q := url.Values{}
+	for k, v := range params {
+		q.Set(k, v)
+	}
+	return srv.URL + "/admin/api/archive?" + q.Encode()
+}
+
+// tarNames reads all member names (and the content of regular files) from a
+// tar stream.
+func tarNames(t *testing.T, rd io.Reader) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	tr := tar.NewReader(rd)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := ""
+		if hdr.Typeflag == tar.TypeReg {
+			b, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content = string(b)
+		}
+		out[hdr.Name] = content
+	}
+	return out
+}
+
+func wantSeedTreeMembers(t *testing.T, got map[string]string) {
+	t.Helper()
+	want := map[string]string{
+		"hello.txt":      "hello, amber",
+		"sub/":           "",
+		"sub/link":       "",
+		"sub/nested.txt": "nested",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("archive members = %v, want %v", got, want)
+	}
+	for name, content := range want {
+		if c, ok := got[name]; !ok || c != content {
+			t.Fatalf("member %q = %q,%v want %q", name, c, ok, content)
+		}
+	}
+}
+
+func TestArchiveTar(t *testing.T) {
+	objs := memObjects{}
+	root, _ := seedTree(t, objs)
+	refs := memRefs{"backup/daily": mustRef(t, "backup/daily", root, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	// Default format is tar; the filename derives from the ref basename.
+	resp := do(t, "GET", archiveURL(srv, map[string]string{"ref": "backup/daily", "path": ""}), cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("archive = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-tar" {
+		t.Fatalf("Content-Type = %q, want application/x-tar", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") || !strings.Contains(cd, "daily.tar") {
+		t.Fatalf("Content-Disposition = %q, want attachment daily.tar", cd)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	wantSeedTreeMembers(t, tarNames(t, resp.Body))
+
+	// A subdirectory archive contains only that subtree.
+	resp = do(t, "GET", archiveURL(srv, map[string]string{"ref": "backup/daily", "path": "sub", "format": "tar"}), cookie, "")
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "sub.tar") {
+		t.Fatalf("Content-Disposition = %q, want sub.tar", cd)
+	}
+	got := tarNames(t, resp.Body)
+	if len(got) != 2 || got["nested.txt"] != "nested" {
+		t.Fatalf("sub archive members = %v", got)
+	}
+}
+
+func TestArchiveTgz(t *testing.T) {
+	objs := memObjects{}
+	root, _ := seedTree(t, objs)
+	refs := memRefs{"backup/daily": mustRef(t, "backup/daily", root, "alice")}
+	srv, cookie := browseServer(t, objs, refs)
+
+	resp := do(t, "GET", archiveURL(srv, map[string]string{"ref": "backup/daily", "format": "tgz"}), cookie, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("archive = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("Content-Type = %q, want application/gzip", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "daily.tar.gz") {
+		t.Fatalf("Content-Disposition = %q, want daily.tar.gz", cd)
+	}
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSeedTreeMembers(t, tarNames(t, gz))
+}
+
+func TestArchiveErrors(t *testing.T) {
+	objs := memObjects{}
+	root, hello := seedTree(t, objs)
+	refs := memRefs{
+		"backup/daily": mustRef(t, "backup/daily", root, "alice"),
+		"motd":         mustRef(t, "motd", hello, "bob"),
+	}
+	srv, cookie := browseServer(t, objs, refs)
+
+	for name, params := range map[string]map[string]string{
+		"file path":  {"ref": "backup/daily", "path": "hello.txt"},
+		"file ref":   {"ref": "motd"},
+		"bad format": {"ref": "backup/daily", "format": "zip"},
+	} {
+		resp := do(t, "GET", archiveURL(srv, params), cookie, "")
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", name, resp.StatusCode)
+		}
+	}
+	resp := do(t, "GET", archiveURL(srv, map[string]string{"ref": "nope"}), cookie, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown ref = %d, want 404", resp.StatusCode)
 	}
 }
