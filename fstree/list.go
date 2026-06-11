@@ -10,7 +10,8 @@ import (
 
 // ListEntries returns up to limit entries of the directory object dir whose
 // names sort strictly after `after` (nil or empty lists from the start), in
-// name order, and whether more such entries follow. It descends only the
+// name order, and whether more such entries follow. When more is true the
+// returned page is full: len(entries) == limit. It descends only the
 // subtrees that can hold qualifying names — a DirNode pair is skipped when
 // its SepName (the subtree's greatest name) is not after `after` — touching
 // O(log n + limit) objects. limit must be positive.

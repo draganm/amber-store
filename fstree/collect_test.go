@@ -212,6 +212,12 @@ func TestResolveEntry(t *testing.T) {
 		t.Fatalf("through a file: err = %v, want ErrNotDir", err)
 	}
 
+	// Descending through a symlink mid-path is ErrNotDir too (symlinks
+	// are never followed).
+	if _, err := fstree.ResolveEntry(root.Key, "mid/link/x", get); !errors.Is(err, fstree.ErrNotDir) {
+		t.Fatalf("through a symlink: err = %v, want ErrNotDir", err)
+	}
+
 	// ".." is rejected.
 	if _, err := fstree.ResolveEntry(root.Key, "mid/..", get); err == nil {
 		t.Fatal("expected error for \"..\" component")

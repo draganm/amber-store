@@ -1,7 +1,7 @@
 package fstree_test
 
 import (
-	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
@@ -40,8 +40,8 @@ func TestListEntries_PagesMatchCollect(t *testing.T) {
 			t.Fatalf("limit %d: got %d entries, want %d", limit, len(got), len(want))
 		}
 		for i := range want {
-			if !bytes.Equal(got[i].Name, want[i].Name) {
-				t.Fatalf("limit %d: entry %d = %q, want %q", limit, i, got[i].Name, want[i].Name)
+			if !reflect.DeepEqual(got[i], want[i]) {
+				t.Fatalf("limit %d: entry %d = %+v, want %+v", limit, i, got[i], want[i])
 			}
 		}
 	}
