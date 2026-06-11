@@ -75,9 +75,8 @@ func load(dir string, rel []string, parent *Matcher) (*Matcher, error) {
 	if parent != nil {
 		inherited = parent.patterns
 	}
-	ps := make([]gitignore.Pattern, len(inherited), len(inherited))
-	copy(ps, inherited)
-	for _, line := range strings.Split(string(data), "\n") {
+	ps := append([]gitignore.Pattern(nil), inherited...)
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			continue

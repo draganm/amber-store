@@ -30,7 +30,8 @@ import (
 var errIngestStopped = errors.New("ingest: consumer stopped")
 
 // ingestObjects returns an iterator over every CAS object in the tree rooted at
-// dir, yielding fstree.Objects for serialization into a pack-write stream. The
+// dir (entries excluded by ign are skipped, ignored directories pruned),
+// yielding fstree.Objects for serialization into a pack-write stream. The
 // tree is built concurrently by up to jobs workers (file reads, content-defined
 // chunking and hashing run in parallel across sibling files and subdirectories);
 // built objects stream to the consumer through a buffered channel, so production
