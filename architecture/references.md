@@ -95,7 +95,7 @@ any network traffic.
 **Signer-key ownership.** The signer key (CBOR key 5) owns the reference name
 on the server. An existing name may only be overwritten by a record carrying the
 same signer key. A different signer → `403`. Transport keys marked `admin` in
-the server's `--allowed-keys` file bypass this check — they are the operations
+the server's allowed-keys database bypass this check — they are the operations
 override for lockout or migration.
 
 **Admin-only deletion.** A `DELETE` request carries no record, so the server

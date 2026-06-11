@@ -18,7 +18,6 @@ lets each step be re-run independently on interruption.
 amber-store serve \
   --store DIR \
   --listen ADDR \        # default :8590
-  --allowed-keys FILE \  # authorized_keys format; 'admin' option marks ops keys; reloaded on SIGHUP
   [--identity PATH] \    # server's SSH key: private-key file or .pub via ssh-agent; default: auto-generated in DIR
   [--tls-cert FILE --tls-key FILE]
 ```
@@ -42,26 +41,26 @@ A `.pub` path signs via ssh-agent (reusing `internal/sshsign`).
 
 ## Identity and trust
 
-**Server side:** the `--allowed-keys` file is in authorized_keys format. The
-`options` field may carry `admin` for operations keys that bypass ownership
-checks and are permitted to delete references. The file is loaded at start and
-reloaded on SIGHUP without restarting the server.
+**Server side:** allowed client keys live in a Pebble database at
+`<store>/allowed-keys`, one entry per SSH public key. An entry may be marked
+`admin` for operations keys that bypass ownership checks and are permitted
+to delete references. The admin UI is the only way to manage the set; a
+fresh server allows nobody and logs a warning until keys are added.
 
 **Admin UI.** Setting `AMBER_ADMIN_PASSWORD` (or `--admin-password`) enables a
 browser console at `/admin/` — a solid-js SPA embedded in the binary
 (`go generate ./cmd/amber-store` rebuilds it) — where an operator signs in
-with that password and inspects, adds, and removes allowed keys. Edits go
-through atomic rewrites of the `--allowed-keys` file and take effect
-immediately; the file stays the source of truth, so hand edits plus SIGHUP
-keep working. Sessions are in-memory cookies (12h); when the password is not
-configured, the `/admin/` surface does not exist.
+with that password and inspects, adds, and removes allowed keys. Edits write
+straight to the allowed-keys database and take effect immediately. Sessions
+are in-memory cookies (12h); when the password is not configured, the
+`/admin/` surface does not exist.
 
 **Default identities.** When no key flag is given, each service generates an
 ed25519 keypair on first start and persists it in its store directory as
 `identity` (0600) and `identity.pub` (0644). The same key is loaded on every
 later start; an existing file that cannot be parsed is an error, never
-overwritten. `identity.pub` is what an operator copies into a server's
-`--allowed-keys` file to authorize a daemon.
+overwritten. `identity.pub` is what an operator pastes into a server's
+admin UI to authorize a daemon.
 
 **Client side — trust-on-first-use.** Registering a remote fetches the
 server's public key via the unauthenticated `GET /v1/identity` route, prints
@@ -106,7 +105,7 @@ payload, so signing cost is constant regardless of body size.
 2. Nonce not seen before — an LRU set sized to the window, keyed by
    fingerprint, prevents replay within the window.
 3. Signature verifies over the reconstructed canonical payload.
-4. Public key present in the `--allowed-keys` list.
+4. Public key present in the allowed-keys database.
 
 The server reads the (size-capped) body fully and verifies before any side
 effect: nothing is stored or written on a request that fails auth. Bad or

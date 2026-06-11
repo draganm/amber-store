@@ -104,7 +104,8 @@ each local daemon:
 ```sh
 # on the server host — owns its own store, signs every response
 amber-store serve --store /path/to/remote-store --listen :8590 \
-  --allowed-keys /etc/amber/allowed_keys --identity /etc/amber/server_key
+  --identity /etc/amber/server_key
+# authorize clients via the admin UI: set AMBER_ADMIN_PASSWORD and open /admin/
 
 # on a client host — confirm fingerprint once, then push/pull by reference
 amber-store remote add origin https://store.example.com:8590
