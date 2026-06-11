@@ -359,6 +359,17 @@ func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Probe the content object before committing headers, so a missing
+	// object is a clean 404 rather than an aborted connection.
+	if _, err := h.objects.Get(t.key); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, diskstore.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		jsonError(w, status, err.Error())
+		return
+	}
+
 	ctype := mime.TypeByExtension(path.Ext(filename))
 	if ctype == "" {
 		head, err := h.firstBytes(t.key, 512)

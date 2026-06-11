@@ -487,6 +487,22 @@ func TestRawMissingObject(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("raw missing object = %d, want 404", resp.StatusCode)
 	}
+
+	// The same dangling object behind an extension-typed name must also
+	// 404 cleanly — the Content-Type never needs the object, but the
+	// pre-flight probe does.
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("ghost.txt"), Mode: 0o100644, Mtime: 1, ContentKey: ghost.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs.put(leaf)
+	refs["dir"] = mustRef(t, "dir", leaf.Key, "alice")
+	resp = do(t, "GET", rawURL(srv, map[string]string{"ref": "dir", "path": "ghost.txt"}), cookie, "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("typed raw missing object = %d, want 404", resp.StatusCode)
+	}
 }
 
 // TestRawHTMLSandboxed pins the stored-HTML defense: whether typed by
