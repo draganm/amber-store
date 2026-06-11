@@ -16,6 +16,7 @@ import (
 
 	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/internal/allowlist"
+	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/server"
@@ -63,8 +64,7 @@ func serveCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:        "identity",
-				Usage:       "server SSH identity: a private-key file, or a .pub resolved through the ssh-agent",
-				Required:    true,
+				Usage:       "server SSH identity: a private-key file, or a .pub resolved through the ssh-agent (default: auto-generated in the store directory)",
 				Destination: &cfg.identity,
 			},
 			&cli.StringFlag{
@@ -117,6 +117,16 @@ func remoteIdentitySigner(path string) (ssh.Signer, func(), error) {
 	})
 }
 
+// resolveIdentity loads the explicitly configured identity, or the store's
+// auto-generated one when no path was given.
+func resolveIdentity(identityPath, storeDir string) (ssh.Signer, func(), error) {
+	if identityPath == "" {
+		signer, err := identity.LoadOrCreate(storeDir)
+		return signer, func() {}, err
+	}
+	return remoteIdentitySigner(identityPath)
+}
+
 func runServe(c *cli.Context, cfg *serveConfig) error {
 	if (cfg.tlsCert == "") != (cfg.tlsKey == "") {
 		return errors.New("--tls-cert and --tls-key must be set together")
@@ -125,7 +135,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	if err != nil {
 		return err
 	}
-	identity, closeIdentity, err := remoteIdentitySigner(cfg.identity)
+	signer, closeIdentity, err := resolveIdentity(cfg.identity, cfg.store)
 	if err != nil {
 		return err
 	}
@@ -173,7 +183,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 			Store:    store,
 			Refs:     refs,
 			Allow:    func() *allowlist.List { return allow.Load() },
-			Identity: identity,
+			Identity: signer,
 			Log:      logger,
 			Window:   cfg.authWindow,
 		}),
@@ -196,7 +206,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		"addr", ln.Addr().String(),
 		"store", cfg.store,
 		"tls", cfg.tlsCert != "",
-		"identity", ssh.FingerprintSHA256(identity.PublicKey()),
+		"identity", ssh.FingerprintSHA256(signer.PublicKey()),
 	)
 	if cfg.tlsCert != "" {
 		err = srv.ServeTLS(ln, cfg.tlsCert, cfg.tlsKey)

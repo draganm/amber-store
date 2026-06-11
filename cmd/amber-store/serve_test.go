@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/draganm/amber-store/remoteclient"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -42,7 +47,6 @@ func writeServeFixtures(t *testing.T) (identityPath, allowedPath string) {
 func TestServeRequiresFlags(t *testing.T) {
 	identity, allowed := writeServeFixtures(t)
 	cases := [][]string{
-		{"amber-store", "serve", "--store", t.TempDir(), "--allowed-keys", allowed}, // no identity
 		{"amber-store", "serve", "--store", t.TempDir(), "--identity", identity},    // no allowed-keys
 		{"amber-store", "serve", "--identity", identity, "--allowed-keys", allowed}, // no store
 	}
@@ -50,6 +54,61 @@ func TestServeRequiresFlags(t *testing.T) {
 		if err := newApp().Run(args); err == nil {
 			t.Fatalf("serve %v succeeded, want missing-flag error", args[2:])
 		}
+	}
+}
+
+// TestServeAutoIdentity starts serve without --identity and checks that the
+// served identity matches the auto-generated <store>/identity.pub.
+func TestServeAutoIdentity(t *testing.T) {
+	_, allowed := writeServeFixtures(t)
+	storeDir := filepath.Join(t.TempDir(), "store")
+
+	// Reserve a port so the test can find the server.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- newApp().RunContext(ctx, []string{
+			"amber-store", "serve", "--store", storeDir,
+			"--allowed-keys", allowed, "--listen", addr, "--sync=false",
+		})
+	}()
+
+	var pubWire []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pubWire, err = remoteclient.FetchIdentity(ctx, "http://"+addr)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not come up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	pubBytes, err := os.ReadFile(filepath.Join(storeDir, "identity.pub"))
+	if err != nil {
+		t.Fatalf("identity.pub not written: %v", err)
+	}
+	filePub, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(filePub.Marshal(), pubWire) {
+		t.Fatal("served identity does not match the generated identity.pub")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve returned: %v", err)
 	}
 }
 
