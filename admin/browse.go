@@ -70,7 +70,7 @@ func (h *handler) listRefs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, refInfo{
-			Name:      ref.Name,
+			Name:      rec.Name,
 			Key:       k.String(),
 			User:      ref.User,
 			CreatedAt: time.Unix(0, ref.CreatedAt).UTC().Format(time.RFC3339Nano),

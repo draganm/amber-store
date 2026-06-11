@@ -157,7 +157,8 @@ func TestListRefs(t *testing.T) {
 	if r := out.Refs[1]; r.Name != "motd" || r.Kind != "file" || r.User != "bob" {
 		t.Fatalf("refs[1] = %+v", r)
 	}
-	if r := out.Refs[2]; r.Name != "zzz-bad" || r.Kind != "invalid" || r.Key != "" {
+	if r := out.Refs[2]; r.Name != "zzz-bad" || r.Kind != "invalid" ||
+		r.Key != "" || r.User != "" || r.CreatedAt != "" {
 		t.Fatalf("refs[2] = %+v", r)
 	}
 }
