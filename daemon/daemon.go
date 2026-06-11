@@ -47,7 +47,7 @@ func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
 	if rc.DefaultSigner != nil {
 		return rc.DefaultSigner, nil
 	}
-	return nil, errors.New("no remote signing key configured — start the daemon with --remote-key")
+	return nil, errors.New("no remote signing key configured")
 }
 
 // New returns an http.Handler serving the store. Every request is logged to

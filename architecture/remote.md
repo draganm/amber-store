@@ -19,7 +19,7 @@ amber-store serve \
   --store DIR \
   --listen ADDR \        # default :8590
   --allowed-keys FILE \  # authorized_keys format; 'admin' option marks ops keys; reloaded on SIGHUP
-  --identity PATH \      # server's SSH key: private-key file or .pub via ssh-agent
+  [--identity PATH] \    # server's SSH key: private-key file or .pub via ssh-agent; default: auto-generated in DIR
   [--tls-cert FILE --tls-key FILE]
 ```
 
@@ -31,8 +31,8 @@ Client identities are configured at daemon start:
 
 ```
 amber-store daemon \
-  --remote-key PATH \        # default signing key for all remotes
-  --remote-key NAME=PATH \   # per-remote override (repeatable)
+  [--remote-key PATH] \      # default signing key for all remotes; default: auto-generated in the store dir
+  [--remote-key NAME=PATH] \ # per-remote override (repeatable)
   ...
 ```
 
@@ -46,6 +46,13 @@ A `.pub` path signs via ssh-agent (reusing `internal/sshsign`).
 `options` field may carry `admin` for operations keys that bypass ownership
 checks and are permitted to delete references. The file is loaded at start and
 reloaded on SIGHUP without restarting the server.
+
+**Default identities.** When no key flag is given, each service generates an
+ed25519 keypair on first start and persists it in its store directory as
+`identity` (0600) and `identity.pub` (0644). The same key is loaded on every
+later start; an existing file that cannot be parsed is an error, never
+overwritten. `identity.pub` is what an operator copies into a server's
+`--allowed-keys` file to authorize a daemon.
 
 **Client side — trust-on-first-use.** Registering a remote fetches the
 server's public key via the unauthenticated `GET /v1/identity` route, prints
