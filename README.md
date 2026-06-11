@@ -57,6 +57,85 @@ store:
   `Blob`s are raw bytes. Deterministic encoding is required because the key's hash
   is taken over the serialized bytes.
 
+## CLI, daemon, server
+
+Three kinds of process, two protocols between them:
+
+```text
+source dir ──▶ CLI ──── unix socket ────▶ daemon ──── signed HTTP(S) ────▶ server
+               (builds trees)             (owns the local store)           (owns a shared store)
+```
+
+- The **CLI** is short-lived: every command connects, performs one operation,
+  and exits. The CPU-heavy tree building — walking the source, content-defined
+  chunking, BLAKE3 hashing, CBOR encoding — happens here, fanned out across
+  `--jobs` workers; and since keys are deterministic functions of content, the
+  client computes the root key itself, without the daemon's help.
+- The **daemon** is the only process that ever opens the store directory — no
+  cross-process locking, no reader seeing a half-written object. It verifies
+  and persists uploaded objects, serves the read-side traversals (`ls`, tar
+  export, reachable-key walks), owns the references DB and the remote
+  registry, and performs all communication with remote servers.
+- The **server** (`amber-store serve`) is a TCP/HTTP(S) sibling of the daemon
+  that owns its own store, for sharing over the network. Local daemons are its
+  only clients; every request and every response is signed.
+
+### How objects flow
+
+Objects are immutable and content-addressed, so every hop can verify what it
+receives, and transfers reduce to "send what the other side is missing":
+
+- **Ingest** streams objects to the daemon as the tree build emits them, in
+  the `amberpack` format — a flat, unordered, possibly-partial set of
+  `key + payload` records with no root, like a git pack. The daemon re-hashes
+  every payload against its claimed key before storing it, so a buggy or
+  hostile client cannot poison the store. The same format works offline
+  (`ingest -o` + `load`) and on the wire between daemon and server.
+- **Push** walks the reachable set locally, asks the server which of those
+  keys it lacks, and uploads only the missing ones in byte-balanced batches
+  over parallel workers. **Pull** resolves the reference on the server, then
+  BFS-walks the tree from its key, fetching only objects absent locally and
+  parsing arriving tree nodes to extend the frontier.
+- Because the store is a content-addressed bag, every transfer is idempotent
+  and resumable: re-running after an interruption skips whatever already
+  arrived.
+
+### How references flow
+
+A reference is a small record — name → key, plus creator, timestamp, and an
+SSH signature ([`architecture/references.md`](architecture/references.md)).
+References always travel **after** objects: dangling references are refused
+on both ends (the daemon checks that the pointed-to key exists; the server
+walks the whole tree under it and rejects the record if any reachable object
+is missing), which is what makes `push-objects` → `push-ref` the natural
+order. Locally a name is freely overwritable; on a server, names have owners
+(see below).
+
+### How auth works
+
+Three layers, local to remote
+([`architecture/remote.md`](architecture/remote.md)):
+
+- **Local daemon: socket permissions.** The unix socket's file mode is the
+  only access control — anything that can connect can read and write the
+  store.
+- **Daemon ↔ server: mutual SSH-key signing.** The daemon signs every request
+  with its client key (an SSHSIG over method, path, timestamp, nonce, and a
+  BLAKE3 hash of the body); the server checks the timestamp window, rejects
+  replayed nonces, verifies the signature, and requires the key to be in its
+  allowed-keys database — managed through the password-gated `/admin/` UI.
+  Every response is signed with the server's identity key, which the daemon
+  pins at `remote add` after the user confirms its fingerprint
+  (trust-on-first-use, like SSH). TLS is optional and orthogonal: signatures
+  already give authenticity and integrity; TLS adds confidentiality.
+- **Reference ownership: record signatures.** A server only accepts signed
+  reference records, and the signing key owns the name: an existing reference
+  may only be overwritten by a record signed with the same key. The transport
+  key and the signer key are independent identities — the same user can
+  update their references from any of their machines. Deletion (which carries
+  no record to sign) and ownership overrides are reserved for transport keys
+  marked `admin`.
+
 ## Architecture
 
 | Document | Contents |
