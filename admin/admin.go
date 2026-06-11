@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/draganm/amber-store/internal/allowfile"
+	"github.com/draganm/amber-store/internal/allowstore"
 )
 
 // SessionCookie is the name of the admin session cookie.
@@ -36,7 +36,7 @@ const (
 // Config assembles the admin handler.
 type Config struct {
 	Password  string          // required; the UI is only mounted when set
-	Keys      *allowfile.File // the live allowed-keys file
+	Keys      *allowstore.Store // the live allowed-keys store
 	UI        fs.FS           // built SPA; index.html at the root
 	Log       *slog.Logger    // nil discards
 	Secure    bool            // mark the session cookie Secure (serving TLS)
@@ -45,7 +45,7 @@ type Config struct {
 
 type handler struct {
 	password  []byte // sha256 of the password, for constant-time compare
-	keys      *allowfile.File
+	keys      *allowstore.Store
 	ui        fs.FS
 	log       *slog.Logger
 	secure    bool
@@ -201,13 +201,8 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.keys.List()
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+	_ = json.NewEncoder(w).Encode(map[string]any{"keys": h.keys.List()})
 }
 
 func (h *handler) addKey(w http.ResponseWriter, r *http.Request) {

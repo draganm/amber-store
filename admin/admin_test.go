@@ -7,14 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/draganm/amber-store/admin"
-	"github.com/draganm/amber-store/internal/allowfile"
+	"github.com/draganm/amber-store/internal/allowstore"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -38,17 +37,21 @@ var testUI = fstest.MapFS{
 	"assets/app.js": {Data: []byte("console.log('ui')")},
 }
 
-// testServer returns a started admin server, the allowed-keys file
-// behind it, and the path of that file.
-func testServer(t *testing.T) (*httptest.Server, *allowfile.File, string) {
+// testServer returns a started admin server and the allowed-keys store
+// behind it, seeded with one key.
+func testServer(t *testing.T) (*httptest.Server, *allowstore.Store) {
 	t.Helper()
-	_, line := testKey(t)
-	path := filepath.Join(t.TempDir(), "allowed")
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+	keys, err := allowstore.Open(filepath.Join(t.TempDir(), "allowed-keys"), false)
+	if err != nil {
 		t.Fatal(err)
 	}
-	keys, err := allowfile.Open(path)
-	if err != nil {
+	t.Cleanup(func() {
+		if err := keys.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	_, line := testKey(t)
+	if err := keys.Add(line, false); err != nil {
 		t.Fatal(err)
 	}
 	h, err := admin.New(admin.Config{Password: password, Keys: keys, UI: testUI})
@@ -57,7 +60,7 @@ func testServer(t *testing.T) (*httptest.Server, *allowfile.File, string) {
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv, keys, path
+	return srv, keys
 }
 
 // login authenticates and returns the session cookie.
@@ -112,7 +115,7 @@ func TestNewRequiresPassword(t *testing.T) {
 }
 
 func TestSessionLifecycle(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 
 	// no cookie: not logged in
 	resp := do(t, "GET", srv.URL+"/admin/api/session", nil, "")
@@ -146,7 +149,7 @@ func TestSessionLifecycle(t *testing.T) {
 }
 
 func TestKeysRequireSession(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 	for _, c := range []struct{ method, path, body string }{
 		{"GET", "/admin/api/keys", ""},
 		{"POST", "/admin/api/keys", `{"line":"x"}`},
@@ -159,13 +162,13 @@ func TestKeysRequireSession(t *testing.T) {
 	}
 }
 
-func keysOf(t *testing.T, resp *http.Response) []allowfile.Key {
+func keysOf(t *testing.T, resp *http.Response) []allowstore.Key {
 	t.Helper()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list keys = %d, want 200", resp.StatusCode)
 	}
 	var out struct {
-		Keys []allowfile.Key `json:"keys"`
+		Keys []allowstore.Key `json:"keys"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
@@ -174,7 +177,7 @@ func keysOf(t *testing.T, resp *http.Response) []allowfile.Key {
 }
 
 func TestKeysCRUD(t *testing.T) {
-	srv, keys, path := testServer(t)
+	srv, keys := testServer(t)
 	cookie := login(t, srv)
 
 	listed := keysOf(t, do(t, "GET", srv.URL+"/admin/api/keys", cookie, ""))
@@ -192,20 +195,22 @@ func TestKeysCRUD(t *testing.T) {
 	if e, ok := keys.Current().Lookup(pub.Marshal()); !ok || !e.Admin {
 		t.Fatalf("added key live lookup: ok=%v admin=%v, want allowed admin", ok, e.Admin)
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), line) {
-		t.Fatal("added key not persisted to the allowed-keys file")
-	}
 
 	listed = keysOf(t, do(t, "GET", srv.URL+"/admin/api/keys", cookie, ""))
 	if len(listed) != 2 {
 		t.Fatalf("list after add has %d keys, want 2", len(listed))
 	}
-	added := listed[1]
-	if !added.Admin || added.Comment != "web-added" {
+	// List orders by wire-key bytes, so find the new key by comment.
+	var added *allowstore.Key
+	for i := range listed {
+		if listed[i].Comment == "web-added" {
+			added = &listed[i]
+		}
+	}
+	if added == nil {
+		t.Fatalf("added key not listed: %+v", listed)
+	}
+	if !added.Admin {
 		t.Fatalf("added key listed wrong: %+v", added)
 	}
 
@@ -225,7 +230,7 @@ func TestKeysCRUD(t *testing.T) {
 }
 
 func TestAddInvalidKey(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 	cookie := login(t, srv)
 	resp := do(t, "POST", srv.URL+"/admin/api/keys", cookie, `{"line":"not a key"}`)
 	if resp.StatusCode != http.StatusBadRequest {
@@ -240,7 +245,7 @@ func TestAddInvalidKey(t *testing.T) {
 }
 
 func TestDeleteUnknownKey(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 	cookie := login(t, srv)
 	resp := do(t, "DELETE", srv.URL+"/admin/api/keys?fingerprint=SHA256:absent", cookie, "")
 	if resp.StatusCode != http.StatusNotFound {
@@ -249,7 +254,7 @@ func TestDeleteUnknownKey(t *testing.T) {
 }
 
 func TestCrossOriginMutationRejected(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 	req, err := http.NewRequest("POST", srv.URL+"/admin/api/login",
 		strings.NewReader(`{"password":"`+password+`"}`))
 	if err != nil {
@@ -267,7 +272,7 @@ func TestCrossOriginMutationRejected(t *testing.T) {
 }
 
 func TestServesSPA(t *testing.T) {
-	srv, _, _ := testServer(t)
+	srv, _ := testServer(t)
 	for path, want := range map[string]string{
 		"/admin/":              "amber admin",
 		"/admin":               "amber admin", // redirect
