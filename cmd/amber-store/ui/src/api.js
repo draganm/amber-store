@@ -36,3 +36,23 @@ export const listKeys = () => call('GET', '/admin/api/keys');
 export const addKey = (line, admin) => call('POST', '/admin/api/keys', { line, admin });
 export const removeKey = (fingerprint) =>
   call('DELETE', `/admin/api/keys?fingerprint=${encodeURIComponent(fingerprint)}`);
+
+export const listRefs = () => call('GET', '/admin/api/refs');
+export const listTree = (refName, path, afterRaw) => {
+  const q = new URLSearchParams({ ref: refName, path: path || '' });
+  let qs = q.toString();
+  // afterRaw is the server's pre-encoded `next` cursor (raw entry-name
+  // bytes, percent-encoded); append it verbatim — URLSearchParams would
+  // double-encode it.
+  if (afterRaw) qs += `&after=${afterRaw}`;
+  return call('GET', `/admin/api/tree?${qs}`);
+};
+// rawURL/archiveURL feed plain <a href> links; the session cookie
+// authenticates same-site navigations.
+export const rawURL = (refName, path, dl) => {
+  const q = new URLSearchParams({ ref: refName, path: path || '' });
+  if (dl) q.set('dl', '1');
+  return `/admin/api/raw?${q}`;
+};
+export const archiveURL = (refName, path, format) =>
+  `/admin/api/archive?${new URLSearchParams({ ref: refName, path: path || '', format })}`;

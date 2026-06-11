@@ -456,3 +456,27 @@ body {
   letter-spacing: 0.05em;
   color: var(--ffr-ink-200);
 }
+
+/* ---- header nav (keys / refs) ---- */
+.site-nav {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  margin-right: 16px;
+}
+.site-nav__link {
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: #111;
+  border: 1.5px solid transparent;
+}
+.site-nav__link--active {
+  border-color: #111;
+}
+.site-nav__link:hover {
+  border-color: #2db6be;
+}
