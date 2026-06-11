@@ -35,12 +35,12 @@ const (
 
 // Config assembles the admin handler.
 type Config struct {
-	Password  string          // required; the UI is only mounted when set
+	Password  string            // required; the UI is only mounted when set
 	Keys      *allowstore.Store // the live allowed-keys store
-	UI        fs.FS           // built SPA; index.html at the root
-	Log       *slog.Logger    // nil discards
-	Secure    bool            // mark the session cookie Secure (serving TLS)
-	FailDelay time.Duration   // pause after a failed login; 0 = 500ms
+	UI        fs.FS             // built SPA; index.html at the root
+	Log       *slog.Logger      // nil discards
+	Secure    bool              // mark the session cookie Secure (serving TLS)
+	FailDelay time.Duration     // pause after a failed login; 0 = 500ms
 }
 
 type handler struct {
