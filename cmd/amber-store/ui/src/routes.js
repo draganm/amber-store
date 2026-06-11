@@ -9,7 +9,10 @@ export function browseHref(refName, path) {
 
 // parseRoute reads location.hash: #/keys | #/refs | #/refs/<ref>[/<path>…]
 export function parseRoute() {
-  const h = window.location.hash.replace(/^#\/?/, '');
+  // location.hash is percent-decoded by some browsers (Firefox); take
+  // the raw fragment from href so encoded slashes in ref names survive.
+  const raw = window.location.href.split('#')[1] || '';
+  const h = raw.replace(/^\/?/, '');
   if (h === 'refs') return { page: 'refs' };
   if (h.startsWith('refs/')) {
     const segs = h.slice('refs/'.length).split('/').map(decodeURIComponent);
