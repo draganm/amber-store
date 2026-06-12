@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 
@@ -36,7 +37,9 @@ func compareEntries(a, b indexEntry) int {
 }
 
 // buildIndexSection serializes the index section (fanout + sorted entries).
-// It does not mutate entries.
+// It does not mutate entries. Callers must pass entries with distinct keys
+// (the write path dedups; with duplicate keys the relative order of their
+// rows is unspecified).
 func buildIndexSection(entries []indexEntry) []byte {
 	es := slices.Clone(entries)
 	slices.SortFunc(es, compareEntries)
@@ -64,8 +67,11 @@ func buildIndexSection(entries []indexEntry) []byte {
 // parseIndexSection splits an index section into a decoded fanout table and
 // the raw entry bytes, validating lengths and fanout monotonicity.
 func parseIndexSection(b []byte, keyCount uint64) (*[256]uint32, []byte, error) {
-	want := fanoutSize + int(keyCount)*indexEntrySize
-	if len(b) != want {
+	if keyCount > math.MaxUint32 {
+		return nil, nil, fmt.Errorf("%w: key count %d exceeds format limit", ErrCorrupt, keyCount)
+	}
+	want := uint64(fanoutSize) + keyCount*indexEntrySize
+	if uint64(len(b)) != want {
 		return nil, nil, fmt.Errorf("%w: index section is %d bytes, want %d", ErrCorrupt, len(b), want)
 	}
 	var fanout [256]uint32

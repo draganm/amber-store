@@ -1058,7 +1058,7 @@ Expected: compile error — `buildFooter`, `openSealed`, `footerView` undefined.
 
 - [ ] **Step 3: Implement footer assembly + parse + sealedSegment in `packstore/footer.go`**
 
-Add imports: `"hash/crc32"`, `"os"`, `"golang.org/x/sys/unix"`.
+Add imports: `"hash/crc32"`, `"math"`, `"os"`, `"golang.org/x/sys/unix"`.
 
 ```go
 // buildFooter assembles the complete footer (seal marker, index section,
@@ -1131,6 +1131,7 @@ func parseFooter(mm []byte) (*footerView, error) {
 	fileLen := uint64(len(mm))
 	switch {
 	case bodyLen < uint64(len(magicHeader)) || bodyLen >= fileLen,
+		keyCount > math.MaxUint32, // fanout counts are u32; also keeps the next line overflow-free
 		indexOff != bodyLen+1,
 		indexLen != uint64(fanoutSize)+keyCount*indexEntrySize,
 		filterOff != indexOff+indexLen,
