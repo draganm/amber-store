@@ -34,6 +34,7 @@ var (
 	magicHeader  = []byte("AMBERSG\x01")
 	magicTrailer = []byte("AMBERSGF")
 	castagnoli   = crc32.MakeTable(crc32.Castagnoli)
+	zero4        [4]byte
 )
 
 // ErrCorrupt wraps every structural-corruption error (bad record framing, bad
@@ -75,7 +76,7 @@ type record struct {
 // payload with zstd when that makes it strictly smaller. k is written as
 // given; canonical-form validation happens on the read side.
 func encodeRecord(k key.Key, data []byte) ([]byte, error) {
-	if uint64(len(data)) > maxPayload {
+	if !payloadFits(len(data)) {
 		return nil, fmt.Errorf("packstore: object %s too large: %d bytes", k, len(data))
 	}
 	payload := data
@@ -96,7 +97,12 @@ func encodeRecord(k key.Key, data []byte) ([]byte, error) {
 	return rec, nil
 }
 
-var zero4 [4]byte
+// payloadFits reports whether a payload of n bytes fits the format's u32
+// length fields. Split out of encodeRecord so the bound is testable without
+// allocating 4 GiB.
+func payloadFits(n int) bool {
+	return uint64(n) <= maxPayload
+}
 
 // parseRecord validates the record at the start of b (which may extend past
 // it) and returns its header. It checks framing, flags, key canonicality, and

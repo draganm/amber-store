@@ -105,8 +105,14 @@ func TestRecordEmptyPayload(t *testing.T) {
 }
 
 func TestRecordTooLarge(t *testing.T) {
-	if maxPayload != math.MaxUint32 {
-		t.Fatalf("maxPayload = %d, want %d", maxPayload, uint64(math.MaxUint32))
+	if !payloadFits(math.MaxUint32) {
+		t.Fatal("payloadFits must accept exactly 4 GiB - 1")
+	}
+	if payloadFits(math.MaxUint32 + 1) {
+		t.Fatal("payloadFits must reject > 4 GiB - 1")
+	}
+	if !payloadFits(0) {
+		t.Fatal("payloadFits must accept empty payloads")
 	}
 }
 
@@ -177,6 +183,50 @@ func TestParseRecordRejectsCorruption(t *testing.T) {
 			t.Fatal("want error")
 		}
 	})
+}
+
+func TestParseRecordIgnoresTrailingBytes(t *testing.T) {
+	// Tail-scans call parseRecord on a buffer that extends past the record;
+	// trailing bytes must not affect parsing or the CRC.
+	obj := blobObj(t, incompressible(512))
+	rec, err := encodeRecord(obj.Key, obj.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := append(bytes.Clone(rec), incompressible(1000)...)
+	r, err := parseRecord(extended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.key != obj.Key || int(r.slen) != len(obj.Data) {
+		t.Fatalf("parse over extended buffer: %+v", r)
+	}
+}
+
+func TestDecodePayloadErrors(t *testing.T) {
+	t.Run("bad zstd frame", func(t *testing.T) {
+		if _, err := decodePayload(flagZstd, 100, []byte("not a zstd frame")); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("ulen mismatch", func(t *testing.T) {
+		comp := zstdEnc.EncodeAll([]byte("hello world"), nil)
+		if _, err := decodePayload(flagZstd, 5, comp); err == nil {
+			t.Fatal("want error for wrong ulen")
+		}
+	})
+}
+
+func TestDecodePayloadRawDoesNotAlias(t *testing.T) {
+	stored := []byte{1, 2, 3, 4}
+	out, err := decodePayload(0, 4, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out[0] = 99
+	if stored[0] != 1 {
+		t.Fatal("decodePayload raw path must copy, not alias")
+	}
 }
 
 // r0ulen reads the ulen field of a record.
