@@ -3,6 +3,7 @@ package remotesync_test
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -40,6 +41,12 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
+	return newHarnessMW(t, nil)
+}
+
+// newHarnessMW is newHarness with the server handler wrapped by mw (nil =
+// unwrapped), so tests can observe or fail raw requests.
+func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
@@ -59,11 +66,15 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(server.New(server.Config{
+	var handler http.Handler = server.New(server.Config{
 		Store: store, Refs: refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
-	}))
+	})
+	if mw != nil {
+		handler = mw(handler)
+	}
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return &harness{srv: srv, store: store, refs: refs, identity: identity, client: client, admin: admin}
 }
