@@ -269,7 +269,8 @@ func parseFooter(mm []byte) (*footerView, error) {
 		indexOff != bodyLen+1,
 		indexLen != uint64(fanoutSize)+keyCount*uint64(indexEntrySize),
 		filterOff != indexOff+indexLen,
-		filterOff+filterLen != fileLen-trailerSize:
+		filterOff > fileLen-trailerSize,
+		filterLen != fileLen-trailerSize-filterOff:
 		return nil, fmt.Errorf("%w: trailer offsets inconsistent", ErrCorrupt)
 	}
 	if crc32.Checksum(mm[bodyLen:fileLen-16], castagnoli) != binary.BigEndian.Uint32(tr[48:52]) {
@@ -322,6 +323,9 @@ func openSealed(path string, id uint64) (*sealedSegment, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st.Size() < int64(len(magicHeader)+1+fanoutSize+indexEntrySize+filterHeaderSize+trailerSize) {
+		return nil, fmt.Errorf("%w: %s: file too short: %d bytes", ErrCorrupt, path, st.Size())
+	}
 	mm, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
 		return nil, fmt.Errorf("packstore: mmap %s: %w", path, err)
@@ -358,10 +362,12 @@ func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	end := int64(off) + recHeaderSize + int64(slen)
-	if int64(off) < int64(len(magicHeader)) || end > g.fv.bodyLen {
+	bodyLen := uint64(g.fv.bodyLen)
+	if off < uint64(len(magicHeader)) || off > bodyLen ||
+		uint64(recHeaderSize)+uint64(slen) > bodyLen-off {
 		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
 	}
+	end := off + recHeaderSize + uint64(slen)
 	h := g.mm[off : off+recHeaderSize]
 	flags := h[33]
 	ulen := binary.BigEndian.Uint32(h[34:38])

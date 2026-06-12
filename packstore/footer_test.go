@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"math"
 	"os"
 	"path/filepath"
@@ -496,5 +497,88 @@ func TestOpenSealedRejectsCorruption(t *testing.T) {
 func TestBuildFooterRejectsEmpty(t *testing.T) {
 	if _, err := buildFooter(8, nil); err == nil {
 		t.Fatal("want error for empty segment")
+	}
+}
+
+// refreshFooterCRC recomputes a doctored file's footer CRC so parseFooter's
+// CRC check passes and deeper validation is exercised.
+func refreshFooterCRC(b []byte) {
+	tr := b[len(b)-trailerSize:]
+	bodyLen := binary.BigEndian.Uint64(tr[40:48])
+	binary.BigEndian.PutUint32(tr[48:52], crc32.Checksum(b[bodyLen:uint64(len(b))-16], castagnoli))
+}
+
+func TestParseFooterRejectsWrappingTrailer(t *testing.T) {
+	objs := testObjects(t, 20)
+	path, _ := writeSealedFile(t, objs)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keyCount=MaxUint32 forces indexLen ~190 GB, so filterOff >> fileLen;
+	// a filterLen chosen to wrap mod 2^64 made the old sum check pass and
+	// the index slice expression panic.
+	tr := b[len(b)-trailerSize:]
+	indexOff := binary.BigEndian.Uint64(tr[0:8])
+	keyCount := uint64(math.MaxUint32)
+	indexLen := uint64(fanoutSize) + keyCount*indexEntrySize
+	filterOff := indexOff + indexLen
+	fileLen := uint64(len(b))
+	binary.BigEndian.PutUint64(tr[8:16], indexLen)
+	binary.BigEndian.PutUint64(tr[16:24], filterOff)
+	binary.BigEndian.PutUint64(tr[24:32], fileLen-trailerSize-filterOff) // wraps
+	binary.BigEndian.PutUint64(tr[32:40], keyCount)
+	refreshFooterCRC(b)
+	p := filepath.Join(t.TempDir(), "0000000000000001.seg")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSealed(p, 1); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("want ErrCorrupt, got %v", err)
+	}
+}
+
+func TestSealedGetRejectsCraftedOffsets(t *testing.T) {
+	objs := testObjects(t, 8)
+	for _, badOff := range []uint64{math.MaxInt64, 1 << 62} {
+		path, _ := writeSealedFile(t, objs)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Rewrite index entry 0's off field, fix the CRC, reopen, and Get the
+		// entry's own key: the bounds check must answer ErrCorrupt, not panic.
+		tr := b[len(b)-trailerSize:]
+		indexOff := binary.BigEndian.Uint64(tr[0:8])
+		entryPos := indexOff + fanoutSize
+		var k key.Key
+		copy(k[:], b[entryPos:entryPos+32])
+		binary.BigEndian.PutUint64(b[entryPos+32:entryPos+40], badOff)
+		refreshFooterCRC(b)
+		p := filepath.Join(t.TempDir(), "0000000000000001.seg")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seg, err := openSealed(p, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = seg.get(k)
+		seg.close()
+		if !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("off=%#x: want ErrCorrupt, got %v", badOff, err)
+		}
+	}
+}
+
+func TestOpenSealedTinyFiles(t *testing.T) {
+	for _, n := range []int{0, trailerSize} {
+		p := filepath.Join(t.TempDir(), "0000000000000001.seg")
+		if err := os.WriteFile(p, make([]byte, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := openSealed(p, 1); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("size %d: want ErrCorrupt, got %v", n, err)
+		}
 	}
 }
