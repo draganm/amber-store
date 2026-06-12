@@ -53,24 +53,51 @@ func PullSizer() SizeOf {
 	}
 }
 
+// batcher accumulates keys into byte-balanced batches: estimated payload
+// sizes approach target without exceeding it, a batch never holds more than
+// maxBatchKeys keys, and a single object larger than target gets its own
+// batch.
+type batcher struct {
+	target uint64
+	size   SizeOf
+	cur    []key.Key
+	bytes  uint64
+}
+
+// add appends k to the current batch, first returning the completed batch
+// k would have overflowed (nil if k still fits).
+func (b *batcher) add(k key.Key) []key.Key {
+	s := b.size(k)
+	var full []key.Key
+	if len(b.cur) > 0 && (b.bytes+s > b.target || len(b.cur) >= maxBatchKeys) {
+		full = b.cur
+		b.cur, b.bytes = nil, 0
+	}
+	b.cur = append(b.cur, k)
+	b.bytes += s
+	return full
+}
+
+// flush returns the final partial batch, nil if empty.
+func (b *batcher) flush() []key.Key {
+	out := b.cur
+	b.cur, b.bytes = nil, 0
+	return out
+}
+
 // Batches bins keys, in order, into batches whose estimated payload sizes
 // approach target without exceeding it (a single object larger than target
 // gets its own batch).
 func Batches(keys []key.Key, target uint64, size SizeOf) [][]key.Key {
+	b := batcher{target: target, size: size}
 	var out [][]key.Key
-	var cur []key.Key
-	var curBytes uint64
 	for _, k := range keys {
-		s := size(k)
-		if len(cur) > 0 && (curBytes+s > target || len(cur) >= maxBatchKeys) {
-			out = append(out, cur)
-			cur, curBytes = nil, 0
+		if full := b.add(k); full != nil {
+			out = append(out, full)
 		}
-		cur = append(cur, k)
-		curBytes += s
 	}
-	if len(cur) > 0 {
-		out = append(out, cur)
+	if last := b.flush(); last != nil {
+		out = append(out, last)
 	}
 	return out
 }
