@@ -130,6 +130,16 @@ HTTP; TLS adds confidentiality. Run the server behind a TLS-terminating reverse
 proxy by omitting `--tls-cert`/`--tls-key`, or configure TLS directly with
 both flags.
 
+**Transport is HTTP/1.1 by choice.** The daemon's client disables HTTP/2:
+h2 would multiplex every sync worker onto a single TCP connection whose
+upload flow-control window (1 MiB in Go's server) caps push throughput at
+roughly window ÷ RTT regardless of bandwidth — ~10 MiB/s at 100 ms — while
+parallel HTTP/1.1 connections each get kernel-tuned TCP windows that grow to
+the path's bandwidth-delay product. The server still accepts h2 (e.g. from
+older daemons when it terminates TLS itself) and raises its h2 receive
+windows to just under 4 MiB, the largest value `net/http.HTTP2Config`
+documents as valid.
+
 ## Wire protocol
 
 All routes are versioned under `/v1`. `GET /v1/identity` is unauthenticated;

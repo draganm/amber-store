@@ -127,6 +127,25 @@ func resolveIdentity(identityPath, storeDir string) (ssh.Signer, func(), error) 
 	return remoteIdentitySigner(identityPath)
 }
 
+// newHTTPServer assembles the serve listener's http.Server.
+func newHTTPServer(handler http.Handler, logger *slog.Logger) *http.Server {
+	return &http.Server{
+		Handler: handler,
+		// Route the http.Server's own diagnostics (handler panics, accept
+		// errors) through the structured logger, like the daemon does.
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		// The default 1 MiB HTTP/2 upload flow-control windows cap a push
+		// at ~1 MiB per round trip on high-latency links. Current daemons
+		// avoid this by speaking HTTP/1.1, but older daemons negotiate h2
+		// when serve terminates TLS itself, so raise both windows to the
+		// largest value HTTP2Config documents as valid (just under 4 MiB).
+		HTTP2: &http.HTTP2Config{
+			MaxReceiveBufferPerConnection: 4<<20 - 1,
+			MaxReceiveBufferPerStream:     4<<20 - 1,
+		},
+	}
+}
+
 func runServe(c *cli.Context, cfg *serveConfig) error {
 	if (cfg.tlsCert == "") != (cfg.tlsKey == "") {
 		return errors.New("--tls-cert and --tls-key must be set together")
@@ -203,12 +222,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		logger.Info("admin UI enabled", "path", "/admin/")
 	}
 
-	srv := &http.Server{
-		Handler: handler,
-		// Route the http.Server's own diagnostics (handler panics, accept
-		// errors) through the structured logger, like the daemon does.
-		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
-	}
+	srv := newHTTPServer(handler, logger)
 
 	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -6,7 +6,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +95,23 @@ func TestServeAutoIdentity(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("serve returned: %v", err)
+	}
+}
+
+// Daemons negotiate HTTP/2 when serve terminates TLS itself; the default
+// 1 MiB upload flow-control windows cap a push at ~1 MiB per round trip on
+// high-latency links, so the server must raise both receive windows. Current
+// daemons stay on HTTP/1.1, but older ones still benefit.
+func TestServeRaisesHTTP2UploadWindows(t *testing.T) {
+	srv := newHTTPServer(http.NewServeMux(), slog.New(slog.DiscardHandler))
+	if srv.HTTP2 == nil {
+		t.Fatal("server has no HTTP2 config")
+	}
+	if srv.HTTP2.MaxReceiveBufferPerConnection <= 1<<20 {
+		t.Fatalf("MaxReceiveBufferPerConnection = %d, want above the 1 MiB default", srv.HTTP2.MaxReceiveBufferPerConnection)
+	}
+	if srv.HTTP2.MaxReceiveBufferPerStream <= 1<<20 {
+		t.Fatalf("MaxReceiveBufferPerStream = %d, want above the 1 MiB default", srv.HTTP2.MaxReceiveBufferPerStream)
 	}
 }
 

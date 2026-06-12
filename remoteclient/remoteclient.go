@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +44,31 @@ type Client struct {
 	serverPubWire []byte
 }
 
+// newTransport returns the transport every Client uses: the default
+// transport with HTTP/2 disabled. HTTP/2 would multiplex all sync workers
+// onto a single TCP connection whose 1 MiB upload flow-control window caps
+// push throughput at roughly 1 MiB per round trip regardless of bandwidth;
+// HTTP/1.1 gives each worker its own connection with kernel-tuned TCP
+// windows.
+func newTransport() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	// Clone() h2-initializes DefaultTransport first, so the cloned
+	// TLSClientConfig still ADVERTISES h2 (NextProtos = ["h2","http/1.1"])
+	// even though the empty TLSNextProto map above removed the h2 handler.
+	// Left as is, a server that picks h2 from that offer breaks the
+	// connection ("malformed HTTP response \x00\x00..."), so advertise
+	// HTTP/1.1 only.
+	if tr.TLSClientConfig != nil {
+		tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
+	// A Client only ever talks to one host; let the whole idle pool serve it
+	// so every sync worker (--jobs) keeps its connection between batches.
+	tr.MaxIdleConnsPerHost = tr.MaxIdleConns
+	return tr
+}
+
 // New validates the base URL (http or https) and returns a Client. The
 // pinned server key is the SSH wire-format public key confirmed at
 // `remote add`.
@@ -58,7 +84,7 @@ func New(baseURL string, signer ssh.Signer, serverPubWire []byte) (*Client, erro
 		return nil, fmt.Errorf("no pinned server key for %s", baseURL)
 	}
 	return &Client{
-		hc:            &http.Client{},
+		hc:            &http.Client{Transport: newTransport()},
 		base:          strings.TrimRight(baseURL, "/"),
 		signer:        signer,
 		serverPubWire: serverPubWire,
