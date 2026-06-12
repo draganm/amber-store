@@ -299,6 +299,16 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 	return nil
 }
 
+// syncActive fsyncs the active segment, if syncing is enabled and one exists.
+func (s *Store) syncActive() error {
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	if !s.cfg.sync || s.active == nil {
+		return nil
+	}
+	return s.active.f.Sync()
+}
+
 // sealActiveLocked seals the active segment: footer, fsync, rename to .seg,
 // directory fsync, mmap. Called under appendMu. Implemented in Task 7; until
 // then it is a stub that never triggers (tests use the default 256 MiB
