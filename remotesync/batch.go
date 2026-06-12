@@ -1,7 +1,8 @@
 // Package remotesync implements the push/pull algorithms between a local
 // diskstore and a remote amber-store server: byte-balanced batching driven
-// by the sizes encoded in keys, a two-round-trip have/want push, and a
-// round-based BFS pull. See architecture/remote.md.
+// by the sizes encoded in keys, a pipelined have/want push (parallel
+// negotiation, re-batching, parallel upload), and a round-based BFS pull.
+// See architecture/remote.md.
 package remotesync
 
 import (
