@@ -168,6 +168,87 @@ func TestIndexSectionEmptyAndEmptyBucket(t *testing.T) {
 	}
 }
 
+func TestFilterSectionMembership(t *testing.T) {
+	entries := testEntries(t, 5000)
+	sec, err := buildFilterSection(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parseFilterSection(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !f.Contains(filterKey(e.k)) {
+			t.Fatalf("false negative for %s", e.k)
+		}
+	}
+}
+
+func TestFilterSectionFalsePositiveRate(t *testing.T) {
+	entries := testEntries(t, 1000)
+	sec, err := buildFilterSection(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parseFilterSection(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 16-bit fingerprints: FP rate ~2^-16. Expect ~1.5 hits in 100k probes;
+	// 50 leaves astronomical margin while still catching a broken filter.
+	fp := 0
+	for i := uint64(0); i < 100_000; i++ {
+		if f.Contains(0xDEAD_0000_0000_0000 + i) {
+			fp++
+		}
+	}
+	if fp > 50 {
+		t.Fatalf("false positive rate too high: %d/100000", fp)
+	}
+}
+
+func TestFilterSectionDuplicateTails(t *testing.T) {
+	// Two entries with an identical 8-byte tail must not break the build.
+	entries := testEntries(t, 2)
+	copy(entries[1].k[24:32], entries[0].k[24:32])
+	sec, err := buildFilterSection(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := parseFilterSection(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Contains(filterKey(entries[0].k)) || !f.Contains(filterKey(entries[1].k)) {
+		t.Fatal("false negative on duplicate tails")
+	}
+}
+
+func TestParseFilterSectionRejectsCorruption(t *testing.T) {
+	sec, err := buildFilterSection(testEntries(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("short", func(t *testing.T) {
+		if _, err := parseFilterSection(sec[:10]); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("bad type", func(t *testing.T) {
+		bad := slices.Clone(sec)
+		bad[0] = 99
+		if _, err := parseFilterSection(bad); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("length mismatch", func(t *testing.T) {
+		if _, err := parseFilterSection(sec[:len(sec)-2]); err == nil {
+			t.Fatal("want error")
+		}
+	})
+}
+
 func TestIndexSectionGoldenBytes(t *testing.T) {
 	// Pin the on-disk encoding against symmetric encode/decode bugs: two
 	// fixed entries, exact expected bytes.

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/FastFilter/xorfilter"
 	"github.com/draganm/amber-store/key"
 )
 
@@ -87,6 +88,71 @@ func parseIndexSection(b []byte, keyCount uint64) (*[256]uint32, []byte, error) 
 		return nil, nil, fmt.Errorf("%w: fanout total %d != key count %d", ErrCorrupt, fanout[255], keyCount)
 	}
 	return &fanout, b[fanoutSize:], nil
+}
+
+const (
+	filterHeaderSize       = 29
+	filterTypeBinaryFuse16 = 1
+)
+
+// filterKey is the filter input for k: the last 8 bytes of the key, which lie
+// in the uniformly distributed truncated-hash region.
+func filterKey(k key.Key) uint64 {
+	return binary.BigEndian.Uint64(k[key.Size-8:])
+}
+
+// buildFilterSection builds and serializes a binary fuse filter over the
+// entries' keys. Duplicate 8-byte tails are deduplicated before the build.
+func buildFilterSection(entries []indexEntry) ([]byte, error) {
+	tails := make([]uint64, 0, len(entries))
+	for _, e := range entries {
+		tails = append(tails, filterKey(e.k))
+	}
+	slices.Sort(tails)
+	tails = slices.Compact(tails)
+	f, err := xorfilter.NewBinaryFuse[uint16](tails)
+	if err != nil {
+		return nil, fmt.Errorf("packstore: building fuse filter: %w", err)
+	}
+	out := make([]byte, filterHeaderSize+2*len(f.Fingerprints))
+	out[0] = filterTypeBinaryFuse16
+	binary.BigEndian.PutUint64(out[1:9], f.Seed)
+	binary.BigEndian.PutUint32(out[9:13], f.SegmentLength)
+	binary.BigEndian.PutUint32(out[13:17], f.SegmentLengthMask)
+	binary.BigEndian.PutUint32(out[17:21], f.SegmentCount)
+	binary.BigEndian.PutUint32(out[21:25], f.SegmentCountLength)
+	binary.BigEndian.PutUint32(out[25:29], uint32(len(f.Fingerprints)))
+	for i, fp := range f.Fingerprints {
+		binary.BigEndian.PutUint16(out[filterHeaderSize+2*i:], fp)
+	}
+	return out, nil
+}
+
+// parseFilterSection deserializes a filter section, copying fingerprints out
+// of b (which may be a read-only mmap) into RAM.
+func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
+	if len(b) < filterHeaderSize {
+		return nil, fmt.Errorf("%w: filter section too short: %d bytes", ErrCorrupt, len(b))
+	}
+	if b[0] != filterTypeBinaryFuse16 {
+		return nil, fmt.Errorf("%w: unknown filter type %d", ErrCorrupt, b[0])
+	}
+	fpCount := binary.BigEndian.Uint32(b[25:29])
+	if len(b) != filterHeaderSize+2*int(fpCount) {
+		return nil, fmt.Errorf("%w: filter section is %d bytes, want %d", ErrCorrupt, len(b), filterHeaderSize+2*int(fpCount))
+	}
+	f := &xorfilter.BinaryFuse[uint16]{
+		Seed:               binary.BigEndian.Uint64(b[1:9]),
+		SegmentLength:      binary.BigEndian.Uint32(b[9:13]),
+		SegmentLengthMask:  binary.BigEndian.Uint32(b[13:17]),
+		SegmentCount:       binary.BigEndian.Uint32(b[17:21]),
+		SegmentCountLength: binary.BigEndian.Uint32(b[21:25]),
+		Fingerprints:       make([]uint16, fpCount),
+	}
+	for i := range f.Fingerprints {
+		f.Fingerprints[i] = binary.BigEndian.Uint16(b[filterHeaderSize+2*i:])
+	}
+	return f, nil
 }
 
 // searchIndex finds k in a parsed index section: fanout bucket on the last

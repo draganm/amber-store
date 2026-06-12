@@ -3,6 +3,7 @@ module github.com/draganm/amber-store
 go 1.26.3
 
 require (
+	github.com/FastFilter/xorfilter v0.5.1
 	github.com/PlakarKorp/go-cdc-chunkers v1.0.3
 	github.com/cockroachdb/pebble/v2 v2.1.6
 	github.com/fxamacker/cbor/v2 v2.9.2
@@ -22,7 +23,7 @@ require (
 	github.com/RaduBerinde/axisds v0.1.0 // indirect
 	github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cockroachdb/crlib v0.0.0-20241112164430-1264a2edc35b // indirect
 	github.com/cockroachdb/errors v1.11.3 // indirect
 	github.com/cockroachdb/logtags v0.0.0-20230118201751-21c54148d20b // indirect
