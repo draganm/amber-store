@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/key"
@@ -109,15 +110,33 @@ func TestParseIndexSectionRejectsCorruption(t *testing.T) {
 		}
 	})
 	t.Run("fanout total mismatch", func(t *testing.T) {
-		if _, _, err := parseIndexSection(idx, 11); err == nil {
+		// Keep the section length correct for keyCount=1 but zero the whole
+		// fanout: monotonic, total 0 != 1 — must hit the total check, not the
+		// length check.
+		one := buildIndexSection(testEntries(t, 1))
+		bad := slices.Clone(one)
+		for i := 0; i < fanoutSize; i++ {
+			bad[i] = 0
+		}
+		_, _, err := parseIndexSection(bad, 1)
+		if err == nil {
 			t.Fatal("want error")
+		}
+		if !strings.Contains(err.Error(), "fanout total") {
+			t.Fatalf("wrong branch: %v", err)
 		}
 	})
 	t.Run("huge keyCount does not wrap", func(t *testing.T) {
-		// (2^64-984)/44 once made want==40 via int overflow and panicked.
-		huge := (math.MaxUint64 - uint64(fanoutSize)*40) / indexEntrySize
-		if _, _, err := parseIndexSection(idx[:40], huge); err == nil {
+		// (2^64-984)/44 made the old int arithmetic compute want==40, so a
+		// 40-byte section passed the length check and the fanout loop
+		// panicked. The fixed code must reject it as corrupt instead.
+		huge := (math.MaxUint64 - uint64(983)) / indexEntrySize
+		_, _, err := parseIndexSection(idx[:40], huge)
+		if err == nil {
 			t.Fatal("want error, not a panic")
+		}
+		if !strings.Contains(err.Error(), "exceeds format limit") {
+			t.Fatalf("wrong branch: %v", err)
 		}
 	})
 }
