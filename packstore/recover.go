@@ -43,9 +43,14 @@ func scanActive(path string) (scanResult, error) {
 	for off < int64(len(b)) {
 		if b[off] == tagSeal {
 			if _, err := parseFooter(b); err == nil {
-				return scanResult{size: int64(len(b)), sealed: true}, nil
+				res.size, res.sealed = int64(len(b)), true
+				return res, nil
 			}
-			break // partial footer: truncate at the seal marker
+			// Partial footer: truncate at the seal marker. A valid footer
+			// followed by trailing bytes also lands here (parseFooter anchors
+			// the trailer at EOF); that state cannot arise from our write
+			// ordering, and truncating it only un-seals, never loses records.
+			break
 		}
 		rec, err := parseRecord(b[off:])
 		if err != nil {

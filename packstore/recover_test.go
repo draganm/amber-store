@@ -2,6 +2,7 @@ package packstore
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,5 +154,52 @@ func TestScanActivePartialFooterTruncates(t *testing.T) {
 	}
 	if res.size != bodyLen {
 		t.Fatalf("size=%d want %d (truncate at seal marker)", res.size, bodyLen)
+	}
+}
+
+func TestScanActiveMiddleRecordCorruptionNoResync(t *testing.T) {
+	// The spec's core truncation semantic: the first invalid record ends the
+	// valid prefix — the scan must NOT resync to later valid records.
+	objs := testObjects(t, 3)
+	body, spans := buildBody(t, objs)
+	bad := bytes.Clone(body)
+	bad[spans[1].off+5] ^= 0xFF // corrupt the middle record
+	res, err := scanActive(activeFile(t, bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.size != spans[1].off {
+		t.Fatalf("size=%d, want truncation at %d", res.size, spans[1].off)
+	}
+	if len(res.index) != 1 {
+		t.Fatalf("index has %d keys, want 1 (only the prefix record)", len(res.index))
+	}
+	if _, ok := res.index[spans[0].obj.Key]; !ok {
+		t.Fatal("prefix record missing from index")
+	}
+}
+
+func TestScanActiveValidFooterWithTrailingGarbage(t *testing.T) {
+	// A complete valid footer followed by extra bytes is unreachable from our
+	// write ordering; if encountered, the scan truncates at the seal marker
+	// (un-sealing, losing nothing).
+	objs := testObjects(t, 5)
+	path, _ := writeSealedFile(t, objs)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := b[len(b)-trailerSize:]
+	bodyLen := int64(binary.BigEndian.Uint64(tr[40:48]))
+	withGarbage := append(bytes.Clone(b), 0xAB, 0xCD, 0xEF)
+	res, err := scanActive(activeFile(t, withGarbage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.sealed {
+		t.Fatal("file with trailing garbage reported sealed")
+	}
+	if res.size != bodyLen {
+		t.Fatalf("size=%d, want %d (truncate at seal marker)", res.size, bodyLen)
 	}
 }
