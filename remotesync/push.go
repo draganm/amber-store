@@ -19,10 +19,11 @@ const DefaultJobs = 4
 type Opts struct {
 	BatchBytes uint64 // per-batch payload target; 0 = DefaultBatchBytes
 	Jobs       int    // parallel workers; <= 0 = DefaultJobs
-	// Progress, when non-nil, is called as work completes. For Push, done
-	// counts settled keys — confirmed present at negotiation, or uploaded —
-	// out of total reachable keys; for Pull, done counts fetched objects
-	// and total is 0 (unknown up front).
+	// Progress, when non-nil, is called as work completes, possibly
+	// concurrently from several workers. For Push, done counts settled keys
+	// — confirmed present at negotiation, or uploaded — out of total
+	// reachable keys; for Pull, done counts fetched objects and total is 0
+	// (unknown up front).
 	Progress func(done, total int)
 }
 
@@ -105,7 +106,9 @@ func Push(ctx context.Context, store *diskstore.Store, rc *remoteclient.Client, 
 				if err != nil {
 					return err
 				}
-				settle(len(batch)-len(missing), 0, 0)
+				// Clamped so a server replying with keys outside the queried
+				// batch cannot drive progress backwards.
+				settle(max(0, len(batch)-len(missing)), 0, 0)
 				if len(missing) == 0 {
 					return nil
 				}
