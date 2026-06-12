@@ -2,6 +2,7 @@ package remotesync
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
@@ -110,22 +111,24 @@ func TestRebatchStopsOnCanceledContext(t *testing.T) {
 	cancel()
 	in := make(chan []key.Key)  // never closed
 	out := make(chan []key.Key) // never drained
-	if err := rebatch(ctx, in, out, 100, blobLength); err == nil {
-		t.Fatal("rebatch returned nil on canceled context")
+	if err := rebatch(ctx, in, out, 100, blobLength); !errors.Is(err, context.Canceled) {
+		t.Fatalf("rebatch returned %v on canceled context, want context.Canceled", err)
 	}
 }
 
 func TestRebatchUnblocksSendOnCancel(t *testing.T) {
 	// two 100-byte keys against a 100-byte target force an emit; nobody
-	// receives on out, so only cancellation can unblock the send
+	// receives on out, so only cancellation can unblock the send. The
+	// unbuffered rendezvous on in guarantees rebatch is past the receive
+	// and blocked in send before cancel fires.
 	ctx, cancel := context.WithCancel(context.Background())
-	in := make(chan []key.Key, 1)
-	in <- testKeys(t, 2, 100)
+	in := make(chan []key.Key)
 	out := make(chan []key.Key)
 	done := make(chan error, 1)
 	go func() { done <- rebatch(ctx, in, out, 100, blobLength) }()
+	in <- testKeys(t, 2, 100)
 	cancel()
-	if err := <-done; err == nil {
-		t.Fatal("rebatch returned nil after cancel while blocked on send")
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("rebatch returned %v after cancel while blocked on send, want context.Canceled", err)
 	}
 }
