@@ -32,19 +32,13 @@ func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedR
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	var missing []byte
-	for _, k := range keys {
-		has, err := h.store.Has(k)
-		if err != nil {
-			h.log.Error("missing-check lookup failed", "key", k, "error", err)
-			h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !has {
-			missing = append(missing, k[:]...)
-		}
+	missing, err := h.store.Missing(keys)
+	if err != nil {
+		h.log.Error("missing-check lookup failed", "error", err)
+		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+		return
 	}
-	h.signAndWrite(w, a.nonce, http.StatusOK, "application/octet-stream", missing)
+	h.signAndWrite(w, a.nonce, http.StatusOK, "application/octet-stream", keylist.Flatten(missing))
 }
 
 // postObjects decodes an amberpack stream, verifies each object's payload
@@ -103,20 +97,18 @@ func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *auth
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	var missing []string
-	for _, k := range keys {
-		has, err := h.store.Has(k)
-		if err != nil {
-			h.log.Error("objects/get lookup failed", "key", k, "error", err)
-			h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !has {
-			missing = append(missing, k.String())
-		}
+	missing, err := h.store.Missing(keys)
+	if err != nil {
+		h.log.Error("objects/get lookup failed", "error", err)
+		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+		return
 	}
 	if len(missing) > 0 {
-		h.signError(w, a.nonce, http.StatusNotFound, "objects not found:\n"+strings.Join(missing, "\n"))
+		names := make([]string, len(missing))
+		for i, k := range missing {
+			names[i] = k.String()
+		}
+		h.signError(w, a.nonce, http.StatusNotFound, "objects not found:\n"+strings.Join(names, "\n"))
 		return
 	}
 	// Declare the trailer name up-front so HTTP/1.1 chunked encoding includes
