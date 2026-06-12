@@ -2,7 +2,9 @@ package remotesync_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -157,5 +159,109 @@ func TestPushCoalescesSparseMissingKeys(t *testing.T) {
 	// packs, not one sliver-sized pack per check batch
 	if n := uploads.Load(); n > 13 {
 		t.Fatalf("push made %d upload requests, want coalesced (<= 13)", n)
+	}
+}
+
+// failPath 500s every request to path, untouched otherwise. The error
+// reaches Push either as a StatusError or — because the injected 500 is
+// unsigned — as a server-identity error; both are push failures.
+func failPath(path string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == path {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func TestPushNoOpMakesNoUploads(t *testing.T) {
+	var uploads atomic.Int64
+	h := newHarnessMW(t, countUploads(&uploads))
+	local := newLocalStore(t)
+	root := buildTree(t, local)
+	ctx := context.Background()
+	rc := h.rc(t)
+	if _, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	uploads.Store(0)
+	var last, total int
+	stats, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{
+		Progress: func(d, tot int) { last, total = d, tot },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ObjectsPushed != 0 || stats.BytesPushed != 0 {
+		t.Fatalf("no-op push transferred %+v, want nothing", stats)
+	}
+	if n := uploads.Load(); n != 0 {
+		t.Fatalf("no-op push made %d upload requests, want 0", n)
+	}
+	if last != 4 || total != 4 {
+		t.Fatalf("final progress = %d/%d, want 4/4 (all keys settle at negotiation)", last, total)
+	}
+}
+
+func TestPushProgressIsMonotonic(t *testing.T) {
+	// the 4-object tree fits one check batch, so the two callbacks —
+	// settle-at-negotiation then settle-at-upload — are strictly ordered
+	// and the recorded sequence must never decrease
+	h := newHarness(t)
+	local := newLocalStore(t)
+	root := buildTree(t, local)
+	var mu sync.Mutex
+	var seen []int
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{
+		Progress: func(done, total int) {
+			if total != 4 {
+				t.Errorf("total = %d, want 4", total) // Errorf: callback runs off the test goroutine
+			}
+			mu.Lock()
+			seen = append(seen, done)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i] < seen[i-1] {
+			t.Fatalf("progress went backwards: %v", seen)
+		}
+	}
+	if len(seen) == 0 || seen[len(seen)-1] != 4 {
+		t.Fatalf("recorded progress %v, want it to end at 4", seen)
+	}
+}
+
+func TestPushSurfacesUploadFailure(t *testing.T) {
+	h := newHarnessMW(t, failPath("/v1/objects"))
+	local := newLocalStore(t)
+	root := buildTree(t, local)
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{})
+	if err == nil {
+		t.Fatal("push succeeded although every upload failed")
+	}
+	// the unwind must surface the real failure, not its own cancellation
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("push reported the unwind (%v) instead of the upload failure", err)
+	}
+}
+
+func TestPushSurfacesNegotiationFailure(t *testing.T) {
+	h := newHarnessMW(t, failPath("/v1/objects/missing"))
+	local := newLocalStore(t)
+	root := buildTree(t, local)
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{})
+	if err == nil {
+		t.Fatal("push succeeded although negotiation failed")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("push reported the unwind (%v) instead of the negotiation failure", err)
 	}
 }
