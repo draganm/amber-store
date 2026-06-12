@@ -188,15 +188,20 @@ encoded sizes, so they cannot be used directly:
 
 **Push-objects:** the daemon resolves the local reference name to its key,
 walks the reachable set (the existing reachable-keys walk), bins keys into
-byte-balanced batches, and N parallel workers (default 4; `--jobs` flag) each
-do two round trips per batch:
+byte-balanced batches, and runs a three-stage pipeline. The `--jobs` budget
+(default 4) caps total in-flight requests: a quarter of it — at least one
+worker — negotiates while the rest upload.
 
-1. `POST /v1/objects/missing` with the batch's key list.
-2. `POST /v1/objects` with an amberpack of exactly the missing ones.
+1. Checkers `POST /v1/objects/missing` with each batch's key list; keys the
+   server already has settle on the spot.
+2. A re-batcher coalesces missing keys from all responses into fresh
+   byte-balanced upload batches, so an incremental push sends a few full
+   packs instead of one sliver per check batch.
+3. Uploaders `POST /v1/objects` with one amberpack per upload batch.
 
-Nothing the server already has crosses the wire. Re-running after an
-interruption is naturally idempotent — already-pushed objects drop out in the
-missing-check.
+Nothing the server already has crosses the wire, and negotiation overlaps
+upload. Re-running after an interruption is naturally idempotent —
+already-pushed objects drop out in the missing-check.
 
 **Pull-objects:** the daemon resolves the reference name on the server
 (`GET /v1/refs?name=`, response verified against the pinned key and the record's
