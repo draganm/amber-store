@@ -30,7 +30,7 @@ type Object struct {
 func Open(dir string, opts ...Option) (*Store, error)
 func (s *Store) Put(k key.Key, data []byte) error
 func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error
-func (s *Store) WriteParallel(ctx context.Context, seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error)
+func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error)
 func (s *Store) Get(k key.Key) ([]byte, error)
 func (s *Store) Has(k key.Key) (bool, error)
 func (s *Store) Missing(keys []key.Key) ([]key.Key, error)
@@ -240,9 +240,12 @@ bodies.
 
 ### Scrub (`Verify`)
 
-Walk each sealed segment's body: check every record CRC, recompute index and
-filter and compare bytewise with the footer, optionally re-BLAKE3 payloads
-against their keys. Also validates that `keyCount`/`bodyLen` match reality.
+Walk each sealed segment's body: check every record CRC, re-BLAKE3 every
+payload against its key, recompute the index section and compare it bytewise
+with the footer, and check that the filter contains every body key (binary
+fuse filters admit no false negatives; a bytewise filter comparison is not
+possible because construction is seed-dependent). Also validates that
+`keyCount`/`bodyLen` match reality.
 
 ## Error handling
 
