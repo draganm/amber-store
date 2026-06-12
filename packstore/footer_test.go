@@ -3,11 +3,13 @@ package packstore
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/FastFilter/xorfilter"
 	"github.com/draganm/amber-store/key"
 )
 
@@ -299,5 +301,67 @@ func TestIndexSectionGoldenBytes(t *testing.T) {
 	}
 	if !bytes.Equal(e1[40:44], []byte{0xAA, 0xBB, 0xCC, 0xDD}) {
 		t.Fatalf("entry 1 slen bytes = %x", e1[40:44])
+	}
+}
+
+func TestParseFilterSectionRejectsBadGeometry(t *testing.T) {
+	sec, err := buildFilterSection(testEntries(t, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate := func(name string, f func(b []byte)) {
+		t.Run(name, func(t *testing.T) {
+			bad := slices.Clone(sec)
+			f(bad)
+			_, err := parseFilterSection(bad)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("want ErrCorrupt, got %v", err)
+			}
+		})
+	}
+	// Crafted geometry previously made xorfilter's Contains panic with
+	// index-out-of-range; parse must reject it instead.
+	mutate("segCountLen inflated", func(b []byte) {
+		binary.BigEndian.PutUint32(b[21:25], 0xFFFFFFF0)
+	})
+	mutate("mask inflated", func(b []byte) {
+		binary.BigEndian.PutUint32(b[13:17], 0xFFFFFFFF)
+	})
+	mutate("segLen not power of two", func(b []byte) {
+		binary.BigEndian.PutUint32(b[9:13], binary.BigEndian.Uint32(b[9:13])+1)
+	})
+	mutate("segLen zero", func(b []byte) {
+		binary.BigEndian.PutUint32(b[9:13], 0)
+		binary.BigEndian.PutUint32(b[13:17], 0xFFFFFFFF)
+	})
+}
+
+func TestFilterSectionFieldRoundTrip(t *testing.T) {
+	entries := testEntries(t, 1234)
+	tails := make([]uint64, 0, len(entries))
+	for _, e := range entries {
+		tails = append(tails, filterKey(e.k))
+	}
+	slices.Sort(tails)
+	tails = slices.Compact(tails)
+	want, err := xorfilter.NewBinaryFuse[uint16](tails)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := buildFilterSection(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseFilterSection(sec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Seed != want.Seed ||
+		got.SegmentLength != want.SegmentLength ||
+		got.SegmentLengthMask != want.SegmentLengthMask ||
+		got.SegmentCount != want.SegmentCount ||
+		got.SegmentCountLength != want.SegmentCountLength ||
+		!slices.Equal(got.Fingerprints, want.Fingerprints) {
+		t.Fatalf("field round-trip mismatch:\n got %+v\nwant %+v", got, want)
 	}
 }

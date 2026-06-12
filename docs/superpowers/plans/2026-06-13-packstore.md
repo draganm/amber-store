@@ -857,7 +857,10 @@ func buildFilterSection(entries []indexEntry) ([]byte, error) {
 }
 
 // parseFilterSection deserializes a filter section, copying fingerprints out
-// of b (which may be a read-only mmap) into RAM.
+// of b (which may be a read-only mmap) into RAM. The five geometry fields are
+// validated against the binary-fuse construction invariants: Contains indexes
+// Fingerprints from them, so crafted values would otherwise panic the read
+// path rather than fail parse with ErrCorrupt.
 func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 	if len(b) < filterHeaderSize {
 		return nil, fmt.Errorf("%w: filter section too short: %d bytes", ErrCorrupt, len(b))
@@ -866,15 +869,26 @@ func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 		return nil, fmt.Errorf("%w: unknown filter type %d", ErrCorrupt, b[0])
 	}
 	fpCount := binary.BigEndian.Uint32(b[25:29])
-	if len(b) != filterHeaderSize+2*int(fpCount) {
-		return nil, fmt.Errorf("%w: filter section is %d bytes, want %d", ErrCorrupt, len(b), filterHeaderSize+2*int(fpCount))
+	if uint64(len(b)) != filterHeaderSize+2*uint64(fpCount) {
+		return nil, fmt.Errorf("%w: filter section is %d bytes, want %d", ErrCorrupt, len(b), filterHeaderSize+2*uint64(fpCount))
+	}
+	segLen := binary.BigEndian.Uint32(b[9:13])
+	segLenMask := binary.BigEndian.Uint32(b[13:17])
+	segCount := binary.BigEndian.Uint32(b[17:21])
+	segCountLen := binary.BigEndian.Uint32(b[21:25])
+	switch {
+	case segLen == 0 || segLen&(segLen-1) != 0,
+		segLenMask != segLen-1,
+		uint64(segCountLen) != uint64(segCount)*uint64(segLen),
+		uint64(fpCount) != uint64(segCountLen)+2*uint64(segLen):
+		return nil, fmt.Errorf("%w: filter geometry invalid", ErrCorrupt)
 	}
 	f := &xorfilter.BinaryFuse[uint16]{
 		Seed:               binary.BigEndian.Uint64(b[1:9]),
-		SegmentLength:      binary.BigEndian.Uint32(b[9:13]),
-		SegmentLengthMask:  binary.BigEndian.Uint32(b[13:17]),
-		SegmentCount:       binary.BigEndian.Uint32(b[17:21]),
-		SegmentCountLength: binary.BigEndian.Uint32(b[21:25]),
+		SegmentLength:      segLen,
+		SegmentLengthMask:  segLenMask,
+		SegmentCount:       segCount,
+		SegmentCountLength: segCountLen,
 		Fingerprints:       make([]uint16, fpCount),
 	}
 	for i := range f.Fingerprints {
