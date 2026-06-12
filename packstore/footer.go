@@ -5,12 +5,15 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"math"
+	"os"
 	"slices"
 	"sort"
 
 	"github.com/FastFilter/xorfilter"
 	"github.com/draganm/amber-store/key"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -190,4 +193,181 @@ func searchIndex(fanout *[256]uint32, entries []byte, k key.Key) (off uint64, sl
 		return 0, 0, false
 	}
 	return binary.BigEndian.Uint64(e[32:40]), binary.BigEndian.Uint32(e[40:44]), true
+}
+
+// buildFooter assembles the complete footer (seal marker, index section,
+// filter section, trailer) for a segment whose records end at bodyLen.
+func buildFooter(bodyLen int64, entries []indexEntry) ([]byte, error) {
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("packstore: refusing to seal an empty segment")
+	}
+	idx := buildIndexSection(entries)
+	filt, err := buildFilterSection(entries)
+	if err != nil {
+		return nil, err
+	}
+	footer := make([]byte, 0, 1+len(idx)+len(filt)+trailerSize)
+	footer = append(footer, tagSeal)
+	footer = append(footer, idx...)
+	footer = append(footer, filt...)
+
+	tr := make([]byte, trailerSize)
+	indexOff := uint64(bodyLen) + 1
+	binary.BigEndian.PutUint64(tr[0:8], indexOff)
+	binary.BigEndian.PutUint64(tr[8:16], uint64(len(idx)))
+	binary.BigEndian.PutUint64(tr[16:24], indexOff+uint64(len(idx)))
+	binary.BigEndian.PutUint64(tr[24:32], uint64(len(filt)))
+	binary.BigEndian.PutUint64(tr[32:40], uint64(len(entries)))
+	binary.BigEndian.PutUint64(tr[40:48], uint64(bodyLen))
+	copy(tr[56:64], magicTrailer)
+	footer = append(footer, tr...)
+	// footerCRC covers [bodyLen, EOF-16): everything up to and excluding the
+	// crc field itself; reserved and magic are checked explicitly on parse.
+	binary.BigEndian.PutUint32(footer[len(footer)-16:], crc32.Checksum(footer[:len(footer)-16], castagnoli))
+	return footer, nil
+}
+
+// footerView is the parsed footer of a sealed segment. fanout and filter live
+// in RAM; entries points into the segment's mmap.
+type footerView struct {
+	fanout   [256]uint32
+	entries  []byte
+	filter   *xorfilter.BinaryFuse[uint16]
+	keyCount uint64
+	bodyLen  int64
+	indexOff int64
+	indexLen int64
+}
+
+// parseFooter validates a whole sealed-segment image (header through trailer)
+// and returns its footer view. mm may be a read-only mmap; nothing is mutated.
+func parseFooter(mm []byte) (*footerView, error) {
+	if len(mm) < len(magicHeader)+1+fanoutSize+indexEntrySize+filterHeaderSize+trailerSize {
+		return nil, fmt.Errorf("%w: file too short: %d bytes", ErrCorrupt, len(mm))
+	}
+	if !bytes.Equal(mm[:len(magicHeader)], magicHeader) {
+		return nil, fmt.Errorf("%w: bad header magic", ErrCorrupt)
+	}
+	tr := mm[len(mm)-trailerSize:]
+	if !bytes.Equal(tr[56:64], magicTrailer) {
+		return nil, fmt.Errorf("%w: bad trailer magic", ErrCorrupt)
+	}
+	if binary.BigEndian.Uint32(tr[52:56]) != 0 {
+		return nil, fmt.Errorf("%w: nonzero reserved trailer field", ErrCorrupt)
+	}
+	indexOff := binary.BigEndian.Uint64(tr[0:8])
+	indexLen := binary.BigEndian.Uint64(tr[8:16])
+	filterOff := binary.BigEndian.Uint64(tr[16:24])
+	filterLen := binary.BigEndian.Uint64(tr[24:32])
+	keyCount := binary.BigEndian.Uint64(tr[32:40])
+	bodyLen := binary.BigEndian.Uint64(tr[40:48])
+
+	fileLen := uint64(len(mm))
+	switch {
+	case bodyLen < uint64(len(magicHeader)) || bodyLen >= fileLen,
+		keyCount > math.MaxUint32, // fanout counts are u32; also keeps the next line overflow-free
+		indexOff != bodyLen+1,
+		indexLen != uint64(fanoutSize)+keyCount*uint64(indexEntrySize),
+		filterOff != indexOff+indexLen,
+		filterOff+filterLen != fileLen-trailerSize:
+		return nil, fmt.Errorf("%w: trailer offsets inconsistent", ErrCorrupt)
+	}
+	if crc32.Checksum(mm[bodyLen:fileLen-16], castagnoli) != binary.BigEndian.Uint32(tr[48:52]) {
+		return nil, fmt.Errorf("%w: footer CRC mismatch", ErrCorrupt)
+	}
+	if mm[bodyLen] != tagSeal {
+		return nil, fmt.Errorf("%w: missing seal marker", ErrCorrupt)
+	}
+
+	fv := &footerView{
+		keyCount: keyCount,
+		bodyLen:  int64(bodyLen),
+		indexOff: int64(indexOff),
+		indexLen: int64(indexLen),
+	}
+	fanout, entries, err := parseIndexSection(mm[indexOff:indexOff+indexLen], keyCount)
+	if err != nil {
+		return nil, err
+	}
+	fv.fanout = *fanout
+	fv.entries = entries
+	if fv.filter, err = parseFilterSection(mm[filterOff : filterOff+filterLen]); err != nil {
+		return nil, err
+	}
+	return fv, nil
+}
+
+// lookup finds k in the segment's index.
+func (fv *footerView) lookup(k key.Key) (off uint64, slen uint32, ok bool) {
+	return searchIndex(&fv.fanout, fv.entries, k)
+}
+
+// sealedSegment is an immutable, fully mmap'd segment.
+type sealedSegment struct {
+	id   uint64
+	path string
+	mm   []byte
+	fv   *footerView
+}
+
+// openSealed maps a sealed segment and validates its footer. The fd is closed
+// after mapping; the mapping keeps the file content alive.
+func openSealed(path string, id uint64) (*sealedSegment, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	mm, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("packstore: mmap %s: %w", path, err)
+	}
+	fv, err := parseFooter(mm)
+	if err != nil {
+		unix.Munmap(mm)
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &sealedSegment{id: id, path: path, mm: mm, fv: fv}, nil
+}
+
+func (g *sealedSegment) close() error {
+	return unix.Munmap(g.mm)
+}
+
+// has reports whether k is in this segment: fuse filter first (cheap,
+// probabilistic), then the exact index.
+func (g *sealedSegment) has(k key.Key) bool {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return false
+	}
+	_, _, ok := g.fv.lookup(k)
+	return ok
+}
+
+// get returns k's payload (caller-owned), whether it was found, and any
+// corruption error. The hot path does not CRC-check; that is scrub's job.
+func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return nil, false, nil
+	}
+	off, slen, ok := g.fv.lookup(k)
+	if !ok {
+		return nil, false, nil
+	}
+	end := int64(off) + recHeaderSize + int64(slen)
+	if int64(off) < int64(len(magicHeader)) || end > g.fv.bodyLen {
+		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
+	}
+	h := g.mm[off : off+recHeaderSize]
+	flags := h[33]
+	ulen := binary.BigEndian.Uint32(h[34:38])
+	data, err := decodePayload(flags, ulen, g.mm[off+recHeaderSize:end])
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: %w", g.path, err)
+	}
+	return data, true, nil
 }

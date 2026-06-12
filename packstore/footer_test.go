@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -363,5 +365,136 @@ func TestFilterSectionFieldRoundTrip(t *testing.T) {
 		got.SegmentCountLength != want.SegmentCountLength ||
 		!slices.Equal(got.Fingerprints, want.Fingerprints) {
 		t.Fatalf("field round-trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// writeSealedFile assembles a complete sealed segment on disk from objects:
+// header, records, footer. Returns the path and the entries written.
+func writeSealedFile(t *testing.T, objs []Object) (string, []indexEntry) {
+	t.Helper()
+	var body []byte
+	body = append(body, magicHeader...)
+	var entries []indexEntry
+	for _, o := range objs {
+		rec, err := encodeRecord(o.Key, o.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, indexEntry{
+			k: o.Key, off: uint64(len(body)),
+			slen: uint32(len(rec) - recHeaderSize),
+		})
+		body = append(body, rec...)
+	}
+	footer, err := buildFooter(int64(len(body)), entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "0000000000000001.seg")
+	if err := os.WriteFile(path, append(body, footer...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, entries
+}
+
+func testObjects(t *testing.T, n int) []Object {
+	t.Helper()
+	objs := make([]Object, 0, n)
+	for i := 0; i < n; i++ {
+		var data []byte
+		if i%2 == 0 {
+			data = append(compressible(2000), byte(i), byte(i>>8))
+		} else {
+			data = append(incompressible(2000), byte(i), byte(i>>8))
+		}
+		objs = append(objs, blobObj(t, data))
+	}
+	return objs
+}
+
+func TestSealedSegmentRoundTrip(t *testing.T) {
+	objs := testObjects(t, 200)
+	path, _ := writeSealedFile(t, objs)
+	seg, err := openSealed(path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seg.close()
+	if seg.fv.keyCount != 200 {
+		t.Fatalf("keyCount = %d", seg.fv.keyCount)
+	}
+	for _, o := range objs {
+		if !seg.has(o.Key) {
+			t.Fatalf("has(%s) = false", o.Key)
+		}
+		data, found, err := seg.get(o.Key)
+		if err != nil || !found {
+			t.Fatalf("get(%s): found=%v err=%v", o.Key, found, err)
+		}
+		if !bytes.Equal(data, o.Data) {
+			t.Fatalf("get(%s): payload mismatch", o.Key)
+		}
+	}
+	absent := blobObj(t, []byte("not here")).Key
+	if seg.has(absent) {
+		t.Fatal("has(absent) = true")
+	}
+	if _, found, _ := seg.get(absent); found {
+		t.Fatal("get(absent) found")
+	}
+}
+
+func TestOpenSealedRejectsCorruption(t *testing.T) {
+	objs := testObjects(t, 20)
+	path, _ := writeSealedFile(t, objs)
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corrupt := func(t *testing.T, mutate func(b []byte)) {
+		t.Helper()
+		b := bytes.Clone(good)
+		mutate(b)
+		p := filepath.Join(t.TempDir(), "0000000000000001.seg")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := openSealed(p, 1); err == nil {
+			t.Fatal("want error")
+		}
+	}
+
+	t.Run("trailer magic", func(t *testing.T) {
+		corrupt(t, func(b []byte) { b[len(b)-1] ^= 0xFF })
+	})
+	t.Run("footer CRC over index", func(t *testing.T) {
+		corrupt(t, func(b []byte) {
+			tr := b[len(b)-trailerSize:]
+			indexOff := binary.BigEndian.Uint64(tr[0:8])
+			b[indexOff+10] ^= 0xFF
+		})
+	})
+	t.Run("header magic", func(t *testing.T) {
+		corrupt(t, func(b []byte) { b[0] ^= 0xFF })
+	})
+	t.Run("reserved nonzero", func(t *testing.T) {
+		corrupt(t, func(b []byte) { b[len(b)-12] = 1 }) // CRC does not cover the last 16 bytes; reserved is checked explicitly
+	})
+	t.Run("truncated", func(t *testing.T) {
+		b := bytes.Clone(good[:len(good)-100])
+		p := filepath.Join(t.TempDir(), "0000000000000001.seg")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := openSealed(p, 1); err == nil {
+			t.Fatal("want error")
+		}
+	})
+}
+
+func TestBuildFooterRejectsEmpty(t *testing.T) {
+	if _, err := buildFooter(8, nil); err == nil {
+		t.Fatal("want error for empty segment")
 	}
 }
