@@ -39,6 +39,15 @@ func (o Opts) jobs() int {
 	return o.Jobs
 }
 
+// splitJobs divides the jobs budget between negotiation and upload workers
+// so total in-flight requests stay <= jobs. jobs=1 floors at 1+1, the
+// minimum for a pipeline and the one documented budget overshoot.
+func splitJobs(jobs int) (checkers, uploaders int) {
+	checkers = max(1, jobs/4)
+	uploaders = max(1, jobs-checkers)
+	return checkers, uploaders
+}
+
 // PushStats summarizes one Push.
 type PushStats struct {
 	ObjectsTotal  int   // reachable objects under the root
