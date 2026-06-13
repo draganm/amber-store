@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/remoteclient"
 	"golang.org/x/sync/errgroup"
 )
@@ -91,8 +91,8 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	missingCh := make(chan []key.Key)
-	uploadCh := make(chan []key.Key)
+	missingCh := make(chan []key.Key, 256)
+	uploadCh := make(chan []key.Key, 256)
 
 	// Checkers: negotiate each check batch; keys the server already has
 	// settle immediately, missing ones flow to the re-batcher. The
