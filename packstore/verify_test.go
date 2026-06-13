@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // sealedStore builds a store with sealed segments and returns its dir.
@@ -112,5 +113,96 @@ func TestVerifyIgnoresActiveSegment(t *testing.T) {
 	}
 	if err := s.Verify(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifyConcurrentWithClose(t *testing.T) {
+	// Close used to munmap under a running scrub: uncatchable SIGSEGV. The
+	// scrub gate makes Close wait for in-flight walks.
+	for round := 0; round < 5; round++ {
+		dir := sealedStore(t, testObjects(t, 200))
+		s, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- s.Verify(context.Background()) }()
+		time.Sleep(2 * time.Millisecond)
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil && !errors.Is(err, ErrClosed) {
+			t.Fatalf("Verify during Close: %v", err)
+		}
+	}
+}
+
+func TestVerifyDetectsKeyCountMismatch(t *testing.T) {
+	// A consistent footer built over N+1 entries with only N body records:
+	// Open passes (trailer/index/filter all self-consistent), the scrub's
+	// keyCount cross-check must fire.
+	objs := testObjects(t, 10)
+	var body []byte
+	body = append(body, magicHeader...)
+	var entries []indexEntry
+	for _, o := range objs {
+		rec, err := encodeRecord(o.Key, o.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - recHeaderSize)})
+		body = append(body, rec...)
+	}
+	ghost := blobObj(t, []byte("never written to the body"))
+	entries = append(entries, indexEntry{k: ghost.Key, off: entries[0].off, slen: entries[0].slen})
+	footer, err := buildFooter(int64(len(body)), entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "0000000000000001.seg"), append(body, footer...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := openStore(t, dir)
+	if err := s.Verify(context.Background()); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Verify = %v, want ErrCorrupt", err)
+	}
+}
+
+func TestVerifyScrubHashMismatchIsCorrupt(t *testing.T) {
+	// A record whose CRC is valid but whose payload doesn't hash to its key
+	// (writer-bug class): scrub must classify it as ErrCorrupt (and ErrVerify).
+	good := testObjects(t, 3)
+	imposter := blobObj(t, []byte("imposter payload"))
+	var body []byte
+	body = append(body, magicHeader...)
+	var entries []indexEntry
+	for i, o := range good {
+		data := o.Data
+		if i == 1 {
+			data = imposter.Data // encoded under good[1].Key: CRC fine, hash wrong
+		}
+		rec, err := encodeRecord(o.Key, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - recHeaderSize)})
+		body = append(body, rec...)
+	}
+	footer, err := buildFooter(int64(len(body)), entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "0000000000000001.seg"), append(body, footer...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := openStore(t, dir)
+	err = s.Verify(context.Background())
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("want ErrCorrupt, got %v", err)
+	}
+	if !errors.Is(err, ErrVerify) {
+		t.Fatalf("want ErrVerify too, got %v", err)
 	}
 }

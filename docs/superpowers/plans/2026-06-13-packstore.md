@@ -1860,7 +1860,8 @@ type Store struct {
 	active   *activeSegment   // nil until the first write of a session
 	nextID   uint64
 	closed   bool
-	failed   error // sticky write-path failure; written under appendMu+mu, read under either
+	failed   error          // sticky write-path failure; written under appendMu+mu, read under either
+	scrubs   sync.WaitGroup // in-flight Verify walks; Close waits before munmap
 }
 
 // Open opens (creating if necessary) a store rooted at dir. Only one Store
@@ -2218,8 +2219,8 @@ func (s *Store) Close() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -2233,6 +2234,13 @@ func (s *Store) Close() error {
 		}
 		s.active = nil
 	}
+	// Wait for in-flight Verify walks before unmapping: the scrub reads the
+	// mmaps lock-free, and munmap under it is an uncatchable SIGSEGV. New
+	// scrubs cannot start (closed is set; Verify checks it under mu.RLock).
+	// Callers wanting a faster Close cancel Verify's context first.
+	s.mu.Unlock()
+	s.scrubs.Wait()
+
 	for _, seg := range s.sealed {
 		if err := seg.close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -3275,13 +3283,22 @@ Add imports: `"bytes"`, `"context"`.
 // (validating framing, CRCs, and that each payload re-hashes to its key),
 // recomputes the index section and compares it bytewise with the footer's,
 // and checks the filter contains every body key. The active segment is
-// covered by tail-scan on reopen, not by Verify.
+// covered by tail-scan on reopen, not by Verify. Segments sealed by
+// rotations that happen after Verify snapshots the segment list are not
+// covered by that call. Close blocks until in-flight Verify walks finish;
+// cancel the context to stop a scrub early.
 func (s *Store) Verify(ctx context.Context) error {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
 		return ErrClosed
 	}
+	// Registering under the read lock orders the Add strictly before any
+	// Close (which sets closed under the write lock and then waits): a scrub
+	// can never start after Close begins, and Close never unmaps while a
+	// scrub is walking the mappings.
+	s.scrubs.Add(1)
+	defer s.scrubs.Done()
 	segs := make([]*sealedSegment, len(s.sealed))
 	copy(segs, s.sealed)
 	s.mu.RUnlock()
@@ -3312,7 +3329,8 @@ func (g *sealedSegment) verify(ctx context.Context) error {
 			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
 		}
 		if err := verifyObject(Object{Key: rec.key, Data: payload}); err != nil {
-			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
+			// Scrub findings are corruption: both sentinels match via errors.Is.
+			return fmt.Errorf("%w: %s: record at offset %d: %w", ErrCorrupt, g.path, off, err)
 		}
 		if !g.fv.filter.Contains(filterKey(rec.key)) {
 			return fmt.Errorf("%w: %s: filter missing key %s (offset %d)", ErrCorrupt, g.path, rec.key, off)
@@ -3320,6 +3338,8 @@ func (g *sealedSegment) verify(ctx context.Context) error {
 		entries = append(entries, indexEntry{k: rec.key, off: uint64(off), slen: rec.slen})
 		off += recHeaderSize + int64(rec.slen)
 	}
+	// Defensive only: parseRecord bounds every record against bodyLen, so the
+	// walk can only exit exactly at bodyLen or via an error above.
 	if off != g.fv.bodyLen {
 		return fmt.Errorf("%w: %s: records end at %d, trailer says %d", ErrCorrupt, g.path, off, g.fv.bodyLen)
 	}

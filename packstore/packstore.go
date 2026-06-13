@@ -80,7 +80,8 @@ type Store struct {
 	active   *activeSegment   // nil until the first write of a session
 	nextID   uint64
 	closed   bool
-	failed   error // sticky write-path failure; written under appendMu+mu, read under either
+	failed   error          // sticky write-path failure; written under appendMu+mu, read under either
+	scrubs   sync.WaitGroup // in-flight Verify walks; Close waits before munmap
 }
 
 // Open opens (creating if necessary) a store rooted at dir. Only one Store
@@ -520,8 +521,8 @@ func (s *Store) Close() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -535,6 +536,13 @@ func (s *Store) Close() error {
 		}
 		s.active = nil
 	}
+	// Wait for in-flight Verify walks before unmapping: the scrub reads the
+	// mmaps lock-free, and munmap under it is an uncatchable SIGSEGV. New
+	// scrubs cannot start (closed is set; Verify checks it under mu.RLock).
+	// Callers wanting a faster Close cancel Verify's context first.
+	s.mu.Unlock()
+	s.scrubs.Wait()
+
 	for _, seg := range s.sealed {
 		if err := seg.close(); err != nil && firstErr == nil {
 			firstErr = err
