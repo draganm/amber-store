@@ -482,8 +482,45 @@ func TestWriteBatchIteratorError(t *testing.T) {
 	// The already-appended prefix may remain (documented packstore semantics:
 	// durable-on-return, not atomic; valid CAS objects are harmless).
 	for _, o := range objs[:5] {
-		if has, _ := s.Has(o.Key); !has {
+		has, err := s.Has(o.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
 			t.Fatalf("prefix object %s lost", o.Key)
+		}
+	}
+}
+
+func TestWriteBatchOnClosedStore(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	objs := testObjects(t, 3)
+	if err := s.WriteBatch(objSeq(objs, -1)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+	if err := s.WriteBatch(objSeq(nil, -1)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("empty batch err = %v, want ErrClosed", err)
+	}
+}
+
+func TestWriteBatchSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(16<<10))
+	objs := testObjects(t, 100)
+	if err := s.WriteBatch(objSeq(objs, -1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openStore(t, dir)
+	for _, o := range objs {
+		data, err := s2.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
 		}
 	}
 }

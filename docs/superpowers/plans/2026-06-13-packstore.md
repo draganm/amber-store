@@ -2100,6 +2100,12 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 func (s *Store) syncActive() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
 	if s.failed != nil {
 		return s.failed
 	}
@@ -2563,12 +2569,21 @@ Add import `"iter"`.
 // Unlike diskstore's WriteBatch it is NOT atomic — a crash or iterator error
 // can leave a valid prefix stored. In a content-addressed store that prefix
 // is harmless: identical re-pushed content deduplicates. Objects repeated
-// within the batch, or already present, are written once.
+// within the batch, or already present, are written once. When WriteBatch
+// returns an error after appending part of the batch, it best-effort fsyncs
+// that prefix first, so Has-visible records never stay non-durable.
 func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 	seen := make(map[key.Key]struct{})
+	appended := false
+	fail := func(err error) error {
+		if appended {
+			s.syncActive() // best-effort; an fsync failure poisons the store
+		}
+		return err
+	}
 	for obj, err := range seq {
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if _, dup := seen[obj.Key]; dup {
 			continue
@@ -2576,18 +2591,19 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 		seen[obj.Key] = struct{}{}
 		has, err := s.Has(obj.Key)
 		if err != nil {
-			return fmt.Errorf("exists (%s): %w", obj.Key, err)
+			return fail(fmt.Errorf("exists (%s): %w", obj.Key, err))
 		}
 		if has {
 			continue
 		}
 		rec, err := encodeRecord(obj.Key, obj.Data)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if err := s.append(obj.Key, rec, false); err != nil {
-			return err
+			return fail(err)
 		}
+		appended = true
 	}
 	return s.syncActive()
 }
