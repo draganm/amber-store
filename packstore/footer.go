@@ -23,7 +23,8 @@ const (
 )
 
 // indexEntry is one sealed-segment index row: a key and where its record
-// starts, plus the stored payload length as a readahead hint.
+// starts, plus the stored payload length (authoritative for reads;
+// footer-CRC-protected and cross-checked against the body by scrub).
 type indexEntry struct {
 	k    key.Key
 	off  uint64 // file offset of the record header

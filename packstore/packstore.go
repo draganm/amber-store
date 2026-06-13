@@ -443,6 +443,8 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 }
 
 // Put stores a single object under k, deduplicating against existing content.
+// A dedup hit returns success without fsyncing; if the matching record was
+// appended by a still-running batch, its durability rides on that batch's commit.
 func (s *Store) Put(k key.Key, data []byte) error {
 	s.mu.RLock()
 	failed := s.failed

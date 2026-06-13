@@ -37,9 +37,10 @@ type WriteOpts struct {
 //
 // Like WriteBatch, WriteParallel is durable-on-return but NOT atomic: on
 // error or crash a valid prefix remains, which a content-addressed re-run
-// deduplicates. If the iterator yields an error, WriteParallel stops and
-// returns it. With opts.Verify, a key/payload mismatch stops the run with a
-// wrapped ErrVerify.
+// deduplicates (a dedup hit against a record appended by a concurrent,
+// uncommitted run rides on that run's eventual fsync). If the iterator yields
+// an error, WriteParallel stops and returns it. With opts.Verify, a
+// key/payload mismatch stops the run with a wrapped ErrVerify.
 func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
 	writers := opts.Writers
 	if writers <= 0 {
