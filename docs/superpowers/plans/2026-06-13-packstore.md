@@ -2084,7 +2084,14 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 		}
 	}
 	if a.size >= s.cfg.segmentSize {
-		return s.sealActiveLocked()
+		// A mid-seal failure can leave a renamed-but-unpublished segment or
+		// an un-mmap'd sealed file; reads stay correct (the fd is still
+		// open), but accepting further writes could append past a footer.
+		// Poison the write path; reopen recovers cleanly.
+		if err := s.sealActiveLocked(); err != nil {
+			s.setFailed(err)
+			return err
+		}
 	}
 	return nil
 }
@@ -2426,9 +2433,6 @@ func (s *Store) sealActiveLocked() error {
 	if err := a.f.Sync(); err != nil {
 		return err
 	}
-	if err := a.f.Close(); err != nil {
-		return err
-	}
 	sealedPath := strings.TrimSuffix(a.path, ".active")
 	if err := os.Rename(a.path, sealedPath); err != nil {
 		return err
@@ -2444,7 +2448,12 @@ func (s *Store) sealActiveLocked() error {
 	s.sealed = append(s.sealed, seg)
 	s.active = nil
 	s.mu.Unlock()
-	return nil
+	// Close the fd only after the swap: in-flight readers hold mu.RLock for
+	// their whole pread, so the Lock above drained them, and post-swap
+	// readers route to the sealed mmap. A close error fails the triggering
+	// Put even though the object is sealed and durable — harmless; a retried
+	// Put dedups via Has.
+	return a.f.Close()
 }
 ```
 

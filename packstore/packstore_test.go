@@ -395,3 +395,47 @@ func TestOpenFailsOnCorruptSealedSegment(t *testing.T) {
 		t.Fatalf("Open = %v, want ErrCorrupt", err)
 	}
 }
+
+func TestConcurrentRotationReads(t *testing.T) {
+	// Rotation under read load: sealing must never surface spurious errors
+	// for present keys (the fd may only close after the reader-visible swap).
+	s := openStore(t, t.TempDir(), WithSegmentSize(1024))
+	var objs []Object
+	for i := 0; i < 120; i++ {
+		objs = append(objs, blobObj(t, append(incompressible(600), byte(i), byte(i>>8))))
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := w; i < len(objs); i += 2 {
+				if err := s.Put(objs[i].Key, objs[i].Data); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(w)
+	}
+	for r := 0; r < 6; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < 3; round++ {
+				for _, o := range objs {
+					if _, err := s.Get(o.Key); err != nil && !errors.Is(err, ErrNotFound) {
+						t.Errorf("spurious read error during rotation: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after rotations: %v", o.Key, err)
+		}
+	}
+}
