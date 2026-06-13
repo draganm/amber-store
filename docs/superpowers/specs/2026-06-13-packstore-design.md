@@ -34,7 +34,7 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 func (s *Store) Get(k key.Key) ([]byte, error)
 func (s *Store) Has(k key.Key) (bool, error)
 func (s *Store) Missing(keys []key.Key) ([]key.Key, error)
-func (s *Store) Verify(ctx context.Context) error // full-store scrub
+func (s *Store) Verify(ctx context.Context) error // sealed-segment scrub (active segment is covered by reopen tail-scan)
 func (s *Store) Close() error
 ```
 
@@ -154,8 +154,8 @@ fanout   256 × u32 BE                cumulative: fanout[b] = #entries with key[
 entries  keyCount × 44 bytes:
            key   [32]byte
            off   u64 BE              file offset of the record header
-           slen  u32 BE              stored payload length (readahead hint;
-                                     the record header stays authoritative)
+           slen  u32 BE              stored payload length (authoritative for reads;
+                                     footer-CRC-protected and cross-checked against the body by scrub)
 ```
 
 Entries are sorted by `(key[31], full key lexicographic)`. Lookup:
@@ -215,11 +215,17 @@ bodies.
   active map — holds a single mutex on the active segment.
 - `WithSync(true)`: one fsync per `Put`/batch commit before returning; that
   fsync is the existence commit point.
+- Dedup caveat: a `Put`/batch that hits an existing key returns success
+  without fsyncing. If the existing record was appended by a still-running
+  concurrent batch, the ack rides on that batch's eventual fsync — a crash
+  before it can lose the deduped ack. Accepted for v1 (single-writer daemon;
+  self-healing CAS); revisit with a durable-watermark check if daemon
+  integration ever acks dedup hits to remote clients before batch commit.
 - `WriteBatch` is durable-on-return but **not atomic**: a crash mid-batch
   persists a valid prefix. Harmless in a CAS — orphaned chunks are future
   dedup hits; references commit elsewhere only after a push completes. (This
   is the one documented semantic difference from diskstore.)
-- Rotation: after a batch, if active size ≥ threshold, seal — build index and
+- Rotation: checked after every appended record (including mid-batch); when active size ≥ threshold, seal — build index and
   filter from the active map (no body re-read), append footer, fsync, rename,
   fsync dir, mmap the sealed file, drop the map.
 
@@ -256,6 +262,7 @@ possible because construction is seed-dependent). Also validates that
 - Tail-scan truncation at Open is not an error: Open succeeds, the invalid
   tail is discarded, and appending resumes at the truncation point.
 - `ErrVerify` for write-time BLAKE3 mismatches, mirroring diskstore.
+- `ErrClosed` for operations on a closed store (no diskstore counterpart; Pebble returns its own closed-DB error there).
 
 ## Failure modes designed against
 

@@ -605,7 +605,8 @@ const (
 )
 
 // indexEntry is one sealed-segment index row: a key and where its record
-// starts, plus the stored payload length as a readahead hint.
+// starts, plus the stored payload length (authoritative for reads;
+// footer-CRC-protected and cross-checked against the body by scrub).
 type indexEntry struct {
 	k    key.Key
 	off  uint64 // file offset of the record header
@@ -857,7 +858,10 @@ func buildFilterSection(entries []indexEntry) ([]byte, error) {
 }
 
 // parseFilterSection deserializes a filter section, copying fingerprints out
-// of b (which may be a read-only mmap) into RAM.
+// of b (which may be a read-only mmap) into RAM. The five geometry fields are
+// validated against the binary-fuse construction invariants: Contains indexes
+// Fingerprints from them, so crafted values would otherwise panic the read
+// path rather than fail parse with ErrCorrupt.
 func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 	if len(b) < filterHeaderSize {
 		return nil, fmt.Errorf("%w: filter section too short: %d bytes", ErrCorrupt, len(b))
@@ -866,15 +870,26 @@ func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 		return nil, fmt.Errorf("%w: unknown filter type %d", ErrCorrupt, b[0])
 	}
 	fpCount := binary.BigEndian.Uint32(b[25:29])
-	if len(b) != filterHeaderSize+2*int(fpCount) {
-		return nil, fmt.Errorf("%w: filter section is %d bytes, want %d", ErrCorrupt, len(b), filterHeaderSize+2*int(fpCount))
+	if uint64(len(b)) != filterHeaderSize+2*uint64(fpCount) {
+		return nil, fmt.Errorf("%w: filter section is %d bytes, want %d", ErrCorrupt, len(b), filterHeaderSize+2*uint64(fpCount))
+	}
+	segLen := binary.BigEndian.Uint32(b[9:13])
+	segLenMask := binary.BigEndian.Uint32(b[13:17])
+	segCount := binary.BigEndian.Uint32(b[17:21])
+	segCountLen := binary.BigEndian.Uint32(b[21:25])
+	switch {
+	case segLen == 0 || segLen&(segLen-1) != 0,
+		segLenMask != segLen-1,
+		uint64(segCountLen) != uint64(segCount)*uint64(segLen),
+		uint64(fpCount) != uint64(segCountLen)+2*uint64(segLen):
+		return nil, fmt.Errorf("%w: filter geometry invalid", ErrCorrupt)
 	}
 	f := &xorfilter.BinaryFuse[uint16]{
 		Seed:               binary.BigEndian.Uint64(b[1:9]),
-		SegmentLength:      binary.BigEndian.Uint32(b[9:13]),
-		SegmentLengthMask:  binary.BigEndian.Uint32(b[13:17]),
-		SegmentCount:       binary.BigEndian.Uint32(b[17:21]),
-		SegmentCountLength: binary.BigEndian.Uint32(b[21:25]),
+		SegmentLength:      segLen,
+		SegmentLengthMask:  segLenMask,
+		SegmentCount:       segCount,
+		SegmentCountLength: segCountLen,
 		Fingerprints:       make([]uint16, fpCount),
 	}
 	for i := range f.Fingerprints {
@@ -1058,7 +1073,7 @@ Expected: compile error — `buildFooter`, `openSealed`, `footerView` undefined.
 
 - [ ] **Step 3: Implement footer assembly + parse + sealedSegment in `packstore/footer.go`**
 
-Add imports: `"hash/crc32"`, `"os"`, `"golang.org/x/sys/unix"`.
+Add imports: `"hash/crc32"`, `"math"`, `"os"`, `"golang.org/x/sys/unix"`.
 
 ```go
 // buildFooter assembles the complete footer (seal marker, index section,
@@ -1131,10 +1146,12 @@ func parseFooter(mm []byte) (*footerView, error) {
 	fileLen := uint64(len(mm))
 	switch {
 	case bodyLen < uint64(len(magicHeader)) || bodyLen >= fileLen,
+		keyCount > math.MaxUint32, // fanout counts are u32; also keeps the next line overflow-free
 		indexOff != bodyLen+1,
 		indexLen != uint64(fanoutSize)+keyCount*indexEntrySize,
 		filterOff != indexOff+indexLen,
-		filterOff+filterLen != fileLen-trailerSize:
+		filterOff > fileLen-trailerSize,
+		filterLen != fileLen-trailerSize-filterOff:
 		return nil, fmt.Errorf("%w: trailer offsets inconsistent", ErrCorrupt)
 	}
 	if crc32.Checksum(mm[bodyLen:fileLen-16], castagnoli) != binary.BigEndian.Uint32(tr[48:52]) {
@@ -1187,6 +1204,9 @@ func openSealed(path string, id uint64) (*sealedSegment, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st.Size() < int64(len(magicHeader)+1+fanoutSize+indexEntrySize+filterHeaderSize+trailerSize) {
+		return nil, fmt.Errorf("%w: %s: file too short: %d bytes", ErrCorrupt, path, st.Size())
+	}
 	mm, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
 		return nil, fmt.Errorf("packstore: mmap %s: %w", path, err)
@@ -1223,10 +1243,12 @@ func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
-	end := int64(off) + recHeaderSize + int64(slen)
-	if int64(off) < int64(len(magicHeader)) || end > g.fv.bodyLen {
+	bodyLen := uint64(g.fv.bodyLen)
+	if off < uint64(len(magicHeader)) || off > bodyLen ||
+		uint64(recHeaderSize)+uint64(slen) > bodyLen-off {
 		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
 	}
+	end := off + recHeaderSize + uint64(slen)
 	h := g.mm[off : off+recHeaderSize]
 	flags := h[33]
 	ulen := binary.BigEndian.Uint32(h[34:38])
@@ -1839,6 +1861,8 @@ type Store struct {
 	active   *activeSegment   // nil until the first write of a session
 	nextID   uint64
 	closed   bool
+	failed   error          // sticky write-path failure; written under appendMu+mu, read under either
+	scrubs   sync.WaitGroup // in-flight Verify walks; Close waits before munmap
 }
 
 // Open opens (creating if necessary) a store rooted at dir. Only one Store
@@ -1994,17 +2018,19 @@ func (s *Store) createActive() error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteAt(magicHeader, 0); err != nil {
+	fail := func(err error) error {
 		f.Close()
+		os.Remove(path) // never leave a second .seg.active to brick the next Open
 		return err
+	}
+	if _, err := f.WriteAt(magicHeader, 0); err != nil {
+		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+		return fail(err)
 	}
 	if err := s.dirF.Sync(); err != nil {
-		f.Close()
-		return err
+		return fail(err)
 	}
 	a := &activeSegment{id: id, path: path, f: f, size: int64(len(magicHeader)), index: make(map[key.Key]activeLoc)}
 	s.mu.Lock()
@@ -2026,12 +2052,18 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 	if closed {
 		return ErrClosed
 	}
+	if s.failed != nil {
+		return s.failed
+	}
 	if s.active == nil {
 		if err := s.createActive(); err != nil {
 			return err
 		}
 	}
 	a := s.active
+	if _, ok := a.index[k]; ok {
+		return nil // lost a Put race for this key; the record is already appended
+	}
 	off := a.size
 	if _, err := a.f.WriteAt(rec, off); err != nil {
 		return err
@@ -2049,11 +2081,19 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 
 	if syncNow && s.cfg.sync {
 		if err := a.f.Sync(); err != nil {
+			s.setFailed(err)
 			return err
 		}
 	}
 	if a.size >= s.cfg.segmentSize {
-		return s.sealActiveLocked()
+		// A mid-seal failure can leave a renamed-but-unpublished segment or
+		// an un-mmap'd sealed file; reads stay correct (the fd is still
+		// open), but accepting further writes could append past a footer.
+		// Poison the write path; reopen recovers cleanly.
+		if err := s.sealActiveLocked(); err != nil {
+			s.setFailed(err)
+			return err
+		}
 	}
 	return nil
 }
@@ -2062,10 +2102,35 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 func (s *Store) syncActive() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if s.failed != nil {
+		return s.failed
+	}
 	if !s.cfg.sync || s.active == nil {
 		return nil
 	}
-	return s.active.f.Sync()
+	if err := s.active.f.Sync(); err != nil {
+		s.setFailed(err)
+		return err
+	}
+	return nil
+}
+
+// setFailed poisons the write path after an fsync failure: a failed fsync may
+// have dropped dirty pages, so later appends could be acknowledged while
+// sitting behind a garbage hole that tail-scan recovery would truncate. Reads
+// stay available; only new acknowledgments stop. Called under appendMu.
+func (s *Store) setFailed(err error) {
+	s.mu.Lock()
+	if s.failed == nil {
+		s.failed = fmt.Errorf("packstore: write path failed: %w", err)
+	}
+	s.mu.Unlock()
 }
 
 // sealActiveLocked seals the active segment: footer, fsync, rename to .seg,
@@ -2078,6 +2143,12 @@ func (s *Store) sealActiveLocked() error {
 
 // Put stores a single object under k, deduplicating against existing content.
 func (s *Store) Put(k key.Key, data []byte) error {
+	s.mu.RLock()
+	failed := s.failed
+	s.mu.RUnlock()
+	if failed != nil {
+		return failed
+	}
 	has, err := s.Has(k)
 	if err != nil {
 		return err
@@ -2111,6 +2182,8 @@ func (s *Store) Get(k key.Key) ([]byte, error) {
 	}
 	for i := len(s.sealed) - 1; i >= 0; i-- {
 		data, found, err := s.sealed[i].get(k)
+		// A corrupt segment fails the read loudly rather than falling back to
+		// older copies: masking corruption would hide real damage from scrub.
 		if err != nil {
 			return nil, err
 		}
@@ -2147,8 +2220,8 @@ func (s *Store) Close() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -2162,6 +2235,13 @@ func (s *Store) Close() error {
 		}
 		s.active = nil
 	}
+	// Wait for in-flight Verify walks before unmapping: the scrub reads the
+	// mmaps lock-free, and munmap under it is an uncatchable SIGSEGV. New
+	// scrubs cannot start (closed is set; Verify checks it under mu.RLock).
+	// Callers wanting a faster Close cancel Verify's context first.
+	s.mu.Unlock()
+	s.scrubs.Wait()
+
 	for _, seg := range s.sealed {
 		if err := seg.close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -2368,9 +2448,6 @@ func (s *Store) sealActiveLocked() error {
 	if err := a.f.Sync(); err != nil {
 		return err
 	}
-	if err := a.f.Close(); err != nil {
-		return err
-	}
 	sealedPath := strings.TrimSuffix(a.path, ".active")
 	if err := os.Rename(a.path, sealedPath); err != nil {
 		return err
@@ -2386,7 +2463,12 @@ func (s *Store) sealActiveLocked() error {
 	s.sealed = append(s.sealed, seg)
 	s.active = nil
 	s.mu.Unlock()
-	return nil
+	// Close the fd only after the swap: in-flight readers hold mu.RLock for
+	// their whole pread, so the Lock above drained them, and post-swap
+	// readers route to the sealed mmap. A close error fails the triggering
+	// Put even though the object is sealed and durable — harmless; a retried
+	// Put dedups via Has.
+	return a.f.Close()
 }
 ```
 
@@ -2496,12 +2578,21 @@ Add import `"iter"`.
 // Unlike diskstore's WriteBatch it is NOT atomic — a crash or iterator error
 // can leave a valid prefix stored. In a content-addressed store that prefix
 // is harmless: identical re-pushed content deduplicates. Objects repeated
-// within the batch, or already present, are written once.
+// within the batch, or already present, are written once. When WriteBatch
+// returns an error after appending part of the batch, it best-effort fsyncs
+// that prefix first, so Has-visible records never stay non-durable.
 func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 	seen := make(map[key.Key]struct{})
+	appended := false
+	fail := func(err error) error {
+		if appended {
+			s.syncActive() // best-effort; an fsync failure poisons the store
+		}
+		return err
+	}
 	for obj, err := range seq {
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if _, dup := seen[obj.Key]; dup {
 			continue
@@ -2509,18 +2600,19 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 		seen[obj.Key] = struct{}{}
 		has, err := s.Has(obj.Key)
 		if err != nil {
-			return fmt.Errorf("exists (%s): %w", obj.Key, err)
+			return fail(fmt.Errorf("exists (%s): %w", obj.Key, err))
 		}
 		if has {
 			continue
 		}
 		rec, err := encodeRecord(obj.Key, obj.Data)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if err := s.append(obj.Key, rec, false); err != nil {
-			return err
+			return fail(err)
 		}
+		appended = true
 	}
 	return s.syncActive()
 }
@@ -2644,7 +2736,10 @@ func (s *Store) Missing(keys []key.Key) ([]key.Key, error) {
 	eg.SetLimit(maxParallel)
 
 	for i := range workers {
-		chunk := keys[i*chunkLen : min((i+1)*chunkLen, len(keys))]
+		// Both bounds clamp: with many workers the rounded-up chunkLen can
+		// push a late worker's window past the end of keys.
+		lo := min(i*chunkLen, len(keys))
+		chunk := keys[lo:min((i+1)*chunkLen, len(keys))]
 		eg.Go(func() error {
 			var miss []key.Key
 			for _, k := range chunk {
@@ -2846,6 +2941,7 @@ import (
 const DefaultBatchSize = 16 << 20 // 16 MiB
 
 // WriteStats summarizes one WriteParallel run.
+// On a non-nil error, the stats reflect the work done before the abort.
 type WriteStats struct {
 	Stored      int   // objects newly written
 	Deduped     int   // objects skipped (already present, or duplicated in the stream)
@@ -2916,6 +3012,12 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 	}
 
 	err := eg.Wait()
+	if err != nil && stored.Load() > 0 {
+		// Mirror WriteBatch's error-path contract: records appended before
+		// the error are Has-visible, so they must not stay non-durable.
+		// Best-effort; an fsync failure poisons the store via setFailed.
+		s.syncActive()
+	}
 	return WriteStats{
 		Stored:      int(stored.Load()),
 		Deduped:     int(deduped.Load()),
@@ -2926,8 +3028,9 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 // runWriter consumes objects, encoding (compressing, optionally verifying)
 // them concurrently with its siblings and appending them to the store. It
 // fsyncs after batchSize appended bytes and once more when the channel
-// closes. On ctx cancellation it returns without a final fsync (the run is
-// being aborted; partial appends are safe in a content-addressed store).
+// closes. On ctx cancellation it returns without flushing; WriteParallel
+// issues a final best-effort fsync for the whole run's appends (the segment
+// file is shared, so one sync covers every worker).
 func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int, verify bool, stored, deduped, bytesStored *atomic.Int64) error {
 	pending := 0
 	flush := func() error {
@@ -3181,13 +3284,22 @@ Add imports: `"bytes"`, `"context"`.
 // (validating framing, CRCs, and that each payload re-hashes to its key),
 // recomputes the index section and compares it bytewise with the footer's,
 // and checks the filter contains every body key. The active segment is
-// covered by tail-scan on reopen, not by Verify.
+// covered by tail-scan on reopen, not by Verify. Segments sealed by
+// rotations that happen after Verify snapshots the segment list are not
+// covered by that call. Close blocks until in-flight Verify walks finish;
+// cancel the context to stop a scrub early.
 func (s *Store) Verify(ctx context.Context) error {
 	s.mu.RLock()
 	if s.closed {
 		s.mu.RUnlock()
 		return ErrClosed
 	}
+	// Registering under the read lock orders the Add strictly before any
+	// Close (which sets closed under the write lock and then waits): a scrub
+	// can never start after Close begins, and Close never unmaps while a
+	// scrub is walking the mappings.
+	s.scrubs.Add(1)
+	defer s.scrubs.Done()
 	segs := make([]*sealedSegment, len(s.sealed))
 	copy(segs, s.sealed)
 	s.mu.RUnlock()
@@ -3218,7 +3330,8 @@ func (g *sealedSegment) verify(ctx context.Context) error {
 			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
 		}
 		if err := verifyObject(Object{Key: rec.key, Data: payload}); err != nil {
-			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
+			// Scrub findings are corruption: both sentinels match via errors.Is.
+			return fmt.Errorf("%w: %s: record at offset %d: %w", ErrCorrupt, g.path, off, err)
 		}
 		if !g.fv.filter.Contains(filterKey(rec.key)) {
 			return fmt.Errorf("%w: %s: filter missing key %s (offset %d)", ErrCorrupt, g.path, rec.key, off)
@@ -3226,6 +3339,8 @@ func (g *sealedSegment) verify(ctx context.Context) error {
 		entries = append(entries, indexEntry{k: rec.key, off: uint64(off), slen: rec.slen})
 		off += recHeaderSize + int64(rec.slen)
 	}
+	// Defensive only: parseRecord bounds every record against bodyLen, so the
+	// walk can only exit exactly at bodyLen or via an error above.
 	if off != g.fv.bodyLen {
 		return fmt.Errorf("%w: %s: records end at %d, trailer says %d", ErrCorrupt, g.path, off, g.fv.bodyLen)
 	}
