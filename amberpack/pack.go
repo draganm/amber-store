@@ -4,14 +4,20 @@
 // possibly-partial, unordered set of objects (like a git pack) and carries no
 // root key. Layout:
 //
-//	Header   "AMBERPK\x01"                  8 bytes  magic + version
-//	Records  repeat: 0x01 key[32] uvarint(len) payload
-//	End      0x00
+//	Header   "AMBERPK\x02"                  8 bytes  magic + version (plaintext)
+//	Body     <single zstd frame> of:
+//	           Records  repeat: 0x01 key[32] uvarint(len) payload
+//	           End      0x00
 //
-// The 32-byte key already encodes the object's type and logical length, so no
-// separate fields are needed. The Reader validates framing and that each key is
-// canonical; it does NOT verify the payload hash — that happens in the storage
-// path (packstore verification).
+// The 8-byte magic stays outside the compression so an artifact is still
+// identifiable by its leading bytes; everything after it is one zstd frame
+// (encoded at SpeedFastest). The 32-byte key already encodes the object's type
+// and logical length, so no separate fields are needed. The Reader validates
+// framing and that each key is canonical; it does NOT verify the payload hash —
+// that happens in the storage path (packstore verification).
+//
+// Version 1 ("AMBERPK\x01") was an uncompressed variant with the same record
+// grammar; it is no longer produced and is rejected by the Reader.
 package amberpack
 
 import (
@@ -24,10 +30,11 @@ import (
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/klauspost/compress/zstd"
 )
 
 // magic identifies the format and its version (the trailing byte).
-const magic = "AMBERPK\x01"
+const magic = "AMBERPK\x02"
 
 const (
 	tagObject byte = 0x01 // an object record follows
@@ -47,8 +54,13 @@ const maxPayloadBytes = 256 << 20 // 256 MiB
 // Writer serializes fstree.Objects into the pack-write format. It is not safe
 // for concurrent use; a client wanting parallel uploads creates one Writer per
 // stream.
+//
+// The 8-byte magic is written plaintext; all records and the end marker are
+// written through a zstd encoder (SpeedFastest), so the body is a single
+// compressed frame.
 type Writer struct {
-	bw          *bufio.Writer
+	bw          *bufio.Writer  // wraps the caller's writer; carries plaintext magic + compressed frame
+	enc         *zstd.Encoder  // compresses records into bw; nil until the header is written
 	wroteHeader bool
 }
 
@@ -65,6 +77,16 @@ func (w *Writer) ensureHeader() error {
 	if _, err := w.bw.WriteString(magic); err != nil {
 		return err
 	}
+	// One short stream of small CAS objects per Writer, so concurrency 1 avoids
+	// spawning GOMAXPROCS goroutines for no benefit.
+	enc, err := zstd.NewWriter(w.bw,
+		zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderConcurrency(1),
+	)
+	if err != nil {
+		return err
+	}
+	w.enc = enc
 	w.wroteHeader = true
 	return nil
 }
@@ -74,28 +96,31 @@ func (w *Writer) Add(o fstree.Object) error {
 	if err := w.ensureHeader(); err != nil {
 		return err
 	}
-	if err := w.bw.WriteByte(tagObject); err != nil {
+	if _, err := w.enc.Write([]byte{tagObject}); err != nil {
 		return err
 	}
-	if _, err := w.bw.Write(o.Key[:]); err != nil {
+	if _, err := w.enc.Write(o.Key[:]); err != nil {
 		return err
 	}
 	var lb [binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(lb[:], uint64(len(o.Bytes)))
-	if _, err := w.bw.Write(lb[:n]); err != nil {
+	if _, err := w.enc.Write(lb[:n]); err != nil {
 		return err
 	}
-	_, err := w.bw.Write(o.Bytes)
+	_, err := w.enc.Write(o.Bytes)
 	return err
 }
 
-// Close writes the header (if no object was added) and the end marker, then
-// flushes. It does not close the underlying writer.
+// Close writes the header (if no object was added) and the end marker, finishes
+// the zstd frame, and flushes. It does not close the underlying writer.
 func (w *Writer) Close() error {
 	if err := w.ensureHeader(); err != nil {
 		return err
 	}
-	if err := w.bw.WriteByte(tagEnd); err != nil {
+	if _, err := w.enc.Write([]byte{tagEnd}); err != nil {
+		return err
+	}
+	if err := w.enc.Close(); err != nil { // finishes the frame; does not close w.bw
 		return err
 	}
 	return w.bw.Flush()
@@ -103,12 +128,12 @@ func (w *Writer) Close() error {
 
 // Reader decodes a pack-write stream.
 type Reader struct {
-	br *bufio.Reader
+	r io.Reader
 }
 
 // NewReader returns a Reader over r.
 func NewReader(r io.Reader) *Reader {
-	return &Reader{br: bufio.NewReader(r)}
+	return &Reader{r: r}
 }
 
 // All iterates over the objects in the stream. It yields exactly one error (and
@@ -118,7 +143,7 @@ func NewReader(r io.Reader) *Reader {
 func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 	return func(yield func(fstree.Object, error) bool) {
 		var hdr [len(magic)]byte
-		if _, err := io.ReadFull(r.br, hdr[:]); err != nil {
+		if _, err := io.ReadFull(r.r, hdr[:]); err != nil {
 			yield(fstree.Object{}, fmt.Errorf("%w: reading header: %v", ErrMalformed, err))
 			return
 		}
@@ -126,8 +151,19 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 			yield(fstree.Object{}, fmt.Errorf("%w: bad magic", ErrMalformed))
 			return
 		}
+		// The body after the magic is a single zstd frame; decode records from it.
+		// Concurrency 1: streams are short, so extra decoder goroutines add cost
+		// without benefit. A corrupt frame surfaces as a read error in the loop
+		// below, which is already mapped to ErrMalformed.
+		dec, err := zstd.NewReader(r.r, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			yield(fstree.Object{}, fmt.Errorf("%w: opening zstd reader: %v", ErrMalformed, err))
+			return
+		}
+		defer dec.Close()
+		br := bufio.NewReader(dec)
 		for {
-			tag, err := r.br.ReadByte()
+			tag, err := br.ReadByte()
 			if err != nil {
 				yield(fstree.Object{}, fmt.Errorf("%w: truncated before end marker: %v", ErrMalformed, err))
 				return
@@ -137,7 +173,7 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 				return
 			case tagObject:
 				var kb [key.Size]byte
-				if _, err := io.ReadFull(r.br, kb[:]); err != nil {
+				if _, err := io.ReadFull(br, kb[:]); err != nil {
 					yield(fstree.Object{}, fmt.Errorf("%w: reading key: %v", ErrMalformed, err))
 					return
 				}
@@ -146,7 +182,7 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 					yield(fstree.Object{}, fmt.Errorf("%w: non-canonical key: %v", ErrMalformed, err))
 					return
 				}
-				n, err := binary.ReadUvarint(r.br)
+				n, err := binary.ReadUvarint(br)
 				if err != nil {
 					yield(fstree.Object{}, fmt.Errorf("%w: reading length: %v", ErrMalformed, err))
 					return
@@ -156,7 +192,7 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 					return
 				}
 				payload := make([]byte, n)
-				if _, err := io.ReadFull(r.br, payload); err != nil {
+				if _, err := io.ReadFull(br, payload); err != nil {
 					yield(fstree.Object{}, fmt.Errorf("%w: reading payload: %v", ErrMalformed, err))
 					return
 				}
