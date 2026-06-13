@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -210,5 +211,50 @@ func TestWithSyncFalse(t *testing.T) {
 	}
 	if data, err := s.Get(o.Key); err != nil || !bytes.Equal(data, o.Data) {
 		t.Fatalf("Get: %v", err)
+	}
+}
+
+func TestConcurrentPutGetHas(t *testing.T) {
+	s := openStore(t, t.TempDir(), WithSync(false))
+	objs := testObjects(t, 200)
+
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			// Overlapping key ranges: every writer writes every other object,
+			// so same-key Put races are exercised.
+			for i := w % 2; i < len(objs); i += 2 {
+				if err := s.Put(objs[i].Key, objs[i].Data); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(w)
+	}
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, o := range objs {
+				if _, err := s.Has(o.Key); err != nil {
+					t.Error(err)
+					return
+				}
+				if _, err := s.Get(o.Key); err != nil && !errors.Is(err, ErrNotFound) {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after concurrent writes: %v", o.Key, err)
+		}
 	}
 }

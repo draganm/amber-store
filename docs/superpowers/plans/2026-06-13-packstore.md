@@ -1860,6 +1860,7 @@ type Store struct {
 	active   *activeSegment   // nil until the first write of a session
 	nextID   uint64
 	closed   bool
+	failed   error // sticky write-path failure; written under appendMu+mu, read under either
 }
 
 // Open opens (creating if necessary) a store rooted at dir. Only one Store
@@ -2015,17 +2016,19 @@ func (s *Store) createActive() error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteAt(magicHeader, 0); err != nil {
+	fail := func(err error) error {
 		f.Close()
+		os.Remove(path) // never leave a second .seg.active to brick the next Open
 		return err
+	}
+	if _, err := f.WriteAt(magicHeader, 0); err != nil {
+		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+		return fail(err)
 	}
 	if err := s.dirF.Sync(); err != nil {
-		f.Close()
-		return err
+		return fail(err)
 	}
 	a := &activeSegment{id: id, path: path, f: f, size: int64(len(magicHeader)), index: make(map[key.Key]activeLoc)}
 	s.mu.Lock()
@@ -2047,12 +2050,18 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 	if closed {
 		return ErrClosed
 	}
+	if s.failed != nil {
+		return s.failed
+	}
 	if s.active == nil {
 		if err := s.createActive(); err != nil {
 			return err
 		}
 	}
 	a := s.active
+	if _, ok := a.index[k]; ok {
+		return nil // lost a Put race for this key; the record is already appended
+	}
 	off := a.size
 	if _, err := a.f.WriteAt(rec, off); err != nil {
 		return err
@@ -2070,6 +2079,7 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 
 	if syncNow && s.cfg.sync {
 		if err := a.f.Sync(); err != nil {
+			s.setFailed(err)
 			return err
 		}
 	}
@@ -2083,10 +2093,29 @@ func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 func (s *Store) syncActive() error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
+	if s.failed != nil {
+		return s.failed
+	}
 	if !s.cfg.sync || s.active == nil {
 		return nil
 	}
-	return s.active.f.Sync()
+	if err := s.active.f.Sync(); err != nil {
+		s.setFailed(err)
+		return err
+	}
+	return nil
+}
+
+// setFailed poisons the write path after an fsync failure: a failed fsync may
+// have dropped dirty pages, so later appends could be acknowledged while
+// sitting behind a garbage hole that tail-scan recovery would truncate. Reads
+// stay available; only new acknowledgments stop. Called under appendMu.
+func (s *Store) setFailed(err error) {
+	s.mu.Lock()
+	if s.failed == nil {
+		s.failed = fmt.Errorf("packstore: write path failed: %w", err)
+	}
+	s.mu.Unlock()
 }
 
 // sealActiveLocked seals the active segment: footer, fsync, rename to .seg,
@@ -2099,6 +2128,12 @@ func (s *Store) sealActiveLocked() error {
 
 // Put stores a single object under k, deduplicating against existing content.
 func (s *Store) Put(k key.Key, data []byte) error {
+	s.mu.RLock()
+	failed := s.failed
+	s.mu.RUnlock()
+	if failed != nil {
+		return failed
+	}
 	has, err := s.Has(k)
 	if err != nil {
 		return err
@@ -2132,6 +2167,8 @@ func (s *Store) Get(k key.Key) ([]byte, error) {
 	}
 	for i := len(s.sealed) - 1; i >= 0; i-- {
 		data, found, err := s.sealed[i].get(k)
+		// A corrupt segment fails the read loudly rather than falling back to
+		// older copies: masking corruption would hide real damage from scrub.
 		if err != nil {
 			return nil, err
 		}
