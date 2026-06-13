@@ -2727,7 +2727,10 @@ func (s *Store) Missing(keys []key.Key) ([]key.Key, error) {
 	eg.SetLimit(maxParallel)
 
 	for i := range workers {
-		chunk := keys[i*chunkLen : min((i+1)*chunkLen, len(keys))]
+		// Both bounds clamp: with many workers the rounded-up chunkLen can
+		// push a late worker's window past the end of keys.
+		lo := min(i*chunkLen, len(keys))
+		chunk := keys[lo:min((i+1)*chunkLen, len(keys))]
 		eg.Go(func() error {
 			var miss []key.Key
 			for _, k := range chunk {
