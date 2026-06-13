@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/key"
@@ -23,7 +23,7 @@ import (
 )
 
 type handler struct {
-	store   *diskstore.Store
+	store   *packstore.Store
 	refs    *refstore.Store
 	log     *slog.Logger
 	remotes *RemoteConfig
@@ -54,13 +54,13 @@ func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
 // logger (method, path, status, duration), as are per-operation outcomes:
 // rejected uploads at Warn, store failures at Error, completed ingests at Info.
 // A nil logger discards all logging.
-func New(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
+func New(store *packstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
 	return NewWithRemotes(store, refs, logger, nil)
 }
 
 // NewWithRemotes additionally registers the /v1/remotes and /v1/remote/*
 // routes backed by rc.
-func NewWithRemotes(store *diskstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig) http.Handler {
+func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -128,20 +128,20 @@ type ingestResponse struct {
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rd := amberpack.NewReader(r.Body)
-	seq := func(yield func(diskstore.Object, error) bool) {
+	seq := func(yield func(packstore.Object, error) bool) {
 		for o, err := range rd.All() {
 			if err != nil {
-				yield(diskstore.Object{}, err)
+				yield(packstore.Object{}, err)
 				return
 			}
-			if !yield(diskstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
+			if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
 				return
 			}
 		}
 	}
-	stats, err := h.store.WriteParallel(seq, diskstore.WriteOpts{Verify: true})
+	stats, err := h.store.WriteParallel(seq, packstore.WriteOpts{Verify: true})
 	if err != nil {
-		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, diskstore.ErrVerify) {
+		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, packstore.ErrVerify) {
 			h.log.Warn("ingest rejected", "error", err)
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return

@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/tarexport"
@@ -16,7 +16,7 @@ import (
 // regular files, returning the store and the directory root key. It encodes the
 // objects directly with fstree to avoid depending on the CLI.
 func TestWrite_RegularFilesAndDir(t *testing.T) {
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestWrite_RegularFilesAndDir(t *testing.T) {
 }
 
 func TestWrite_RejectsNonDirectoryRoot(t *testing.T) {
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestWrite_RejectsNonDirectoryRoot(t *testing.T) {
 }
 
 func TestWrite_NestedDir(t *testing.T) {
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestWrite_NestedDir(t *testing.T) {
 }
 
 func TestWrite_RejectsUnsafeEntryName(t *testing.T) {
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

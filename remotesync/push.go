@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remoteclient"
@@ -63,7 +63,7 @@ type PushStats struct {
 // sparse missing subsets into full upload batches, and uploaders send each
 // batch as one amberpack. Negotiation and upload overlap, with the jobs
 // budget split between the two pools. Idempotent: a re-run pushes nothing.
-func Push(ctx context.Context, store *diskstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PushStats, error) {
+func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PushStats, error) {
 	keys, err := fstree.ReachableKeys(root, store.Get)
 	if err != nil {
 		return PushStats{}, fmt.Errorf("walking reachable objects: %w", err)

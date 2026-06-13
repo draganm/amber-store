@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
@@ -25,7 +25,7 @@ import (
 )
 
 // ObjectGetter is the read-only object-store view the ref browser needs;
-// *diskstore.Store implements it.
+// *packstore.Store implements it.
 type ObjectGetter interface {
 	Get(k key.Key) ([]byte, error)
 }
@@ -162,7 +162,7 @@ func (h *handler) resolveTarget(r *http.Request) (browseTarget, int, error) {
 	switch {
 	case errors.Is(err, fstree.ErrNotDir):
 		return browseTarget{}, http.StatusBadRequest, err
-	case errors.Is(err, fstree.ErrNotFound), errors.Is(err, diskstore.ErrNotFound):
+	case errors.Is(err, fstree.ErrNotFound), errors.Is(err, packstore.ErrNotFound):
 		return browseTarget{}, http.StatusNotFound, err
 	case err != nil:
 		return browseTarget{}, http.StatusInternalServerError, err
@@ -363,7 +363,7 @@ func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
 	// object is a clean 404 rather than an aborted connection.
 	if _, err := h.objects.Get(t.key); err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, diskstore.ErrNotFound) {
+		if errors.Is(err, packstore.ErrNotFound) {
 			status = http.StatusNotFound
 		}
 		jsonError(w, status, err.Error())
@@ -375,7 +375,7 @@ func (h *handler) raw(w http.ResponseWriter, r *http.Request) {
 		head, err := h.firstBytes(t.key, 512)
 		if err != nil {
 			status := http.StatusInternalServerError
-			if errors.Is(err, diskstore.ErrNotFound) {
+			if errors.Is(err, packstore.ErrNotFound) {
 				status = http.StatusNotFound
 			}
 			jsonError(w, status, err.Error())
@@ -418,7 +418,7 @@ func (h *handler) treeDir(w http.ResponseWriter, r *http.Request, dir key.Key) {
 	entries, more, err := fstree.ListEntries(dir, after, limit, h.objects.Get)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, diskstore.ErrNotFound) {
+		if errors.Is(err, packstore.ErrNotFound) {
 			status = http.StatusNotFound
 		}
 		jsonError(w, status, err.Error())
@@ -466,7 +466,7 @@ func (h *handler) archive(w http.ResponseWriter, r *http.Request) {
 	// is a clean 404 rather than an aborted connection.
 	if _, err := h.objects.Get(t.key); err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, diskstore.ErrNotFound) {
+		if errors.Is(err, packstore.ErrNotFound) {
 			status = http.StatusNotFound
 		}
 		jsonError(w, status, err.Error())

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/admin"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowstore"
 	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/sshsign"
@@ -46,7 +46,7 @@ func serveCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
-				Usage:       "diskstore directory (created if missing)",
+				Usage:       "packstore directory (created if missing)",
 				Required:    true,
 				Destination: &cfg.store,
 			},
@@ -160,7 +160,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 	defer closeIdentity()
 
-	store, err := diskstore.Open(cfg.store, diskstore.WithSync(cfg.sync))
+	store, err := packstore.Open(cfg.store, packstore.WithSync(cfg.sync))
 	if err != nil {
 		return err
 	}

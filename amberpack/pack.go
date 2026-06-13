@@ -11,7 +11,7 @@
 // The 32-byte key already encodes the object's type and logical length, so no
 // separate fields are needed. The Reader validates framing and that each key is
 // canonical; it does NOT verify the payload hash — that happens in the storage
-// path (diskstore verification).
+// path (packstore verification).
 package amberpack
 
 import (

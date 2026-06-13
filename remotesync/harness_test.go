@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/key"
@@ -33,7 +33,7 @@ func testSigner(t *testing.T) ssh.Signer {
 
 type harness struct {
 	srv      *httptest.Server
-	store    *diskstore.Store
+	store    *packstore.Store
 	refs     *refstore.Store
 	identity ssh.Signer
 	client   ssh.Signer
@@ -49,7 +49,7 @@ func newHarness(t *testing.T) *harness {
 func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +88,9 @@ func (h *harness) rc(t *testing.T) *remoteclient.Client {
 	return c
 }
 
-func newLocalStore(t *testing.T) *diskstore.Store {
+func newLocalStore(t *testing.T) *packstore.Store {
 	t.Helper()
-	s, err := diskstore.Open(filepath.Join(t.TempDir(), "local"), diskstore.WithSync(false))
+	s, err := packstore.Open(filepath.Join(t.TempDir(), "local"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func newLocalStore(t *testing.T) *diskstore.Store {
 
 // buildTree stores a small two-level tree in store and returns its root:
 // DirLeaf{ file "f" → FileNode → [blob1, blob2] }.
-func buildTree(t *testing.T, store *diskstore.Store) key.Key {
+func buildTree(t *testing.T, store *packstore.Store) key.Key {
 	t.Helper()
 	b1, err := fstree.EncodeBlob([]byte("blob one payload"))
 	if err != nil {

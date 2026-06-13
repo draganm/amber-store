@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remotesync"
@@ -48,7 +48,7 @@ func TestBatchesOversizedSingleItemGetsOwnBatch(t *testing.T) {
 }
 
 func TestPushSizerUsesActualSizeForNodes(t *testing.T) {
-	store, err := diskstore.Open(filepath.Join(t.TempDir(), "s"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(t.TempDir(), "s"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

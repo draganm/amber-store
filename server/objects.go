@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/internal/keylist"
@@ -46,20 +46,20 @@ func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedR
 // daemon: nothing unverified is ever persisted.
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	rd := amberpack.NewReader(bytes.NewReader(a.body))
-	seq := func(yield func(diskstore.Object, error) bool) {
+	seq := func(yield func(packstore.Object, error) bool) {
 		for o, err := range rd.All() {
 			if err != nil {
-				yield(diskstore.Object{}, err)
+				yield(packstore.Object{}, err)
 				return
 			}
-			if !yield(diskstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
+			if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
 				return
 			}
 		}
 	}
-	stats, err := h.store.WriteParallel(seq, diskstore.WriteOpts{Verify: true})
+	stats, err := h.store.WriteParallel(seq, packstore.WriteOpts{Verify: true})
 	if err != nil {
-		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, diskstore.ErrVerify) {
+		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, packstore.ErrVerify) {
 			h.log.Warn("upload rejected", "error", err)
 			h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 			return

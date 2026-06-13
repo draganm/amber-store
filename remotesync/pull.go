@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remoteclient"
@@ -26,7 +26,7 @@ type PullStats struct {
 // feeds the children of fetched tree/file nodes into the next round.
 // Idempotent: a re-run fetches nothing, and a run interrupted mid-round is
 // safe to repeat — already-stored objects are skipped by the Has check.
-func Pull(ctx context.Context, store *diskstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PullStats, error) {
+func Pull(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PullStats, error) {
 	seen := map[key.Key]bool{}
 	frontier := []key.Key{root}
 	var stats PullStats
@@ -70,16 +70,16 @@ func Pull(ctx context.Context, store *diskstore.Store, rc *remoteclient.Client, 
 				if err != nil {
 					return err
 				}
-				seq := func(yield func(diskstore.Object, error) bool) {
+				seq := func(yield func(packstore.Object, error) bool) {
 					for _, o := range objs {
-						if !yield(diskstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
+						if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
 							return
 						}
 					}
 				}
 				// Verify: the store re-hashes every object against its key, so a
 				// hostile or corrupted stream can never poison the local store.
-				if _, err := store.WriteParallel(seq, diskstore.WriteOpts{Verify: true}); err != nil {
+				if _, err := store.WriteParallel(seq, packstore.WriteOpts{Verify: true}); err != nil {
 					return fmt.Errorf("storing fetched objects: %w", err)
 				}
 				var kids []key.Key

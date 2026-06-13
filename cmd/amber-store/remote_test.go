@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/refstore"
@@ -25,7 +25,7 @@ import (
 func startRemoteServer(t *testing.T, clientPub ssh.PublicKey) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func startRemoteServer(t *testing.T, clientPub ssh.PublicKey) *httptest.Server {
 // startDaemon, to avoid racing on urfave/cli globals).
 func startDaemonWithRemotes(t *testing.T, signer ssh.Signer) string {
 	t.Helper()
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

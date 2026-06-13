@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remotesync"
@@ -85,7 +85,7 @@ func countUploads(n *atomic.Int64) func(http.Handler) http.Handler {
 
 // putBlob stores a size-byte blob whose leading byte is seed (distinct
 // seeds give distinct keys) and returns it.
-func putBlob(t *testing.T, store *diskstore.Store, seed byte, size int) fstree.Object {
+func putBlob(t *testing.T, store *packstore.Store, seed byte, size int) fstree.Object {
 	t.Helper()
 	payload := make([]byte, size)
 	payload[0] = seed
@@ -101,7 +101,7 @@ func putBlob(t *testing.T, store *diskstore.Store, seed byte, size int) fstree.O
 
 // buildFileTree stores DirLeaf{ file "f" → FileNode → blobKeys } and returns
 // the root key; the blobs themselves must already be in store.
-func buildFileTree(t *testing.T, store *diskstore.Store, blobKeys []key.Key) key.Key {
+func buildFileTree(t *testing.T, store *packstore.Store, blobKeys []key.Key) key.Key {
 	t.Helper()
 	fn, err := fstree.EncodeFileNode(blobKeys)
 	if err != nil {

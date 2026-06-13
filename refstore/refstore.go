@@ -25,7 +25,7 @@ type Store struct {
 	writeMu   sync.Mutex
 }
 
-// discardLogger silences pebble's internal logging (same trick as diskstore).
+// discardLogger silences pebble's internal logging.
 type discardLogger struct{}
 
 func (discardLogger) Infof(string, ...any)  {}

@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/internal/nonces"
@@ -26,7 +26,7 @@ const DefaultMaxBody = 64 << 20 // 64 MiB
 
 // Config assembles a server handler.
 type Config struct {
-	Store    *diskstore.Store
+	Store    *packstore.Store
 	Refs     *refstore.Store
 	Allow    func() *allowlist.List // called per request, enabling hot reload
 	Identity ssh.Signer
@@ -36,7 +36,7 @@ type Config struct {
 }
 
 type handler struct {
-	store    *diskstore.Store
+	store    *packstore.Store
 	refs     *refstore.Store
 	allow    func() *allowlist.List
 	identity ssh.Signer

@@ -10,7 +10,7 @@ The object model lives in [types.md](types.md) and [fstree.md](fstree.md); the k
 Amber-Store runs as **one daemon per store** plus any number of transient CLI
 clients:
 
-- The **daemon** (`amber-store daemon --store DIR`) opens the diskstore and is
+- The **daemon** (`amber-store daemon --store DIR`) opens the packstore and is
   the only process that ever touches it. It serves HTTP/1.1 over a unix socket;
   the handler is transport-agnostic, so a TCP listener can be added later
   without touching the routes.
@@ -45,7 +45,7 @@ many small random-access `get`s and therefore belong next to the store.
 
 | Command                 | Client-side work                                                | Daemon-side work                                  |
 |-------------------------|-----------------------------------------------------------------|---------------------------------------------------|
-| `daemon`                | —                                                               | owns the diskstore, serves all routes             |
+| `daemon`                | —                                                               | owns the packstore, serves all routes             |
 | `ingest NAME DIR`       | walk, chunk, hash, encode; stream pack; PUT ref; print root key | verify + store each object                        |
 | `ingest -o F`           | same, but write the pack to a file — no daemon needed           | —                                                 |
 | `load F`                | stream an existing pack file                                    | verify + store each object                        |

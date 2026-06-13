@@ -20,7 +20,7 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 )
@@ -29,7 +29,7 @@ import (
 // dir and returns a client for it. The listener closes at test end.
 // We use os.MkdirTemp with /tmp as the parent to keep the path short enough
 // for macOS's 104-byte unix socket path limit.
-func serveOnSocket(t *testing.T, store *diskstore.Store) *client.Client {
+func serveOnSocket(t *testing.T, store *packstore.Store) *client.Client {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "amber-daemon-test-*")
 	if err != nil {
@@ -47,9 +47,9 @@ func serveOnSocket(t *testing.T, store *diskstore.Store) *client.Client {
 	return client.New(sock)
 }
 
-func openStore(t *testing.T) *diskstore.Store {
+func openStore(t *testing.T) *packstore.Store {
 	t.Helper()
-	s, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	s, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

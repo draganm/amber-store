@@ -13,7 +13,7 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/refstore"
 )
@@ -25,7 +25,7 @@ import (
 // clients may connect immediately.
 func startDaemon(t *testing.T) string {
 	t.Helper()
-	store, err := diskstore.Open(t.TempDir(), diskstore.WithSync(false))
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

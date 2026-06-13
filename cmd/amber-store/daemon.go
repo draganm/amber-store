@@ -14,23 +14,23 @@ import (
 	"syscall"
 
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/diskstore"
 	"github.com/draganm/amber-store/internal/identity"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/crypto/ssh"
 )
 
 type daemonConfig struct {
-	store           string
-	socket          string
-	inlineThreshold int
-	sync            bool
-	logLevel        string
-	logFormat       string
-	remoteKeys      cli.StringSlice
+	store       string
+	socket      string
+	segmentSize int64
+	sync        bool
+	logLevel    string
+	logFormat   string
+	remoteKeys  cli.StringSlice
 }
 
 func daemonCommand() *cli.Command {
@@ -42,7 +42,7 @@ func daemonCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
-				Usage:       "diskstore directory (created if missing)",
+				Usage:       "packstore directory (created if missing)",
 				Required:    true,
 				Destination: &cfg.store,
 			},
@@ -51,11 +51,11 @@ func daemonCommand() *cli.Command {
 				Usage:       "unix socket path (default: $AMBER_STORE_SOCKET or a per-user path)",
 				Destination: &cfg.socket,
 			},
-			&cli.IntFlag{
-				Name:        "inline-threshold",
-				Value:       diskstore.DefaultInlineThreshold,
-				Usage:       "objects larger than this many bytes are stored as external blob files",
-				Destination: &cfg.inlineThreshold,
+			&cli.Int64Flag{
+				Name:        "segment-size",
+				Value:       packstore.DefaultSegmentSize,
+				Usage:       "seal the active segment once it reaches this many bytes",
+				Destination: &cfg.segmentSize,
 			},
 			&cli.BoolFlag{
 				Name:        "sync",
@@ -155,9 +155,9 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 		return err
 	}
 
-	store, err := diskstore.Open(cfg.store,
-		diskstore.WithInlineThreshold(cfg.inlineThreshold),
-		diskstore.WithSync(cfg.sync),
+	store, err := packstore.Open(cfg.store,
+		packstore.WithSegmentSize(cfg.segmentSize),
+		packstore.WithSync(cfg.sync),
 	)
 	if err != nil {
 		return err

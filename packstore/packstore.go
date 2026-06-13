@@ -400,7 +400,7 @@ func (s *Store) sealActiveLocked() error {
 
 // WriteBatch stores every object the iterator yields, fsyncing once at the
 // end (when WithSync is enabled): on return, all yielded objects are durable.
-// Unlike diskstore's WriteBatch it is NOT atomic — a crash or iterator error
+// It is NOT atomic — a crash or iterator error
 // can leave a valid prefix stored. In a content-addressed store that prefix
 // is harmless: identical re-pushed content deduplicates. Objects repeated
 // within the batch, or already present, are written once. When WriteBatch

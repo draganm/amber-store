@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/remoteclient"
@@ -33,7 +33,7 @@ func testSigner(t *testing.T) ssh.Signer {
 
 type harness struct {
 	srv      *httptest.Server
-	store    *diskstore.Store
+	store    *packstore.Store
 	refs     *refstore.Store
 	identity ssh.Signer
 	client   ssh.Signer
@@ -43,7 +43,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

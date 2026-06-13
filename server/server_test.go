@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/refstore"
@@ -37,7 +37,7 @@ func testSigner(t *testing.T) ssh.Signer {
 // test needs to issue signed requests.
 type testServer struct {
 	srv      *httptest.Server
-	store    *diskstore.Store
+	store    *packstore.Store
 	refs     *refstore.Store
 	identity ssh.Signer
 	client   ssh.Signer
@@ -47,7 +47,7 @@ type testServer struct {
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

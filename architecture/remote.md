@@ -1,7 +1,7 @@
 # Remote Server
 
 `amber-store serve` is a TCP/HTTP(S) sibling of the local daemon: it owns its
-own diskstore and refs DB through the same packages, but listens on TCP and
+own packstore and refs DB through the same packages, but listens on TCP and
 requires a signed request for every route. Local daemons are its only clients.
 The daemon performs all remote communication and the tree walks that drive it —
 walks need many small random-access gets, which belong next to the store,

@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/remotes"
@@ -47,9 +47,9 @@ func testSignerD(t *testing.T) ssh.Signer {
 type remoteHarness struct {
 	daemonSrv    *httptest.Server
 	serverSrv    *httptest.Server
-	store        *diskstore.Store // local daemon's store
+	store        *packstore.Store // local daemon's store
 	refs         *refstore.Store  // local daemon's refs
-	srvStore     *diskstore.Store // remote server's store
+	srvStore     *packstore.Store // remote server's store
 	srvRefs      *refstore.Store
 	identity     ssh.Signer
 	clientSigner ssh.Signer // the SSH signer allowed by the remote server
@@ -57,10 +57,10 @@ type remoteHarness struct {
 }
 
 // newRemoteServer starts an in-process remote server allowing clientPub.
-func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey) (*httptest.Server, *diskstore.Store, *refstore.Store) {
+func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey) (*httptest.Server, *packstore.Store, *refstore.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +84,10 @@ func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey)
 }
 
 // newDaemonFor starts a local daemon with remote support against serverSrv.
-func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh.Signer, srvStore *diskstore.Store, srvRefs *refstore.Store) *remoteHarness {
+func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh.Signer, srvStore *packstore.Store, srvRefs *refstore.Store) *remoteHarness {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func (h *remoteHarness) putLocalRef(t *testing.T, name string, root key.Key, sig
 
 // buildTree stores a small two-level tree in store and returns its root:
 // DirLeaf{ file "f" → FileNode → [blob1, blob2] }.
-func buildTree(t *testing.T, store *diskstore.Store) key.Key {
+func buildTree(t *testing.T, store *packstore.Store) key.Key {
 	t.Helper()
 	b1, err := fstree.EncodeBlob([]byte("blob one payload"))
 	if err != nil {
@@ -277,7 +277,7 @@ func TestPreflightBadURL(t *testing.T) {
 func TestRemoteRoutesAbsentWithoutConfig(t *testing.T) {
 	// daemon.New (no RemoteConfig) must not register the remote routes
 	dir := t.TempDir()
-	store, err := diskstore.Open(filepath.Join(dir, "store"), diskstore.WithSync(false))
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/sshsign"
 	"github.com/draganm/amber-store/key"
@@ -94,7 +94,7 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 	case errors.As(err, &miss):
 		h.signError(w, a.nonce, http.StatusNotFound, "referenced content is incomplete: "+miss.Key.String()+" is missing — push objects before the ref")
 		return
-	case errors.Is(err, diskstore.ErrNotFound):
+	case errors.Is(err, packstore.ErrNotFound):
 		h.signError(w, a.nonce, http.StatusNotFound, "referenced content is incomplete: "+err.Error()+" — push objects before the ref")
 		return
 	case err != nil:

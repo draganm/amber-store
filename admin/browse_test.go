@@ -17,7 +17,7 @@ import (
 
 	"github.com/draganm/amber-store/admin"
 	"github.com/draganm/amber-store/chunkers"
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowstore"
 	"github.com/draganm/amber-store/key"
@@ -31,7 +31,7 @@ type memObjects map[key.Key][]byte
 func (m memObjects) Get(k key.Key) ([]byte, error) {
 	b, ok := m[k]
 	if !ok {
-		return nil, fmt.Errorf("object %s: %w", k, diskstore.ErrNotFound)
+		return nil, fmt.Errorf("object %s: %w", k, packstore.ErrNotFound)
 	}
 	return b, nil
 }

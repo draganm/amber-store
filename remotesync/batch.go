@@ -1,12 +1,12 @@
 // Package remotesync implements the push/pull algorithms between a local
-// diskstore and a remote amber-store server: byte-balanced batching driven
+// packstore and a remote amber-store server: byte-balanced batching driven
 // by the sizes encoded in keys, a pipelined have/want push (parallel
 // negotiation, re-batching, parallel upload), and a round-based BFS pull.
 // See architecture/remote.md.
 package remotesync
 
 import (
-	"github.com/draganm/amber-store/diskstore"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/key"
 )
 
@@ -30,7 +30,7 @@ type SizeOf func(k key.Key) uint64
 // lengths are logical or cumulative) is measured from the local store, with
 // a nominal fallback if the read fails (the push itself will surface the
 // real error).
-func PushSizer(store *diskstore.Store) SizeOf {
+func PushSizer(store *packstore.Store) SizeOf {
 	return func(k key.Key) uint64 {
 		if k.Type() == key.Blob {
 			return k.Length()
