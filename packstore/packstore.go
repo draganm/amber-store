@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"slices"
@@ -388,6 +389,40 @@ func (s *Store) sealActiveLocked() error {
 	// Put even though the object is sealed and durable — harmless; a retried
 	// Put dedups via Has.
 	return a.f.Close()
+}
+
+// WriteBatch stores every object the iterator yields, fsyncing once at the
+// end (when WithSync is enabled): on return, all yielded objects are durable.
+// Unlike diskstore's WriteBatch it is NOT atomic — a crash or iterator error
+// can leave a valid prefix stored. In a content-addressed store that prefix
+// is harmless: identical re-pushed content deduplicates. Objects repeated
+// within the batch, or already present, are written once.
+func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
+	seen := make(map[key.Key]struct{})
+	for obj, err := range seq {
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[obj.Key]; dup {
+			continue
+		}
+		seen[obj.Key] = struct{}{}
+		has, err := s.Has(obj.Key)
+		if err != nil {
+			return fmt.Errorf("exists (%s): %w", obj.Key, err)
+		}
+		if has {
+			continue
+		}
+		rec, err := encodeRecord(obj.Key, obj.Data)
+		if err != nil {
+			return err
+		}
+		if err := s.append(obj.Key, rec, false); err != nil {
+			return err
+		}
+	}
+	return s.syncActive()
 }
 
 // Put stores a single object under k, deduplicating against existing content.

@@ -3,6 +3,8 @@ package packstore
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"sync"
@@ -436,6 +438,71 @@ func TestConcurrentRotationReads(t *testing.T) {
 		data, err := s.Get(o.Key)
 		if err != nil || !bytes.Equal(data, o.Data) {
 			t.Fatalf("Get(%s) after rotations: %v", o.Key, err)
+		}
+	}
+}
+
+func objSeq(objs []Object, failAfter int) iter.Seq2[Object, error] {
+	return func(yield func(Object, error) bool) {
+		for i, o := range objs {
+			if failAfter >= 0 && i == failAfter {
+				yield(Object{}, fmt.Errorf("synthetic iterator error"))
+				return
+			}
+			if !yield(o, nil) {
+				return
+			}
+		}
+	}
+}
+
+func TestWriteBatchStoresAll(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	objs := testObjects(t, 100)
+	// Duplicate some objects within the batch; they must be written once.
+	batch := append(append([]Object{}, objs...), objs[:10]...)
+	if err := s.WriteBatch(objSeq(batch, -1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s): %v", o.Key, err)
+		}
+	}
+}
+
+func TestWriteBatchIteratorError(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	objs := testObjects(t, 10)
+	err := s.WriteBatch(objSeq(objs, 5))
+	if err == nil || err.Error() != "synthetic iterator error" {
+		t.Fatalf("err = %v", err)
+	}
+	// The already-appended prefix may remain (documented packstore semantics:
+	// durable-on-return, not atomic; valid CAS objects are harmless).
+	for _, o := range objs[:5] {
+		if has, _ := s.Has(o.Key); !has {
+			t.Fatalf("prefix object %s lost", o.Key)
+		}
+	}
+}
+
+func TestWriteBatchRotates(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(16<<10))
+	objs := testObjects(t, 100)
+	if err := s.WriteBatch(objSeq(objs, -1)); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
+	if len(segs) == 0 {
+		t.Fatal("expected at least one sealed segment")
+	}
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s): %v", o.Key, err)
 		}
 	}
 }
