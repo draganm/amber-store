@@ -155,7 +155,7 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 		return err
 	}
 
-	store, err := packstore.Open(cfg.store,
+	store, err := packstore.Open(filepath.Join(cfg.store, "packstore"),
 		packstore.WithSegmentSize(cfg.segmentSize),
 		packstore.WithSync(cfg.sync),
 	)

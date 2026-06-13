@@ -160,7 +160,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 	defer closeIdentity()
 
-	store, err := packstore.Open(cfg.store, packstore.WithSync(cfg.sync))
+	store, err := packstore.Open(filepath.Join(cfg.store, "packstore"), packstore.WithSync(cfg.sync))
 	if err != nil {
 		return err
 	}
