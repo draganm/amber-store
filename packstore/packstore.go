@@ -338,12 +338,47 @@ func (s *Store) setFailed(err error) {
 	s.mu.Unlock()
 }
 
-// sealActiveLocked seals the active segment: footer, fsync, rename to .seg,
-// directory fsync, mmap. Called under appendMu. Implemented in Task 7; until
-// then it is a stub that never triggers (tests use the default 256 MiB
-// threshold).
+// sealActiveLocked seals the active segment: build the footer from the
+// in-RAM index (no body re-read), append it, fsync, rename to .seg, fsync the
+// directory, and swap in the mmap'd sealed segment. Called under appendMu.
 func (s *Store) sealActiveLocked() error {
-	return errors.New("packstore: sealing not implemented yet")
+	a := s.active
+	if a == nil || len(a.index) == 0 {
+		return nil
+	}
+	entries := make([]indexEntry, 0, len(a.index))
+	for k, loc := range a.index {
+		entries = append(entries, indexEntry{k: k, off: uint64(loc.off), slen: loc.slen})
+	}
+	footer, err := buildFooter(a.size, entries)
+	if err != nil {
+		return err
+	}
+	if _, err := a.f.WriteAt(footer, a.size); err != nil {
+		return err
+	}
+	if err := a.f.Sync(); err != nil {
+		return err
+	}
+	if err := a.f.Close(); err != nil {
+		return err
+	}
+	sealedPath := strings.TrimSuffix(a.path, ".active")
+	if err := os.Rename(a.path, sealedPath); err != nil {
+		return err
+	}
+	if err := s.dirF.Sync(); err != nil {
+		return err
+	}
+	seg, err := openSealed(sealedPath, a.id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.sealed = append(s.sealed, seg)
+	s.active = nil
+	s.mu.Unlock()
+	return nil
 }
 
 // Put stores a single object under k, deduplicating against existing content.

@@ -258,3 +258,140 @@ func TestConcurrentPutGetHas(t *testing.T) {
 		}
 	}
 }
+
+func TestRotationSealsSegments(t *testing.T) {
+	dir := t.TempDir()
+	// Tiny threshold + incompressible payloads: every record (~2 KB stored)
+	// crosses 1024 bytes, so every Put seals a segment. (testObjects would
+	// not work here: its compressible payloads store as ~76-byte records.)
+	s := openStore(t, dir, WithSegmentSize(1024))
+	var objs []Object
+	for i := 0; i < 30; i++ {
+		objs = append(objs, blobObj(t, append(incompressible(2000), byte(i), byte(i>>8))))
+	}
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segs, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
+	if len(segs) != 30 {
+		t.Fatalf("%d sealed segments, want 30", len(segs))
+	}
+	// All objects must be served from sealed segments.
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) from sealed: %v", o.Key, err)
+		}
+	}
+	// And survive a reopen.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openStore(t, dir)
+	for _, o := range objs {
+		data, err := s2.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
+		}
+	}
+}
+
+func TestRotationMidStreamKeepsAllObjects(t *testing.T) {
+	// Mixed compressible/incompressible objects across several rotations:
+	// every object must remain reachable from whichever segment it landed in.
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(8<<10))
+	objs := testObjects(t, 100)
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range objs {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s): %v", o.Key, err)
+		}
+	}
+}
+
+func TestCrashBetweenFooterAndRename(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir)
+	objs := testObjects(t, 10)
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the crash window: append a valid footer to the .active file
+	// but do not rename it.
+	actives, _ := filepath.Glob(filepath.Join(dir, "*.seg.active"))
+	res, err := scanActive(actives[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]indexEntry, 0, len(res.index))
+	for k, loc := range res.index {
+		entries = append(entries, indexEntry{k: k, off: uint64(loc.off), slen: loc.slen})
+	}
+	footer, err := buildFooter(res.size, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(actives[0], os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(footer); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Open must complete the rename and serve everything from the sealed file.
+	s2 := openStore(t, dir)
+	for _, o := range objs {
+		data, err := s2.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s): %v", o.Key, err)
+		}
+	}
+	segs, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
+	actives, _ = filepath.Glob(filepath.Join(dir, "*.seg.active"))
+	if len(segs) != 1 || len(actives) != 0 {
+		t.Fatalf("segs=%v actives=%v", segs, actives)
+	}
+}
+
+func TestOpenFailsOnCorruptSealedSegment(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(1))
+	o := blobObj(t, incompressible(500))
+	if err := s.Put(o.Key, o.Data); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
+	if len(segs) != 1 {
+		t.Fatalf("segs=%v", segs)
+	}
+	b, err := os.ReadFile(segs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[len(b)-1] ^= 0xFF // trailer magic
+	if err := os.WriteFile(segs[0], b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open = %v, want ErrCorrupt", err)
+	}
+}
