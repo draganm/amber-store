@@ -2932,6 +2932,7 @@ import (
 const DefaultBatchSize = 16 << 20 // 16 MiB
 
 // WriteStats summarizes one WriteParallel run.
+// On a non-nil error, the stats reflect the work done before the abort.
 type WriteStats struct {
 	Stored      int   // objects newly written
 	Deduped     int   // objects skipped (already present, or duplicated in the stream)
@@ -3002,6 +3003,12 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 	}
 
 	err := eg.Wait()
+	if err != nil && stored.Load() > 0 {
+		// Mirror WriteBatch's error-path contract: records appended before
+		// the error are Has-visible, so they must not stay non-durable.
+		// Best-effort; an fsync failure poisons the store via setFailed.
+		s.syncActive()
+	}
 	return WriteStats{
 		Stored:      int(stored.Load()),
 		Deduped:     int(deduped.Load()),
@@ -3012,8 +3019,9 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 // runWriter consumes objects, encoding (compressing, optionally verifying)
 // them concurrently with its siblings and appending them to the store. It
 // fsyncs after batchSize appended bytes and once more when the channel
-// closes. On ctx cancellation it returns without a final fsync (the run is
-// being aborted; partial appends are safe in a content-addressed store).
+// closes. On ctx cancellation it returns without flushing; WriteParallel
+// issues a final best-effort fsync for the whole run's appends (the segment
+// file is shared, so one sync covers every worker).
 func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int, verify bool, stored, deduped, bytesStored *atomic.Int64) error {
 	pending := 0
 	flush := func() error {

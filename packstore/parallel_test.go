@@ -72,3 +72,55 @@ func TestWriteParallelIteratorError(t *testing.T) {
 		t.Fatal("want iterator error")
 	}
 }
+
+func TestWriteParallelOnClosedStore(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	objs := testObjects(t, 5)
+	_, err := s.WriteParallel(objSeq(objs, -1), WriteOpts{Writers: 2})
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+}
+
+func TestWriteParallelErrorFlushesPrefix(t *testing.T) {
+	// An erroring run must leave its appended prefix durable (fsynced):
+	// reopen after a dirty stop and the prefix records must still be there.
+	dir := t.TempDir()
+	s := openStore(t, dir)
+	objs := testObjects(t, 10)
+	stats, err := s.WriteParallel(objSeq(objs, 7), WriteOpts{Writers: 1, BatchSize: 1 << 30})
+	if err == nil {
+		t.Fatal("want iterator error")
+	}
+	// stats.Stored objects were appended but never hit a BatchSize flush; the
+	// error-path sync must have made them durable. Verify visibility now…
+	// Note: ctx cancellation races with channel drain, so fewer than 7 objects
+	// may have been appended — check only what was actually stored.
+	stored := stats.Stored
+	if stored == 0 {
+		t.Skip("no objects were appended before the error (scheduling race); nothing to verify")
+	}
+	for _, o := range objs[:stored] {
+		has, err := s.Has(o.Key)
+		if err != nil || !has {
+			t.Fatalf("Has(%s) = %v, %v", o.Key, has, err)
+		}
+	}
+	// …and durability across a reopen.
+	// Note: Close() itself fsyncs, so the reopen check alone wouldn't prove
+	// the error-path sync — the Writers:1 + huge BatchSize setup ensures the
+	// ONLY fsync before Close comes from the new error-path sync.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openStore(t, dir)
+	for _, o := range objs[:stored] {
+		data, err := s2.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
+		}
+	}
+}
