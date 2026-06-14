@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
@@ -68,7 +69,20 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 	if err != nil {
 		return PushStats{}, fmt.Errorf("walking reachable objects: %w", err)
 	}
-	checkBatches := Batches(keys, opts.batchBytes(), PushSizer(store))
+	// checkBatches := Batches(keys, opts.batchBytes(), PushSizer(store))
+
+	checkBatches := [][]key.Key{}
+
+	toDo := keys
+
+	for len(toDo) > 4096 {
+		checkBatches = append(checkBatches, toDo[:4096])
+		toDo = toDo[4096:]
+	}
+	if len(toDo) > 0 {
+		checkBatches = append(checkBatches, toDo)
+	}
+
 	checkers, uploaders := splitJobs(opts.jobs())
 
 	var mu sync.Mutex
@@ -145,20 +159,30 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 				case <-gctx.Done():
 					return gctx.Err()
 				}
-				objs := make([]fstree.Object, 0, len(batch))
-				var pushedBytes int64
-				for _, k := range batch {
-					data, err := store.Get(k)
-					if err != nil {
-						return fmt.Errorf("reading %s: %w", k, err)
-					}
-					objs = append(objs, fstree.Object{Key: k, Bytes: data})
-					pushedBytes += int64(len(data))
+				objs := make([]fstree.Object, len(batch))
+				var pushedBytes atomic.Int64
+
+				eg := &errgroup.Group{}
+				eg.SetLimit(50)
+				for i, k := range batch {
+					eg.Go(func() error {
+						data, err := store.Get(k)
+						if err != nil {
+							return fmt.Errorf("reading %s: %w", k, err)
+						}
+						objs[i] = fstree.Object{Key: k, Bytes: data}
+						pushedBytes.Add(int64(len(data)))
+						return nil
+					})
+				}
+				err := eg.Wait()
+				if err != nil {
+					return err
 				}
 				if _, err := rc.PushPack(gctx, objs); err != nil {
 					return err
 				}
-				settle(len(batch), len(batch), pushedBytes)
+				settle(len(batch), len(batch), pushedBytes.Load())
 			}
 		})
 	}
