@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
 	"github.com/zeebo/blake3"
 )
@@ -55,23 +56,23 @@ func (g *sealedSegment) verify(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rec, err := parseRecord(g.mm[off:g.fv.bodyLen])
+		rec, err := amberpack.ParseRecord(g.mm[off:g.fv.bodyLen])
 		if err != nil {
 			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
 		}
-		payload, err := decodePayload(rec.flags, rec.ulen, g.mm[off+recHeaderSize:off+recHeaderSize+int64(rec.slen)])
+		payload, err := amberpack.DecodePayload(rec.Flags, rec.Ulen, g.mm[off+amberpack.RecHeaderSize:off+amberpack.RecHeaderSize+int64(rec.Slen)])
 		if err != nil {
 			return fmt.Errorf("%s: record at offset %d: %w", g.path, off, err)
 		}
-		if err := verifyObject(Object{Key: rec.key, Data: payload}); err != nil {
+		if err := verifyObject(Object{Key: rec.Key, Data: payload}); err != nil {
 			// Scrub findings are corruption: both sentinels match via errors.Is.
 			return fmt.Errorf("%w: %s: record at offset %d: %w", ErrCorrupt, g.path, off, err)
 		}
-		if !g.fv.filter.Contains(filterKey(rec.key)) {
-			return fmt.Errorf("%w: %s: filter missing key %s (offset %d)", ErrCorrupt, g.path, rec.key, off)
+		if !g.fv.filter.Contains(filterKey(rec.Key)) {
+			return fmt.Errorf("%w: %s: filter missing key %s (offset %d)", ErrCorrupt, g.path, rec.Key, off)
 		}
-		entries = append(entries, indexEntry{k: rec.key, off: uint64(off), slen: rec.slen})
-		off += recHeaderSize + int64(rec.slen)
+		entries = append(entries, indexEntry{k: rec.Key, off: uint64(off), slen: rec.Slen})
+		off += amberpack.RecHeaderSize + int64(rec.Slen)
 	}
 	// Defensive only: parseRecord bounds every record against bodyLen, so the
 	// walk can only exit exactly at bodyLen or via an error above.

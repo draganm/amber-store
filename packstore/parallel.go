@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sync/errgroup"
 )
@@ -141,7 +142,7 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 					return err
 				}
 			}
-			rec, err := encodeRecord(obj.Key, obj.Data)
+			rec, err := amberpack.EncodeRecord(obj.Key, obj.Data)
 			if err != nil {
 				return err
 			}

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/draganm/amber-store/amberpack"
 )
 
 func openStore(t *testing.T, dir string, opts ...Option) *Store {
@@ -77,7 +79,7 @@ func TestPutIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := encodeRecord(o.Key, o.Data)
+	rec, err := amberpack.EncodeRecord(o.Key, o.Data)
 	if err != nil {
 		t.Fatal(err)
 	}

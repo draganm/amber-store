@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/draganm/amber-store/amberpack"
 )
 
 // sealedStore builds a store with sealed segments and returns its dir.
@@ -66,11 +68,11 @@ func TestVerifyDetectsWrongIndexEntry(t *testing.T) {
 	body = append(body, magicHeader...)
 	var entries []indexEntry
 	for _, o := range objs {
-		rec, err := encodeRecord(o.Key, o.Data)
+		rec, err := amberpack.EncodeRecord(o.Key, o.Data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - recHeaderSize)})
+		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - amberpack.RecHeaderSize)})
 		body = append(body, rec...)
 	}
 	entries[3].off = entries[2].off // lie
@@ -146,11 +148,11 @@ func TestVerifyDetectsKeyCountMismatch(t *testing.T) {
 	body = append(body, magicHeader...)
 	var entries []indexEntry
 	for _, o := range objs {
-		rec, err := encodeRecord(o.Key, o.Data)
+		rec, err := amberpack.EncodeRecord(o.Key, o.Data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - recHeaderSize)})
+		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - amberpack.RecHeaderSize)})
 		body = append(body, rec...)
 	}
 	ghost := blobObj(t, []byte("never written to the body"))
@@ -182,11 +184,11 @@ func TestVerifyScrubHashMismatchIsCorrupt(t *testing.T) {
 		if i == 1 {
 			data = imposter.Data // encoded under good[1].Key: CRC fine, hash wrong
 		}
-		rec, err := encodeRecord(o.Key, data)
+		rec, err := amberpack.EncodeRecord(o.Key, data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - recHeaderSize)})
+		entries = append(entries, indexEntry{k: o.Key, off: uint64(len(body)), slen: uint32(len(rec) - amberpack.RecHeaderSize)})
 		body = append(body, rec...)
 	}
 	footer, err := buildFooter(int64(len(body)), entries)

@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	"github.com/FastFilter/xorfilter"
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )
@@ -365,14 +366,14 @@ func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
 	}
 	bodyLen := uint64(g.fv.bodyLen)
 	if off < uint64(len(magicHeader)) || off > bodyLen ||
-		uint64(recHeaderSize)+uint64(slen) > bodyLen-off {
+		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
 		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
 	}
-	end := off + recHeaderSize + uint64(slen)
-	h := g.mm[off : off+recHeaderSize]
+	end := off + amberpack.RecHeaderSize + uint64(slen)
+	h := g.mm[off : off+amberpack.RecHeaderSize]
 	flags := h[33]
 	ulen := binary.BigEndian.Uint32(h[34:38])
-	data, err := decodePayload(flags, ulen, g.mm[off+recHeaderSize:end])
+	data, err := amberpack.DecodePayload(flags, ulen, g.mm[off+amberpack.RecHeaderSize:end])
 	if err != nil {
 		return nil, false, fmt.Errorf("%s: %w", g.path, err)
 	}

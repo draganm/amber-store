@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
 )
 
@@ -52,12 +53,12 @@ func scanActive(path string) (scanResult, error) {
 			// ordering, and truncating it only un-seals, never loses records.
 			break
 		}
-		rec, err := parseRecord(b[off:])
+		rec, err := amberpack.ParseRecord(b[off:])
 		if err != nil {
 			break // invalid or truncated: everything from off on is garbage
 		}
-		res.index[rec.key] = activeLoc{off: off, flags: rec.flags, ulen: rec.ulen, slen: rec.slen}
-		off += recHeaderSize + int64(rec.slen)
+		res.index[rec.Key] = activeLoc{off: off, flags: rec.Flags, ulen: rec.Ulen, slen: rec.Slen}
+		off += amberpack.RecHeaderSize + int64(rec.Slen)
 	}
 	res.size = off
 	return res, nil

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )
@@ -430,7 +431,7 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 		if has {
 			continue
 		}
-		rec, err := encodeRecord(obj.Key, obj.Data)
+		rec, err := amberpack.EncodeRecord(obj.Key, obj.Data)
 		if err != nil {
 			return fail(err)
 		}
@@ -459,7 +460,7 @@ func (s *Store) Put(k key.Key, data []byte) error {
 	if has {
 		return nil
 	}
-	rec, err := encodeRecord(k, data)
+	rec, err := amberpack.EncodeRecord(k, data)
 	if err != nil {
 		return err
 	}
@@ -477,10 +478,10 @@ func (s *Store) Get(k key.Key) ([]byte, error) {
 	if s.active != nil {
 		if loc, ok := s.active.index[k]; ok {
 			stored := make([]byte, loc.slen)
-			if _, err := s.active.f.ReadAt(stored, loc.off+recHeaderSize); err != nil {
+			if _, err := s.active.f.ReadAt(stored, loc.off+amberpack.RecHeaderSize); err != nil {
 				return nil, err
 			}
-			return decodePayload(loc.flags, loc.ulen, stored)
+			return amberpack.DecodePayload(loc.flags, loc.ulen, stored)
 		}
 	}
 	for i := len(s.sealed) - 1; i >= 0; i-- {
