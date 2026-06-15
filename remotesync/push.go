@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
@@ -42,15 +41,6 @@ func (o Opts) jobs() int {
 	return o.Jobs
 }
 
-// splitJobs divides the jobs budget between negotiation and upload workers
-// so total in-flight requests stay <= jobs. jobs=1 floors at 1+1, the
-// minimum for a pipeline and the one documented budget overshoot.
-func splitJobs(jobs int) (checkers, uploaders int) {
-	checkers = max(1, jobs/4)
-	uploaders = max(1, jobs-checkers)
-	return checkers, uploaders
-}
-
 // PushStats summarizes one Push.
 type PushStats struct {
 	ObjectsTotal  int   // reachable objects under the root
@@ -58,137 +48,103 @@ type PushStats struct {
 	BytesPushed   int64 // payload bytes of pushed objects
 }
 
-// Push uploads every object reachable from root that the server is missing,
-// as a three-stage pipeline: checkers negotiate each byte-balanced batch of
-// the local reachable set against the server, a re-batcher coalesces the
-// sparse missing subsets into full upload batches, and uploaders send each
-// batch as one amberpack. Negotiation and upload overlap, with the jobs
-// budget split between the two pools. Idempotent: a re-run pushes nothing.
+// Push uploads every object reachable from root that the server is missing, in
+// two phases: a whole-set have/want negotiation — the reachable key list is
+// checked against the server in parallel chunks — followed by a parallel upload
+// of byte-balanced packs holding exactly the missing objects. Collecting the
+// whole missing set before batching coalesces sparse misses into full packs.
+// Idempotent: a re-run pushes nothing.
 func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PushStats, error) {
 	keys, err := fstree.ReachableKeys(root, store.Get)
 	if err != nil {
 		return PushStats{}, fmt.Errorf("walking reachable objects: %w", err)
 	}
-	// checkBatches := Batches(keys, opts.batchBytes(), PushSizer(store))
-
-	checkBatches := [][]key.Key{}
-
-	toDo := keys
-
-	for len(toDo) > 4096 {
-		checkBatches = append(checkBatches, toDo[:4096])
-		toDo = toDo[4096:]
-	}
-	if len(toDo) > 0 {
-		checkBatches = append(checkBatches, toDo)
-	}
-
-	checkers, uploaders := splitJobs(opts.jobs())
+	stats := PushStats{ObjectsTotal: len(keys)}
 
 	var mu sync.Mutex
-	stats := PushStats{ObjectsTotal: len(keys)}
 	done := 0
-	// settle records n settled keys (pushed of them uploaded, totaling
-	// pushedBytes) and reports progress outside the lock so a slow callback
-	// (e.g. an HTTP flush) cannot stall the workers; values are monotonic
-	// snapshots but may arrive out of order under contention.
+	// settle records n newly-settled keys (pushed of which were uploaded,
+	// totaling pushedBytes) and reports progress outside the lock so a slow
+	// callback cannot stall the workers.
 	settle := func(n, pushed int, pushedBytes int64) {
 		mu.Lock()
 		done += n
 		stats.ObjectsPushed += pushed
 		stats.BytesPushed += pushedBytes
-		progressDone, progressTotal := done, stats.ObjectsTotal
+		progressDone := done
 		mu.Unlock()
 		if opts.Progress != nil {
-			opts.Progress(progressDone, progressTotal)
+			opts.Progress(progressDone, len(keys))
 		}
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
-	missingCh := make(chan []key.Key, 256)
-	uploadCh := make(chan []key.Key, 256)
-
-	// Checkers: negotiate each check batch; keys the server already has
-	// settle immediately, missing ones flow to the re-batcher. The
-	// companion closes missingCh once every checker is done.
-	g.Go(func() error {
-		cg, cctx := errgroup.WithContext(gctx)
-		cg.SetLimit(checkers)
-		for _, batch := range checkBatches {
-			cg.Go(func() error {
-				missing, err := rc.Missing(cctx, batch)
-				if err != nil {
-					return err
-				}
-				// Clamped so a server replying with keys outside the queried
-				// batch cannot drive progress backwards.
-				settle(max(0, len(batch)-len(missing)), 0, 0)
-				if len(missing) == 0 {
-					return nil
-				}
-				select {
-				case missingCh <- missing:
-					return nil
-				case <-cctx.Done():
-					return cctx.Err()
-				}
-			})
-		}
-		err := cg.Wait()
-		close(missingCh)
-		return err
-	})
-
-	// Re-batcher: coalesce sparse missing subsets into full upload batches.
-	g.Go(func() error {
-		defer close(uploadCh)
-		return rebatch(gctx, missingCh, uploadCh, opts.batchBytes(), PushSizer(store))
-	})
-
-	// Uploaders: long-lived workers draining uploadCh.
-	for range uploaders {
-		g.Go(func() error {
-			for {
-				var batch []key.Key
-				var ok bool
-				select {
-				case batch, ok = <-uploadCh:
-					if !ok {
-						return nil
-					}
-				case <-gctx.Done():
-					return gctx.Err()
-				}
-				objs := make([]fstree.Object, len(batch))
-				var pushedBytes atomic.Int64
-
-				eg := &errgroup.Group{}
-				eg.SetLimit(50)
-				for i, k := range batch {
-					eg.Go(func() error {
-						data, err := store.Get(k)
-						if err != nil {
-							return fmt.Errorf("reading %s: %w", k, err)
-						}
-						objs[i] = fstree.Object{Key: k, Bytes: data}
-						pushedBytes.Add(int64(len(data)))
-						return nil
-					})
-				}
-				err := eg.Wait()
-				if err != nil {
-					return err
-				}
-				if _, err := rc.PushPack(gctx, objs); err != nil {
-					return err
-				}
-				settle(len(batch), len(batch), pushedBytes.Load())
+	// Phase 1: negotiate the whole reachable set against the server in parallel
+	// chunks; keys the server already has settle immediately, the rest are
+	// collected into the missing set.
+	var missMu sync.Mutex
+	var missing []key.Key
+	neg, negCtx := errgroup.WithContext(ctx)
+	neg.SetLimit(opts.jobs())
+	for _, chunk := range checkChunks(keys) {
+		neg.Go(func() error {
+			miss, err := rc.Missing(negCtx, chunk)
+			if err != nil {
+				return err
 			}
+			// Clamped so a server replying with keys outside the queried chunk
+			// cannot drive progress backwards.
+			settle(max(0, len(chunk)-len(miss)), 0, 0)
+			if len(miss) > 0 {
+				missMu.Lock()
+				missing = append(missing, miss...)
+				missMu.Unlock()
+			}
+			return nil
 		})
 	}
+	if err := neg.Wait(); err != nil {
+		return stats, err
+	}
 
-	if err := g.Wait(); err != nil {
+	// Phase 2: upload byte-balanced packs holding exactly the missing objects.
+	up, upCtx := errgroup.WithContext(ctx)
+	up.SetLimit(opts.jobs())
+	for _, batch := range Batches(missing, opts.batchBytes(), PushSizer(store)) {
+		up.Go(func() error {
+			objs := make([]fstree.Object, len(batch))
+			var pushedBytes int64
+			for i, k := range batch {
+				data, err := store.Get(k)
+				if err != nil {
+					return fmt.Errorf("reading %s: %w", k, err)
+				}
+				objs[i] = fstree.Object{Key: k, Bytes: data}
+				pushedBytes += int64(len(data))
+			}
+			if _, err := rc.PushPack(upCtx, objs); err != nil {
+				return err
+			}
+			settle(len(batch), len(batch), pushedBytes)
+			return nil
+		})
+	}
+	if err := up.Wait(); err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+// checkChunks splits the reachable key list into have/want request bodies, each
+// at most maxBatchKeys keys so the request body stays well under the server's
+// cap (maxBatchKeys * key.Size bytes).
+func checkChunks(keys []key.Key) [][]key.Key {
+	var chunks [][]key.Key
+	for len(keys) > maxBatchKeys {
+		chunks = append(chunks, keys[:maxBatchKeys])
+		keys = keys[maxBatchKeys:]
+	}
+	if len(keys) > 0 {
+		chunks = append(chunks, keys)
+	}
+	return chunks
 }
