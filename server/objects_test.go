@@ -265,6 +265,30 @@ func TestPostObjectsReplayedNonceRejected(t *testing.T) {
 	}
 }
 
+func TestPushThenSetRefWaitsForProcessing(t *testing.T) {
+	ts := newTestServer(t)
+
+	blob, err := fstree.EncodeBlob([]byte("root blob for barrier test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := blob.Key
+
+	// Async push: returns 200 once durably staged, BEFORE processing.
+	if code, _ := ts.signedDo(t, ts.client, "POST",
+		"/v1/objects?ref=site&root="+root.String(), packOf(t, blob)); code != 200 {
+		t.Fatalf("push status = %d, want 200", code)
+	}
+
+	// Immediately set the ref — no WaitFor here. putRef's internal barrier must
+	// wait for the pushed pack to be processed before CheckComplete, so this is
+	// deterministically 204, never a race-induced 404.
+	if code, body := ts.signedDo(t, ts.client, "PUT", "/v1/refs?name=site",
+		signedRef(t, "site", root[:], ts.client)); code != 204 {
+		t.Fatalf("set ref status = %d, want 204; body=%s", code, body)
+	}
+}
+
 func TestObjectsGetAbsentKeyIs404BeforeStreaming(t *testing.T) {
 	ts := newTestServer(t)
 	absent, err := fstree.EncodeBlob([]byte("never stored"))
