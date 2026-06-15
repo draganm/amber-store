@@ -41,26 +41,28 @@ Today the record/footer/filter/segment code lives in `packstore`, and
 `amberpack` is a *separate* zstd-stream format. We unify on `packstore`'s record
 framing and split the packages by responsibility.
 
-**`amberpack` owns the format** (moved out of `packstore`):
+**`amberpack` owns the record-level format** (the framing shared by the on-disk
+store and the wire):
 
-- **Record codec** — `encodeRecord` / `parseRecord` / `decodePayload`: per-record
+- **Record codec** — `EncodeRecord` / `ParseRecord` / `DecodePayload`: per-record
   CRC32-C, store-if-smaller per-record zstd, 32-byte content-addressed key. All
-  integers big-endian. (from `packstore/record.go`)
-- **Footer** — `buildFooter` / `parseFooter`, fanout index on the last key byte,
-  binary-fuse-16 filter. (from `packstore/footer.go`)
-- **Sealed-segment reader** — parse a footer'd image, `get` / `has`. (from
-  `packstore/footer.go`)
+  integers big-endian. (Extracted from `packstore/record.go` in Phase 1a.)
 - **Pack stream (new wire type)** — a `Writer` / `Reader` over
-  `header + records + end-marker`: a segment body *without* a footer, terminated
+  `header + records + end-marker`: a record stream *without* a footer, terminated
   by an explicit end marker so a truncated stream is detected (not silently
   treated as a clean EOF). The `Reader` yields `fstree.Object`s and validates
   framing, CRC, and key canonicality; it does **not** verify the payload hash —
   that stays in the storage path (`WriteParallel(Verify:true)`).
 
-**`packstore` keeps the store** — directory, flock, active-segment append,
-rotation/sealing, recovery tail-scan, concurrency, scrub/`Verify` — and calls
-`amberpack` for every format concern. Relationship of the three framings, all
-sharing one record codec:
+**`packstore` keeps the store *and* its on-disk segment format** — the footer
+(fanout index + binary-fuse-16 filter), the mmap'd sealed-segment reader,
+directory/flock, active-segment append, rotation/sealing, recovery tail-scan,
+concurrency, and scrub/`Verify` — building on `amberpack`'s record codec. The
+footer is an on-disk random-access indexing concern the wire never uses, so it
+stays in `packstore` rather than moving into the format library. (**Revised
+2026-06-15:** the original design had `amberpack` own the footer and
+sealed-reader too; that move was dropped as risky, store-internal churn with no
+wire benefit.) Relationship of the three framings, all sharing one record codec:
 
 ```
 active segment   header + records                 (in-progress; tail-scan finds the end)
@@ -216,12 +218,15 @@ Reused unchanged: byte-balanced `Batches` + `PushSizer` / `PullSizer`,
 
 Sequenced so each phase is independently testable:
 
-1. **amberpack refactor** — move record/footer/filter/sealed-reader from
-   `packstore` into `amberpack`; add the pack `Writer`/`Reader`; `packstore`
-   builds on `amberpack`; delete `AMBERPK`. Internal; existing `packstore` and
-   `amberpack` tests (re-pointed) keep it honest.
-2. **Wire format swap** — `POST /v1/objects` and `POST /v1/objects/get` use
-   amberpack packs. Small: both ends already call `amberpack.NewWriter/Reader`.
+1. **amberpack record-codec extraction (Phase 1a — DONE 2026-06-15).** Move the
+   record codec from `packstore` into `amberpack` (exported); `packstore` builds
+   on it. Behavior-preserving; existing tests (re-pointed) keep it honest. (The
+   footer/sealed-reader move originally folded in here was dropped — see the
+   unified-pack-format section.)
+2. **Wire pack format (Phase 2).** Add the `amberpack` pack `Writer`/`Reader`
+   (`header + records + end-marker`, no footer) on the record codec; delete the
+   old `AMBERPK` stream; swap the `POST /v1/objects` and `POST /v1/objects/get`
+   bodies; update `server`/`remoteclient` and their tests.
 3. **Parallel reachable walk** — parallelize `fstree.ReachableKeys`; update its
    contract and callers.
 4. **Negotiation redesign** — add `POST /v1/objects/reachable` (server handler +
@@ -237,6 +242,12 @@ Sequenced so each phase is independently testable:
   sizing/rotation. Cost: the receiver decompresses then recompresses each
   payload, and per-record (not whole-stream) zstd compresses many tiny nodes
   slightly worse. Accepted for one unified format and an unchanged receive path.
+- **The footer/sealed-reader stays in `packstore`.** The originally-spec'd move
+  of the on-disk footer (fanout index + fuse filter + mmap'd sealed reader) into
+  `amberpack` was dropped (2026-06-15): it is the most safety-critical packstore
+  code, is 100% store-internal, and the wire never uses a footer — risky churn
+  with no wire benefit. `amberpack` owns the record codec and the wire pack;
+  `packstore` owns the on-disk segment format on top of it.
 - **Negotiation is whole-set, push is phased.** Check the entire reachable set
   (chunked, parallel) before uploading; do not overlap check and upload. Simpler
   than the current pipeline; the check is cheap next to payload transfer.
