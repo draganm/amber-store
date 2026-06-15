@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/httpsig"
@@ -39,6 +40,7 @@ type testServer struct {
 	srv      *httptest.Server
 	store    *packstore.Store
 	refs     *refstore.Store
+	inbox    *inbox.Inbox
 	identity ssh.Signer
 	client   ssh.Signer
 	admin    ssh.Signer
@@ -57,6 +59,11 @@ func newTestServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	identity, client, admin := testSigner(t), testSigner(t), testSigner(t)
 	content := string(ssh.MarshalAuthorizedKey(client.PublicKey())) +
 		"admin " + string(ssh.MarshalAuthorizedKey(admin.PublicKey()))
@@ -69,10 +76,11 @@ func newTestServer(t *testing.T) *testServer {
 		Refs:     refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
+		Inbox:    ib,
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &testServer{srv: srv, store: store, refs: refs, identity: identity, client: client, admin: admin}
+	return &testServer{srv: srv, store: store, refs: refs, inbox: ib, identity: identity, client: client, admin: admin}
 }
 
 // signedDo sends one signed request and returns status + body, verifying the

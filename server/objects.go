@@ -1,28 +1,21 @@
 package server
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/internal/keylist"
 	"github.com/draganm/amber-store/key"
-	"github.com/draganm/amber-store/packstore"
 	"github.com/zeebo/blake3"
+	"golang.org/x/crypto/ssh"
 )
-
-// uploadResponse mirrors the local daemon's ingest stats shape.
-type uploadResponse struct {
-	ObjectsStored  int   `json:"objects_stored"`
-	ObjectsDeduped int   `json:"objects_deduped"`
-	BytesStored    int64 `json:"bytes_stored"`
-}
 
 // postMissing answers the have/want negotiation: of the keys in the request
 // body, which does the server not have. Request and response bodies are raw
@@ -42,48 +35,61 @@ func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedR
 	h.signAndWrite(w, a.nonce, http.StatusOK, "application/octet-stream", keylist.Flatten(missing))
 }
 
-// postObjects decodes an amberpack stream, verifies each object's payload
-// against its key, and stores it — the same trust boundary as the local
-// daemon: nothing unverified is ever persisted.
-func (h *handler) postObjects(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	rd := amberpack.NewReader(bytes.NewReader(a.body))
-	seq := func(yield func(packstore.Object, error) bool) {
-		for o, err := range rd.All() {
-			if err != nil {
-				yield(packstore.Object{}, err)
-				return
-			}
-			if !yield(packstore.Object{Key: o.Key, Data: o.Bytes}, nil) {
-				return
-			}
-		}
-	}
-	stats, err := h.store.WriteParallel(seq, packstore.WriteOpts{Verify: true})
+// postObjects receives a pushed pack. It streams the body into the inbox while
+// hashing it, authenticates the request against that hash (the body is never
+// fully buffered, so a pack is bounded by disk, not memory), and — once the
+// pack is durably staged — returns 200. Processing into the store happens
+// asynchronously; setting the ref waits for it (refs.go).
+func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
+	rootHex := r.URL.Query().Get("root")
+	rootBytes, err := hex.DecodeString(rootHex)
 	if err != nil {
-		if errors.Is(err, amberpack.ErrMalformed) || errors.Is(err, packstore.ErrVerify) {
-			h.log.Warn("upload rejected", "error", err)
-			h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-		h.log.Error("upload failed", "error", err)
-		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+		h.signError(w, nil, http.StatusUnprocessableEntity, "invalid root query parameter: "+err.Error())
 		return
 	}
-	h.log.Info("upload complete",
-		"stored", stats.Stored,
-		"deduped", stats.Deduped,
-		"bytes_stored", stats.BytesStored,
-	)
-	body, err := json.Marshal(uploadResponse{
-		ObjectsStored:  stats.Stored,
-		ObjectsDeduped: stats.Deduped,
-		BytesStored:    stats.BytesStored,
-	})
+	root, err := key.Parse(rootBytes)
 	if err != nil {
-		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+		h.signError(w, nil, http.StatusUnprocessableEntity, "invalid root key: "+err.Error())
 		return
 	}
-	h.signAndWrite(w, a.nonce, http.StatusOK, "application/json", body)
+	meta := inbox.Meta{Ref: r.URL.Query().Get("ref"), Root: root[:], ReceivedAt: time.Now().UnixNano()}
+	tmp, bodyHash, n, err := h.inbox.Stage(meta, io.LimitReader(r.Body, h.maxBody+1))
+	if err != nil {
+		h.signError(w, nil, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n > h.maxBody {
+		h.inbox.Discard(tmp)
+		h.signError(w, nil, http.StatusRequestEntityTooLarge, "request body exceeds the server limit")
+		return
+	}
+	now := time.Now()
+	pub, nonce, err := httpsig.VerifyRequestHash(r, bodyHash, now, h.window)
+	if err != nil {
+		h.inbox.Discard(tmp)
+		h.log.Warn("request authentication failed", "error", err)
+		h.signError(w, nonce, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
+		h.inbox.Discard(tmp)
+		h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
+		h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
+		return
+	}
+	if _, ok := h.allow().Lookup(pub.Marshal()); !ok {
+		h.inbox.Discard(tmp)
+		h.log.Warn("key not allowed", "key", ssh.FingerprintSHA256(pub))
+		h.signError(w, nonce, http.StatusForbidden, "public key is not in the server allowlist")
+		return
+	}
+	if _, err := h.inbox.Commit(tmp, bodyHash, root); err != nil {
+		h.log.Error("inbox commit failed", "error", err)
+		h.signError(w, nonce, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.log.Info("pack accepted", "root", root, "bytes", n)
+	h.signAndWrite(w, nonce, http.StatusOK, "application/json", []byte(`{"accepted":true}`))
 }
 
 // postObjectsGet streams an amberpack of the requested keys. Existence is
