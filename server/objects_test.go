@@ -215,6 +215,56 @@ func TestPostObjectsStagesAndStores(t *testing.T) {
 	}
 }
 
+func TestPostObjectsRejectsUnlistedKey(t *testing.T) {
+	ts := newTestServer(t)
+	stranger := testSigner(t) // unlisted key, same as TestAuthRejections
+	o, err := fstree.EncodeBlob([]byte("from an unlisted key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _ := ts.signedDo(t, stranger, "POST", "/v1/objects?root="+o.Key.String(), packOf(t, o))
+	if code != 403 {
+		t.Fatalf("unlisted key push = %d, want 403", code)
+	}
+	// And it must not have been staged/stored.
+	ts.inbox.WaitFor(o.Key)
+	if has, _ := ts.store.Has(o.Key); has {
+		t.Fatalf("object from an unlisted key must not be stored")
+	}
+}
+
+func TestPostObjectsReplayedNonceRejected(t *testing.T) {
+	ts := newTestServer(t)
+	o, err := fstree.EncodeBlob([]byte("replayed pack push"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := packOf(t, o)
+	req, err := http.NewRequest("POST", ts.srv.URL+"/v1/objects?root="+o.Key.String(), bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := httpsig.SignRequest(req, ts.client, time.Now().UnixNano(), []byte("fixed-nonce-0123"), body); err != nil {
+		t.Fatal(err)
+	}
+	send := func() int {
+		r2 := req.Clone(req.Context())
+		r2.Body = io.NopCloser(bytes.NewReader(body))
+		resp, err := http.DefaultClient.Do(r2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := send(); code != 200 {
+		t.Fatalf("first send = %d, want 200", code)
+	}
+	if code := send(); code != 401 {
+		t.Fatalf("replay = %d, want 401", code)
+	}
+}
+
 func TestObjectsGetAbsentKeyIs404BeforeStreaming(t *testing.T) {
 	ts := newTestServer(t)
 	absent, err := fstree.EncodeBlob([]byte("never stored"))
