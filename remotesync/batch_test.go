@@ -1,12 +1,14 @@
 package remotesync_test
 
 import (
+	"bytes"
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/remotesync"
 )
 
@@ -47,6 +49,38 @@ func TestBatchesOversizedSingleItemGetsOwnBatch(t *testing.T) {
 	}
 }
 
+func TestPushSizerUsesStoredCompressedSize(t *testing.T) {
+	store, err := packstore.Open(filepath.Join(t.TempDir(), "s"), packstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// A highly compressible blob: its stored (zstd) record is far smaller than
+	// its raw payload. The push sizer balances batches by bytes on the wire, so
+	// it must report the stored compressed size, not the logical key length.
+	raw := bytes.Repeat([]byte("amber"), 4096) // 20480 bytes, very compressible
+	blob, err := fstree.EncodeBlob(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(blob.Key, blob.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := amberpack.EncodeRecord(blob.Key, blob.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStored := uint64(len(rec) - amberpack.RecHeaderSize)
+
+	size := remotesync.PushSizer(store)
+	if got := size(blob.Key); got != wantStored {
+		t.Fatalf("blob size = %d, want %d (stored compressed size)", got, wantStored)
+	}
+	if got := size(blob.Key); got >= blob.Key.Length() {
+		t.Fatalf("blob size %d not below logical length %d; compression not reflected", got, blob.Key.Length())
+	}
+}
+
 func TestPushSizerUsesActualSizeForNodes(t *testing.T) {
 	store, err := packstore.Open(filepath.Join(t.TempDir(), "s"), packstore.WithSync(false))
 	if err != nil {
@@ -64,13 +98,15 @@ func TestPushSizerUsesActualSizeForNodes(t *testing.T) {
 	if err := store.Put(fn.Key, fn.Bytes); err != nil {
 		t.Fatal(err)
 	}
-	size := remotesync.PushSizer(store)
-	if got := size(blob.Key); got != 4096 {
-		t.Fatalf("blob size = %d, want 4096 (from the key)", got)
+	// FileNode keys encode the logical file length, not the node's stored size;
+	// the push sizer must use the actual stored (post-compression) size.
+	rec, err := amberpack.EncodeRecord(fn.Key, fn.Bytes)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// FileNode keys encode the logical file length (4096), not the node's
-	// encoded size; the push sizer must use the actual stored size.
-	if got := size(fn.Key); got != uint64(len(fn.Bytes)) {
-		t.Fatalf("node size = %d, want %d (actual encoded size)", got, len(fn.Bytes))
+	wantStored := uint64(len(rec) - amberpack.RecHeaderSize)
+	size := remotesync.PushSizer(store)
+	if got := size(fn.Key); got != wantStored {
+		t.Fatalf("node size = %d, want %d (stored size)", got, wantStored)
 	}
 }

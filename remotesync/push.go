@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -107,21 +108,47 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 	}
 
 	// Phase 2: upload byte-balanced packs holding exactly the missing objects.
+	// readSlots bounds concurrent record reads across all upload workers: a pack
+	// assembling alone (while its peers upload) gets up to jobs()-way parallel
+	// reads — overlapping cold page faults — without letting total in-flight
+	// reads exceed jobs().
+	readSlots := make(chan struct{}, opts.jobs())
 	up, upCtx := errgroup.WithContext(ctx)
 	up.SetLimit(opts.jobs())
 	for _, batch := range Batches(missing, opts.batchBytes(), PushSizer(store)) {
 		up.Go(func() error {
-			objs := make([]fstree.Object, len(batch))
-			var pushedBytes int64
+			recs := make([][]byte, len(batch))
+			// Read the pack's records concurrently into their slots; each read
+			// holds a shared slot only while it runs. Distinct indices, so no
+			// lock is needed on recs.
+			rg, rgCtx := errgroup.WithContext(upCtx)
 			for i, k := range batch {
-				data, err := store.Get(k)
-				if err != nil {
-					return fmt.Errorf("reading %s: %w", k, err)
-				}
-				objs[i] = fstree.Object{Key: k, Bytes: data}
-				pushedBytes += int64(len(data))
+				rg.Go(func() error {
+					select {
+					case readSlots <- struct{}{}:
+					case <-rgCtx.Done():
+						return rgCtx.Err()
+					}
+					defer func() { <-readSlots }()
+					// Copy the on-disk record verbatim: it is wire-format-
+					// identical, so the push skips the decompress/recompress
+					// round trip.
+					rec, err := store.GetRecord(k)
+					if err != nil {
+						return fmt.Errorf("reading %s: %w", k, err)
+					}
+					recs[i] = rec
+					return nil
+				})
 			}
-			if err := rc.PushPack(upCtx, name, root, objs); err != nil {
+			if err := rg.Wait(); err != nil {
+				return err
+			}
+			var pushedBytes int64
+			for _, rec := range recs {
+				pushedBytes += int64(len(rec) - amberpack.RecHeaderSize)
+			}
+			if err := rc.PushPackRaw(upCtx, name, root, recs); err != nil {
 				return err
 			}
 			settle(len(batch), len(batch), pushedBytes)

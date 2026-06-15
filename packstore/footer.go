@@ -379,3 +379,36 @@ func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
 	}
 	return data, true, nil
 }
+
+// getRecord returns a caller-owned copy of k's full on-disk record (header +
+// stored payload, undecoded), whether it was found, and any corruption error.
+// Like get, the hot path does not CRC-check; the record is validated by the
+// receiving Reader on the push path.
+func (g *sealedSegment) getRecord(k key.Key) ([]byte, bool, error) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return nil, false, nil
+	}
+	off, slen, ok := g.fv.lookup(k)
+	if !ok {
+		return nil, false, nil
+	}
+	bodyLen := uint64(g.fv.bodyLen)
+	if off < uint64(len(magicHeader)) || off > bodyLen ||
+		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
+		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
+	}
+	end := off + amberpack.RecHeaderSize + uint64(slen)
+	rec := make([]byte, end-off)
+	copy(rec, g.mm[off:end])
+	return rec, true, nil
+}
+
+// storedSize returns k's stored (post-compression) payload length and whether
+// it was found, from the index alone — no payload read.
+func (g *sealedSegment) storedSize(k key.Key) (uint32, bool) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return 0, false
+	}
+	_, slen, ok := g.fv.lookup(k)
+	return slen, ok
+}

@@ -107,6 +107,42 @@ func TestRoundTrip_Compressed(t *testing.T) {
 	}
 }
 
+func TestWriter_AddRecord_RoundTrip(t *testing.T) {
+	// AddRecord writes a pre-encoded record verbatim. Feeding it the exact bytes
+	// EncodeRecord produces must yield a stream the Reader decodes identically to
+	// one built with Add — this is the zero-copy push path.
+	objs := []fstree.Object{
+		mkObj(t, []byte("alpha")),
+		mkObj(t, bytes.Repeat([]byte("amber"), 50_000)), // compressed on disk
+	}
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	for _, o := range objs {
+		rec, err := EncodeRecord(o.Key, o.Bytes)
+		if err != nil {
+			t.Fatalf("EncodeRecord: %v", err)
+		}
+		if err := w.AddRecord(rec); err != nil {
+			t.Fatalf("AddRecord: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := collect(t, NewReader(&buf))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != len(objs) {
+		t.Fatalf("read %d objects, want %d", len(got), len(objs))
+	}
+	for i, o := range objs {
+		if got[i].Key != o.Key || !bytes.Equal(got[i].Bytes, o.Bytes) {
+			t.Errorf("object %d mismatch", i)
+		}
+	}
+}
+
 func TestReader_RejectsLegacyVersions(t *testing.T) {
 	for _, magic := range []string{"AMBERPK\x01", "AMBERPK\x02"} {
 		var buf bytes.Buffer

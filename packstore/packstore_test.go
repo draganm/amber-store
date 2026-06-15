@@ -46,6 +46,102 @@ func TestPutGetHasRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGetRecordRoundTrip(t *testing.T) {
+	// GetRecord returns the on-disk record verbatim — identical to EncodeRecord —
+	// for objects in both the active segment and sealed segments. The tiny
+	// segment size forces most objects into sealed segments. Payloads mix
+	// compressible (stored zstd) and incompressible (stored raw) so both flag
+	// paths are exercised.
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(2048))
+	var objs []Object
+	for i := 0; i < 30; i++ {
+		var data []byte
+		if i%2 == 0 {
+			data = append(compressible(1500), byte(i))
+		} else {
+			data = append(incompressible(1500), byte(i))
+		}
+		objs = append(objs, blobObj(t, data))
+	}
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range objs {
+		want, err := amberpack.EncodeRecord(o.Key, o.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetRecord(o.Key)
+		if err != nil {
+			t.Fatalf("GetRecord(%s): %v", o.Key, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("GetRecord(%s): record mismatch (len got %d, want %d)", o.Key, len(got), len(want))
+		}
+		// The returned record must decode back to the original payload.
+		rec, err := amberpack.ParseRecord(got)
+		if err != nil {
+			t.Fatalf("ParseRecord(%s): %v", o.Key, err)
+		}
+		payload, err := amberpack.DecodePayload(rec.Flags, rec.Ulen, got[amberpack.RecHeaderSize:])
+		if err != nil {
+			t.Fatalf("DecodePayload(%s): %v", o.Key, err)
+		}
+		if !bytes.Equal(payload, o.Data) {
+			t.Fatalf("GetRecord(%s): decoded payload mismatch", o.Key)
+		}
+	}
+}
+
+func TestGetRecordAbsentReturnsErrNotFound(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	if _, err := s.GetRecord(blobObj(t, []byte("nope")).Key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStoredSizeMatchesRecordPayload(t *testing.T) {
+	// StoredSize returns the stored (post-compression) payload length: the
+	// record length minus the fixed header, for both active and sealed objects.
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(2048))
+	var objs []Object
+	for i := 0; i < 30; i++ {
+		var data []byte
+		if i%2 == 0 {
+			data = append(compressible(1500), byte(i))
+		} else {
+			data = append(incompressible(1500), byte(i))
+		}
+		objs = append(objs, blobObj(t, data))
+	}
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range objs {
+		rec, err := amberpack.EncodeRecord(o.Key, o.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := uint64(len(rec) - amberpack.RecHeaderSize)
+		got, ok, err := s.StoredSize(o.Key)
+		if err != nil || !ok {
+			t.Fatalf("StoredSize(%s) = %d, %v, %v", o.Key, got, ok, err)
+		}
+		if got != want {
+			t.Fatalf("StoredSize(%s) = %d, want %d", o.Key, got, want)
+		}
+	}
+	if _, ok, err := s.StoredSize(blobObj(t, []byte("nope")).Key); ok || err != nil {
+		t.Fatalf("StoredSize(absent) = ok %v, err %v, want false, nil", ok, err)
+	}
+}
+
 func TestGetAbsentReturnsErrNotFound(t *testing.T) {
 	s := openStore(t, t.TempDir())
 	_, err := s.Get(blobObj(t, []byte("nope")).Key)

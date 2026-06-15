@@ -40,10 +40,34 @@ func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []
 	if err := pw.Close(); err != nil {
 		return err
 	}
+	return c.postPack(ctx, ref, root, buf.Bytes())
+}
+
+// PushPackRaw uploads pre-encoded records (EncodeRecord outputs, as stored
+// verbatim on disk) as one amberpack, identically to PushPack but without
+// decoding and re-encoding each object. It is the zero-copy push path: records
+// read straight from a local packstore are wire-format-identical, so they travel
+// untouched. The server validates each record's framing and CRC on receipt.
+func (c *Client) PushPackRaw(ctx context.Context, ref string, root key.Key, records [][]byte) error {
+	var buf bytes.Buffer
+	pw := amberpack.NewWriter(&buf)
+	for _, rec := range records {
+		if err := pw.AddRecord(rec); err != nil {
+			return err
+		}
+	}
+	if err := pw.Close(); err != nil {
+		return err
+	}
+	return c.postPack(ctx, ref, root, buf.Bytes())
+}
+
+// postPack POSTs an assembled pack body tagged with (ref, root).
+func (c *Client) postPack(ctx context.Context, ref string, root key.Key, body []byte) error {
 	q := url.Values{}
 	q.Set("ref", ref)
 	q.Set("root", root.String())
-	_, _, err := c.do(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", buf.Bytes())
+	_, _, err := c.do(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", body)
 	return err
 }
 

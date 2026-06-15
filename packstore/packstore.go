@@ -498,6 +498,62 @@ func (s *Store) Get(k key.Key) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
+// GetRecord returns a caller-owned copy of the full on-disk record stored under
+// k — its 46-byte header plus the stored (still-compressed) payload, exactly as
+// written by amberpack.EncodeRecord — or ErrNotFound if k is absent. This is the
+// zero-copy push path: the record is wire-format-identical, so a caller can hand
+// it to amberpack.Writer.AddRecord without decompressing and re-encoding. Like
+// Get, it does not CRC-check; the receiving Reader validates framing and CRC.
+func (s *Store) GetRecord(k key.Key) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, ErrClosed
+	}
+	if s.active != nil {
+		if loc, ok := s.active.index[k]; ok {
+			rec := make([]byte, amberpack.RecHeaderSize+int(loc.slen))
+			if _, err := s.active.f.ReadAt(rec, loc.off); err != nil {
+				return nil, err
+			}
+			return rec, nil
+		}
+	}
+	for i := len(s.sealed) - 1; i >= 0; i-- {
+		rec, found, err := s.sealed[i].getRecord(k)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return rec, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// StoredSize returns the stored (post-compression) payload length of the object
+// under k and whether k was found, reading only the index — no payload read.
+// It sizes objects for byte-balanced push batching against the bytes that
+// actually travel.
+func (s *Store) StoredSize(k key.Key) (uint64, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return 0, false, ErrClosed
+	}
+	if s.active != nil {
+		if loc, ok := s.active.index[k]; ok {
+			return uint64(loc.slen), true, nil
+		}
+	}
+	for i := len(s.sealed) - 1; i >= 0; i-- {
+		if slen, ok := s.sealed[i].storedSize(k); ok {
+			return uint64(slen), true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 // Has reports whether an object is stored under k.
 func (s *Store) Has(k key.Key) (bool, error) {
 	s.mu.RLock()

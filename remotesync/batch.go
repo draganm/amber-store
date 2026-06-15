@@ -29,21 +29,17 @@ const nominalNodeSize = 4096
 // SizeOf estimates the transfer size of the object behind a key.
 type SizeOf func(k key.Key) uint64
 
-// PushSizer sizes objects for pushing: a Blob's exact payload length comes
-// from its key; everything else (FileNode/DirLeaf/DirNode/XattrSet key
-// lengths are logical or cumulative) is measured from the local store, with
-// a nominal fallback if the read fails (the push itself will surface the
-// real error).
+// PushSizer sizes objects for pushing by their stored (post-compression)
+// payload length — the bytes that actually travel — read from the local store's
+// index without touching the payload, with a nominal fallback if the object is
+// absent or the lookup fails (the push itself will surface the real error).
 func PushSizer(store *packstore.Store) SizeOf {
 	return func(k key.Key) uint64 {
-		if k.Type() == key.Blob {
-			return k.Length()
-		}
-		data, err := store.Get(k)
-		if err != nil {
+		slen, ok, err := store.StoredSize(k)
+		if err != nil || !ok {
 			return nominalNodeSize
 		}
-		return uint64(len(data))
+		return slen
 	}
 }
 

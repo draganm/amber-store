@@ -1,6 +1,7 @@
 package remotesync_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -8,9 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/remotesync"
 )
 
@@ -36,6 +38,38 @@ func TestPushTransfersAllReachableObjects(t *testing.T) {
 	}
 	if len(keys) != 4 {
 		t.Fatalf("server has %d reachable objects, want 4", len(keys))
+	}
+}
+
+func TestPushBytesPushedIsCompressed(t *testing.T) {
+	h := newHarness(t)
+	local := newLocalStore(t)
+	// A single highly compressible blob: its stored (zstd) record is far smaller
+	// than the raw payload, so BytesPushed must report the compressed size that
+	// actually travels, not the uncompressed length.
+	raw := bytes.Repeat([]byte("amber"), 4096) // 20480 bytes, very compressible
+	blob, err := fstree.EncodeBlob(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Put(blob.Key, blob.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := amberpack.EncodeRecord(blob.Key, blob.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := int64(len(rec) - amberpack.RecHeaderSize)
+
+	stats, err := remotesync.Push(context.Background(), local, h.rc(t), "site", blob.Key, remotesync.Opts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.BytesPushed != wantBytes {
+		t.Fatalf("BytesPushed = %d, want %d (compressed stored size)", stats.BytesPushed, wantBytes)
+	}
+	if stats.BytesPushed >= int64(len(raw)) {
+		t.Fatalf("BytesPushed %d not below raw %d; not compressed", stats.BytesPushed, len(raw))
 	}
 }
 

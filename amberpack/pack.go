@@ -87,6 +87,20 @@ func (w *Writer) Add(o fstree.Object) error {
 	return err
 }
 
+// AddRecord appends a pre-encoded record (an EncodeRecord output, as stored
+// verbatim on disk) without decoding or re-encoding it. It is the zero-copy
+// counterpart to Add: the push path reads a record straight from the local
+// store and writes it to the wire, skipping the decompress/recompress round
+// trip. rec is written as given; its framing and CRC are validated by the
+// receiving Reader.
+func (w *Writer) AddRecord(rec []byte) error {
+	if err := w.ensureHeader(); err != nil {
+		return err
+	}
+	_, err := w.bw.Write(rec)
+	return err
+}
+
 // Close writes the header (if no object was added) and the end marker, then
 // flushes. It does not close the underlying writer.
 func (w *Writer) Close() error {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remoteclient"
@@ -49,6 +50,46 @@ func TestPushPackAndMissing(t *testing.T) {
 	}
 	if len(missing) != 0 {
 		t.Fatalf("missing after push = %d, want 0", len(missing))
+	}
+}
+
+func TestPushPackRawAndMissing(t *testing.T) {
+	h := newHarness(t)
+	c := h.rc(t)
+	ctx := context.Background()
+	objs := blobs(t, "raw one", "raw two")
+	keys := []key.Key{objs[0].Key, objs[1].Key}
+
+	recs := make([][]byte, len(objs))
+	for i, o := range objs {
+		rec, err := amberpack.EncodeRecord(o.Key, o.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs[i] = rec
+	}
+	if err := c.PushPackRaw(ctx, "main", objs[0].Key, recs); err != nil {
+		t.Fatal(err)
+	}
+	h.inbox.WaitFor(objs[0].Key)
+	missing, err := c.Missing(ctx, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing after raw push = %d, want 0", len(missing))
+	}
+	// The raw-pushed objects must come back with their original payloads.
+	got, err := c.FetchObjects(ctx, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[key.Key][]byte{}
+	for _, o := range got {
+		byKey[o.Key] = o.Bytes
+	}
+	if string(byKey[objs[0].Key]) != "raw one" || string(byKey[objs[1].Key]) != "raw two" {
+		t.Fatal("raw-pushed payloads differ")
 	}
 }
 
