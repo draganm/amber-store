@@ -11,8 +11,11 @@ import (
 	"github.com/draganm/amber-store/key"
 )
 
-// DefaultBatchBytes is the default per-batch payload target.
-const DefaultBatchBytes = 8 << 20 // 8 MiB
+// DefaultBatchBytes is the default per-batch payload target. It is held below
+// the remote server's 64 MiB request-body cap: the target measures uncompressed
+// payload, while the wire body is the compressed records plus ~46 B/record of
+// framing, so the headroom keeps even an incompressible pack under the cap.
+const DefaultBatchBytes = 60 << 20 // 60 MiB
 
 // maxBatchKeys bounds a batch's key count so pathological trees of tiny
 // objects cannot produce arbitrarily large key-list bodies.

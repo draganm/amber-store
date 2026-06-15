@@ -189,11 +189,13 @@ fingerprint at `remote add`, not from the signature itself.
 ## Sync algorithms
 
 **Byte-balanced batching.** Both push and pull bin keys into batches whose
-estimated payload size approaches a configurable target (default 8 MiB;
-`--batch-bytes` flag) without exceeding it. A single object larger than the
-target gets its own batch. A key-count cap (8192 keys per batch) prevents
-pathological trees of tiny objects from producing arbitrarily large key-list
-bodies.
+estimated payload size approaches a configurable target (default 60 MiB;
+`--batch-bytes` flag) without exceeding it. The default sits below the server's
+64 MiB body cap because the target measures *uncompressed* payload while the wire
+body is the compressed records plus ~46 B/record of framing — the headroom keeps
+even an incompressible pack under the cap. A single object larger than the target
+gets its own batch. A key-count cap (8192 keys per batch) prevents pathological
+trees of tiny objects from producing arbitrarily large key-list bodies.
 
 Sizes come from the keys themselves: a blob key encodes its exact payload
 length. Directory and file-node keys encode cumulative or logical sizes, not

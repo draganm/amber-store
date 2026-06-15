@@ -149,8 +149,8 @@ func remotePushPullCommand(name string) *cli.Command {
 			},
 			&cli.Uint64Flag{
 				Name:        "batch-bytes",
-				Value:       8 << 20,
-				Usage:       "per-batch payload target in bytes",
+				Value:       60 << 20,
+				Usage:       "per-batch payload target in bytes (kept under the server's 64 MiB body cap)",
 				Destination: &batchBytes,
 			},
 		},
