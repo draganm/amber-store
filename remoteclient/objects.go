@@ -56,6 +56,17 @@ func (c *Client) PushPack(ctx context.Context, objs []fstree.Object) (Stats, err
 	return s, nil
 }
 
+// ReachableKeys asks the server for the full set of keys reachable from root:
+// the server walks its tree and returns them as raw concatenated 32-byte keys.
+// The response is verified against the pinned server key by do.
+func (c *Client) ReachableKeys(ctx context.Context, root key.Key) ([]key.Key, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/v1/objects/reachable", "application/octet-stream", root[:])
+	if err != nil {
+		return nil, err
+	}
+	return keylist.Parse(body)
+}
+
 // FetchObjects downloads the requested objects as a streamed amberpack,
 // verifying the trailer signature (over the exact body bytes) against the
 // pinned server key before returning. Error responses are buffered and

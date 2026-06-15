@@ -75,6 +75,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("POST /v1/objects/missing", h.auth(h.postMissing))
 	mux.HandleFunc("POST /v1/objects", h.auth(h.postObjects))
 	mux.HandleFunc("POST /v1/objects/get", h.auth(h.postObjectsGet))
+	mux.HandleFunc("POST /v1/objects/reachable", h.auth(h.postObjectsReachable))
 	mux.HandleFunc("PUT /v1/refs", h.auth(h.putRef))
 	mux.HandleFunc("GET /v1/refs", h.auth(h.getRefs))
 	mux.HandleFunc("DELETE /v1/refs", h.auth(h.deleteRef))

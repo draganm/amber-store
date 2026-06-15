@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/allowlist"
+	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/remoteclient"
 	"github.com/draganm/amber-store/server"
@@ -119,5 +121,80 @@ func TestStatusErrorsCarryServerMessage(t *testing.T) {
 	var se *remoteclient.StatusError
 	if !errors.As(err, &se) || se.Code != http.StatusForbidden {
 		t.Fatalf("err = %v, want StatusError 403", err)
+	}
+}
+
+func TestReachableKeys_RoundTrip(t *testing.T) {
+	h := newHarness(t)
+	c := h.rc(t)
+
+	// Build and store a small tree: a directory leaf referencing one blob.
+	blob, err := fstree.EncodeBlob([]byte("hello reachable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("f"), Mode: 0o100644, ContentKey: blob.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range []fstree.Object{blob, leaf} {
+		if err := h.store.Put(o.Key, o.Bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := c.ReachableKeys(context.Background(), leaf.Key)
+	if err != nil {
+		t.Fatalf("ReachableKeys: %v", err)
+	}
+	want, err := fstree.ReachableKeys(leaf.Key, h.store.Get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys, want %d", len(got), len(want))
+	}
+	if len(got) == 0 || got[0] != leaf.Key {
+		t.Fatalf("first key = %v, want the root %s", got, leaf.Key)
+	}
+	gotSet := map[key.Key]bool{}
+	for _, k := range got {
+		gotSet[k] = true
+	}
+	for _, k := range want {
+		if !gotSet[k] {
+			t.Errorf("missing reachable key %s", k)
+		}
+	}
+}
+
+func TestReachableKeys_IncompleteTreeErrors(t *testing.T) {
+	h := newHarness(t)
+	c := h.rc(t)
+
+	// Build a DirLeaf (non-leaf interior node) but do NOT store it.
+	// Then build a DirNode that references it and store only the DirNode.
+	// When the server walks the DirNode it will try to fetch the missing
+	// DirLeaf and fail, returning a non-2xx that the client surfaces as an error.
+	leaf, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("f"), Mode: 0o100644},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := fstree.EncodeDirNode([]fstree.DirPair{
+		{SepName: []byte("f"), ChildKey: leaf.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Store only the DirNode; the DirLeaf child is absent.
+	if err := h.store.Put(node.Key, node.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReachableKeys(context.Background(), node.Key); err == nil {
+		t.Fatal("expected an error walking an incomplete tree")
 	}
 }

@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/httpsig"
 	"github.com/draganm/amber-store/internal/keylist"
+	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/zeebo/blake3"
 )
 
@@ -139,4 +140,25 @@ func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *auth
 		return
 	}
 	w.Header().Set(http.TrailerPrefix+httpsig.HeaderSignature, sig)
+}
+
+// postObjectsReachable walks the tree under the requested root key and returns
+// the full set of reachable keys as raw concatenated 32-byte keys. The request
+// body is the 32-byte root key. The walk runs to completion before any byte is
+// written, so an incomplete tree (a reachable object missing from the store)
+// surfaces as a clean 500 rather than a truncated body. The response is
+// header-signed; pull uses it to learn the whole key set before fetching.
+func (h *handler) postObjectsReachable(w http.ResponseWriter, r *http.Request, a *authedRequest) {
+	root, err := key.Parse(a.body)
+	if err != nil {
+		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	keys, err := fstree.ReachableKeys(root, h.store.Get)
+	if err != nil {
+		h.log.Error("reachable walk failed", "root", root, "error", err)
+		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.signAndWrite(w, a.nonce, http.StatusOK, "application/octet-stream", keylist.Flatten(keys))
 }
