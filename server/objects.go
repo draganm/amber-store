@@ -84,6 +84,7 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.inbox.Commit(tmp, bodyHash, root); err != nil {
+		h.inbox.Discard(tmp)
 		h.log.Error("inbox commit failed", "error", err)
 		h.signError(w, nonce, http.StatusInternalServerError, err.Error())
 		return
