@@ -8,9 +8,12 @@ walks need many small random-access gets, which belong next to the store,
 consistent with the existing division of labor described in
 [daemon.md](daemon.md).
 
-Transfer is decomposed into separate, composable steps: objects first, then the
-reference. This ordering satisfies the no-dangling-refs rule on both ends and
-lets each step be re-run independently on interruption.
+A transfer is a single operation per direction. `push` sends every object the
+server lacks and then the signed reference; `pull` fetches the reference, then
+every object reachable from it, then writes the reference locally. Objects move
+before the reference so the no-dangling-refs rule holds on both ends, and either
+operation is idempotent — re-running after an interruption transfers only what
+is still missing.
 
 ## The shape
 
@@ -146,24 +149,38 @@ All routes are versioned under `/v1`. `GET /v1/identity` is unauthenticated;
 every other route requires the four `Amber-*` headers. The server enforces a
 hard per-request body cap of 64 MiB.
 
-| Route                     | Body / response                                                      |
-|---------------------------|----------------------------------------------------------------------|
-| `GET /v1/identity`        | server public key (SSH wire format); unauthenticated                 |
-| `POST /v1/objects/missing`| concatenated 32-byte keys in → subset the server lacks, same encoding |
-| `POST /v1/objects`        | amberpack stream in → store stats JSON out                           |
-| `POST /v1/objects/get`    | concatenated 32-byte keys in → amberpack stream out (trailer sig)    |
-| `PUT /v1/refs?name=`      | CBOR ref record in → `204`                                           |
-| `GET /v1/refs?name=`      | CBOR ref record out; omit `name=` for NDJSON listing                 |
-| `DELETE /v1/refs?name=`   | `204`; admin transport keys only                                     |
+| Route                        | Body / response                                                       |
+|------------------------------|-----------------------------------------------------------------------|
+| `GET /v1/identity`           | server public key (SSH wire format); unauthenticated                  |
+| `POST /v1/objects/missing`   | concatenated 32-byte keys in → subset the server lacks, same encoding  |
+| `POST /v1/objects`           | amberpack pack in → store stats JSON out                              |
+| `POST /v1/objects/get`       | concatenated 32-byte keys in → amberpack pack out (trailer sig)       |
+| `POST /v1/objects/reachable` | 32-byte root key in → the reachable set as concatenated 32-byte keys  |
+| `PUT /v1/refs?name=`         | CBOR ref record in → `204`                                            |
+| `GET /v1/refs?name=`         | CBOR ref record out; omit `name=` for NDJSON listing                  |
+| `DELETE /v1/refs?name=`      | `204`; admin transport keys only                                      |
 
 **Key-list encoding:** key lists are raw concatenated 32-byte keys — dense,
 zero parsing ambiguity. The body length must be a multiple of 32 bytes;
 anything else is a `422`.
 
+**Pack encoding:** `POST /v1/objects` and `POST /v1/objects/get` carry an
+*amberpack pack* — an 8-byte magic, a sequence of self-describing records (each
+a CRC-protected, per-record-zstd CAS object, the same framing packstore writes
+on disk), and a final end marker so truncation is detected rather than read as a
+clean EOF. The reader validates framing, CRC, and key canonicality; payload
+hashes are re-checked in the storage path before anything is stored.
+
 **`POST /v1/objects/get`** pre-checks existence for every requested key and
 returns `404` naming the absent keys before the first body byte — following the
 project-wide convention of doing the work before streaming, so errors surface
 as proper statuses.
+
+**`POST /v1/objects/reachable`** walks the server's tree from the given root key
+and returns the whole reachable set as a key list. It walks to completion before
+responding (the same do-the-work-before-streaming convention), so an incomplete
+tree is a clean `500` rather than a truncated body. Pull uses it to learn the
+whole key set up front, replacing a depth-proportional fetch-then-discover walk.
 
 `GET /v1/identity` is the trust bootstrap: its response is signed with the very
 key it returns (self-signed). Trust comes from the user confirming the
@@ -186,40 +203,33 @@ encoded sizes, so they cannot be used directly:
 - **Pull:** unknown non-blob objects get a fixed nominal estimate (4 KiB). This
   estimate only affects batch balance, not correctness.
 
-**Push-objects:** the daemon resolves the local reference name to its key,
-walks the reachable set (the existing reachable-keys walk), bins keys into
-byte-balanced batches, and runs a three-stage pipeline. The `--jobs` budget
-(default 4) caps total in-flight requests: a quarter of it — at least one
-worker — negotiates while the rest upload.
+**Push** is phased. The daemon resolves the local reference to its key, reads
+and validates the signed record up front, and walks the reachable set (a
+parallel breadth-first walk). Then:
 
-1. Checkers `POST /v1/objects/missing` with each batch's key list; keys the
-   server already has settle on the spot.
-2. A re-batcher coalesces missing keys from all responses into fresh
-   byte-balanced upload batches, so an incremental push sends a few full
-   packs instead of one sliver per check batch.
-3. Uploaders `POST /v1/objects` with one amberpack per upload batch.
+1. **Negotiate** the whole set against the server in `--jobs`-parallel chunks
+   (`POST /v1/objects/missing`); keys the server already has settle immediately,
+   the rest are unioned into the missing set.
+2. **Upload** byte-balanced packs of exactly the missing objects
+   (`POST /v1/objects`, one amberpack pack each) with `--jobs` parallel workers.
+   Collecting the whole missing set before batching coalesces sparse misses into
+   full packs rather than one sliver per check.
 
-Nothing the server already has crosses the wire, and negotiation overlaps
-upload. Re-running after an interruption is naturally idempotent —
-already-pushed objects drop out in the missing-check.
+It then `PUT`s the signed reference. Nothing the server already has crosses the
+wire; re-running is idempotent (already-pushed objects drop out in negotiation).
 
-**Pull-objects:** the daemon resolves the reference name on the server
-(`GET /v1/refs?name=`, response verified against the pinned key and the record's
-own signature), then runs a BFS from the record's key:
-
-- A frontier key already present in the local store is not re-fetched, but its
-  children are still enqueued — so a partial local tree completes correctly.
-- Missing keys are binned into byte-balanced batches; N workers fetch them via
-  `POST /v1/objects/get`.
-- Each arriving object is re-hashed against its key, stored, and — if it is a
-  tree or file node — parsed so its children join the frontier.
-- The walk ends when the frontier drains.
-
-**Ref transfer:** `push-ref` reads the record from the local refstore and PUTs
-it verbatim; the daemon rejects unsigned refs client-side before any network
-traffic. `pull-ref` GETs the record from the server, verifies it is canonical
-and its signature checks out against the embedded public key, then writes it
-into the local refstore (overwrite, consistent with local mutability).
+**Pull** is list-then-fetch. The daemon fetches and verifies the reference
+(`GET /v1/refs?name=`, checked against the pinned key and the record's own
+signature), then asks the server for the whole reachable set
+(`POST /v1/objects/reachable`, which the server produces by walking its tree
+from the verified key). It fetches every key the local store lacks as
+byte-balanced packs in parallel (`POST /v1/objects/get`), re-hashing each object
+against its key before storing. A local completeness walk is then the
+authoritative gate: any object still missing — a key the server omitted from its
+list — is fetched and the gate re-runs, to a fixpoint; in the common case it
+walks once and fetches nothing. Only after the gate passes is the verified
+reference written into the local refstore (overwrite, consistent with local
+mutability). Re-running is idempotent — already-present objects are skipped.
 
 ## Reference semantics
 
@@ -239,8 +249,8 @@ The server enforces a five-step validation on `PUT /v1/refs`, in order:
    in the allowlist bypass this check.
 5. **No dangling references** — the pointed-to content must be complete: the
    server walks the tree under the referenced key and rejects the record with
-   `404` if any reachable object is missing from its store. This enforces the
-   natural transfer order: push objects, then the reference.
+   `404` if any reachable object is missing from its store. This is why `push`
+   sends objects before the reference within its single operation.
 
 **Deletion is admin-only.** Ownership lives in the reference signature, but a
 `DELETE` request carries no record to sign, so the server cannot tie a deletion
