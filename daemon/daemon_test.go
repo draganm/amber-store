@@ -142,7 +142,7 @@ func TestLogging_RejectedIngestIsLogged(t *testing.T) {
 		t.Fatalf("status = %d, want 422", resp.StatusCode)
 	}
 	// The rejection reason and the request line must both be logged.
-	waitForLog(t, buf, "malformed stream", "POST", "/v1/objects", "status=422")
+	waitForLog(t, buf, "malformed pack stream", "POST", "/v1/objects", "status=422")
 }
 
 func TestLogging_SuccessfulIngestIsLogged(t *testing.T) {

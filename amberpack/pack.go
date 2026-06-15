@@ -1,23 +1,25 @@
-// Package amberpack defines the pack-write format: a flat, sequential,
-// stream-friendly serialization of CAS objects, used both as the body uploaded
-// to the daemon and as a standalone on-disk artifact. A stream is a
-// possibly-partial, unordered set of objects (like a git pack) and carries no
-// root key. Layout:
+// Package amberpack defines the Amber-Store pack format. The content-addressed
+// record codec (record.go) is shared by packstore's on-disk segments and the
+// remote-sync wire packs defined here.
 //
-//	Header   "AMBERPK\x02"                  8 bytes  magic + version (plaintext)
-//	Body     <single zstd frame> of:
-//	           Records  repeat: 0x01 key[32] uvarint(len) payload
-//	           End      0x00
+// A wire pack is a possibly-partial, unordered set of CAS objects (like a git
+// pack) carrying no root key. Layout:
 //
-// The 8-byte magic stays outside the compression so an artifact is still
-// identifiable by its leading bytes; everything after it is one zstd frame
-// (encoded at SpeedFastest). The 32-byte key already encodes the object's type
-// and logical length, so no separate fields are needed. The Reader validates
-// framing and that each key is canonical; it does NOT verify the payload hash —
-// that happens in the storage path (packstore verification).
+//	Magic    "AMBERPK\x03"   8 bytes  (plaintext)
+//	Records  repeat: one EncodeRecord output each — a 46-byte header
+//	         (tag 0x01 + key[32] + flags + ulen + slen + CRC) followed by the payload
+//	End      0x00
 //
-// Version 1 ("AMBERPK\x01") was an uncompressed variant with the same record
-// grammar; it is no longer produced and is rejected by the Reader.
+// Each record is the same self-describing, CRC-protected, per-record-zstd unit
+// packstore writes on disk (see record.go); a wire pack is just those records
+// framed by a magic and an explicit end marker, so a truncated stream is
+// detected rather than read as a clean EOF. The Reader validates framing, CRC,
+// and key canonicality and decodes each payload; it does NOT verify the payload
+// hash — that happens in the storage path (packstore WriteParallel with Verify).
+//
+// Versions 1 and 2 ("AMBERPK\x01" / "AMBERPK\x02") were the older uncompressed
+// and whole-stream-zstd stream formats; they are no longer produced and are
+// rejected by the Reader.
 package amberpack
 
 import (
@@ -29,43 +31,34 @@ import (
 	"iter"
 
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/key"
-	"github.com/klauspost/compress/zstd"
 )
 
-// magic identifies the format and its version (the trailing byte).
-const magic = "AMBERPK\x02"
+// packMagic identifies the wire pack format and its version (the trailing byte).
+const packMagic = "AMBERPK\x03"
 
-const (
-	tagObject byte = 0x01 // an object record follows
-	tagEnd    byte = 0x00 // end of stream
-)
+// tagEnd marks the end of the record stream. A record begins with tagChunk
+// (0x01, written by EncodeRecord), so the two are distinguished on the first byte.
+const tagEnd byte = 0x00
 
-// ErrMalformed wraps every error from a structurally invalid stream (bad magic,
-// bad record tag, non-canonical key, or truncation). Callers distinguish it with
-// errors.Is to map to a client error.
-var ErrMalformed = errors.New("amberpack: malformed stream")
+// ErrMalformed wraps every error from a structurally invalid wire pack (bad or
+// legacy magic, truncation, an oversized or bad record, or a corrupt record).
+// Callers distinguish it with errors.Is to map to a client error.
+var ErrMalformed = errors.New("amberpack: malformed pack stream")
 
-// maxPayloadBytes bounds a single object's payload so a corrupt or hostile
+// maxWirePayload bounds a single record's stored payload so a hostile or corrupt
 // stream cannot trigger an unbounded allocation. It is far above any real CAS
-// object (chunker MaxSize is on the order of a few hundred KiB).
-const maxPayloadBytes = 256 << 20 // 256 MiB
+// object (the chunker MaxSize is on the order of a few hundred KiB).
+const maxWirePayload = 256 << 20 // 256 MiB
 
-// Writer serializes fstree.Objects into the pack-write format. It is not safe
-// for concurrent use; a client wanting parallel uploads creates one Writer per
-// stream.
-//
-// The 8-byte magic is written plaintext; all records and the end marker are
-// written through a zstd encoder (SpeedFastest), so the body is a single
-// compressed frame.
+// Writer serializes fstree.Objects into the wire pack format. It is not safe for
+// concurrent use; a client wanting parallel uploads creates one Writer per pack.
 type Writer struct {
-	bw          *bufio.Writer  // wraps the caller's writer; carries plaintext magic + compressed frame
-	enc         *zstd.Encoder  // compresses records into bw; nil until the header is written
+	bw          *bufio.Writer
 	wroteHeader bool
 }
 
 // NewWriter returns a Writer emitting to w. The caller owns w and must close it;
-// Writer.Close only flushes and writes the end marker.
+// Writer.Close only writes the end marker and flushes.
 func NewWriter(w io.Writer) *Writer {
 	return &Writer{bw: bufio.NewWriter(w)}
 }
@@ -74,19 +67,9 @@ func (w *Writer) ensureHeader() error {
 	if w.wroteHeader {
 		return nil
 	}
-	if _, err := w.bw.WriteString(magic); err != nil {
+	if _, err := w.bw.WriteString(packMagic); err != nil {
 		return err
 	}
-	// One short stream of small CAS objects per Writer, so concurrency 1 avoids
-	// spawning GOMAXPROCS goroutines for no benefit.
-	enc, err := zstd.NewWriter(w.bw,
-		zstd.WithEncoderLevel(zstd.SpeedFastest),
-		zstd.WithEncoderConcurrency(1),
-	)
-	if err != nil {
-		return err
-	}
-	w.enc = enc
 	w.wroteHeader = true
 	return nil
 }
@@ -96,37 +79,27 @@ func (w *Writer) Add(o fstree.Object) error {
 	if err := w.ensureHeader(); err != nil {
 		return err
 	}
-	if _, err := w.enc.Write([]byte{tagObject}); err != nil {
+	rec, err := EncodeRecord(o.Key, o.Bytes)
+	if err != nil {
 		return err
 	}
-	if _, err := w.enc.Write(o.Key[:]); err != nil {
-		return err
-	}
-	var lb [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(lb[:], uint64(len(o.Bytes)))
-	if _, err := w.enc.Write(lb[:n]); err != nil {
-		return err
-	}
-	_, err := w.enc.Write(o.Bytes)
+	_, err = w.bw.Write(rec)
 	return err
 }
 
-// Close writes the header (if no object was added) and the end marker, finishes
-// the zstd frame, and flushes. It does not close the underlying writer.
+// Close writes the header (if no object was added) and the end marker, then
+// flushes. It does not close the underlying writer.
 func (w *Writer) Close() error {
 	if err := w.ensureHeader(); err != nil {
 		return err
 	}
-	if _, err := w.enc.Write([]byte{tagEnd}); err != nil {
-		return err
-	}
-	if err := w.enc.Close(); err != nil { // finishes the frame; does not close w.bw
+	if err := w.bw.WriteByte(tagEnd); err != nil {
 		return err
 	}
 	return w.bw.Flush()
 }
 
-// Reader decodes a pack-write stream.
+// Reader decodes a wire pack stream.
 type Reader struct {
 	r io.Reader
 }
@@ -142,26 +115,16 @@ func NewReader(r io.Reader) *Reader {
 // because the underlying stream position is not reset between calls.
 func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 	return func(yield func(fstree.Object, error) bool) {
-		var hdr [len(magic)]byte
-		if _, err := io.ReadFull(r.r, hdr[:]); err != nil {
-			yield(fstree.Object{}, fmt.Errorf("%w: reading header: %v", ErrMalformed, err))
+		br := bufio.NewReader(r.r)
+		var magic [len(packMagic)]byte
+		if _, err := io.ReadFull(br, magic[:]); err != nil {
+			yield(fstree.Object{}, fmt.Errorf("%w: reading magic: %v", ErrMalformed, err))
 			return
 		}
-		if string(hdr[:]) != magic {
+		if string(magic[:]) != packMagic {
 			yield(fstree.Object{}, fmt.Errorf("%w: bad magic", ErrMalformed))
 			return
 		}
-		// The body after the magic is a single zstd frame; decode records from it.
-		// Concurrency 1: streams are short, so extra decoder goroutines add cost
-		// without benefit. A corrupt frame surfaces as a read error in the loop
-		// below, which is already mapped to ErrMalformed.
-		dec, err := zstd.NewReader(r.r, zstd.WithDecoderConcurrency(1))
-		if err != nil {
-			yield(fstree.Object{}, fmt.Errorf("%w: opening zstd reader: %v", ErrMalformed, err))
-			return
-		}
-		defer dec.Close()
-		br := bufio.NewReader(dec)
 		for {
 			tag, err := br.ReadByte()
 			if err != nil {
@@ -171,32 +134,37 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 			switch tag {
 			case tagEnd:
 				return
-			case tagObject:
-				var kb [key.Size]byte
-				if _, err := io.ReadFull(br, kb[:]); err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: reading key: %v", ErrMalformed, err))
+			case tagChunk:
+				// Reassemble the full record — tag + remaining 45 header bytes +
+				// slen payload bytes — then validate it with ParseRecord.
+				var hdr [RecHeaderSize]byte
+				hdr[0] = tag
+				if _, err := io.ReadFull(br, hdr[1:]); err != nil {
+					yield(fstree.Object{}, fmt.Errorf("%w: truncated record header: %v", ErrMalformed, err))
 					return
 				}
-				k, err := key.Parse(kb[:])
+				slen := binary.BigEndian.Uint32(hdr[38:42]) // stored-payload length field
+				if slen > maxWirePayload {
+					yield(fstree.Object{}, fmt.Errorf("%w: record payload %d exceeds limit %d", ErrMalformed, slen, maxWirePayload))
+					return
+				}
+				full := make([]byte, RecHeaderSize+int(slen))
+				copy(full, hdr[:])
+				if _, err := io.ReadFull(br, full[RecHeaderSize:]); err != nil {
+					yield(fstree.Object{}, fmt.Errorf("%w: truncated record payload: %v", ErrMalformed, err))
+					return
+				}
+				rec, err := ParseRecord(full)
 				if err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: non-canonical key: %v", ErrMalformed, err))
+					yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
 					return
 				}
-				n, err := binary.ReadUvarint(br)
+				payload, err := DecodePayload(rec.Flags, rec.Ulen, full[RecHeaderSize:])
 				if err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: reading length: %v", ErrMalformed, err))
+					yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
 					return
 				}
-				if n > maxPayloadBytes {
-					yield(fstree.Object{}, fmt.Errorf("%w: payload length %d exceeds limit %d", ErrMalformed, n, maxPayloadBytes))
-					return
-				}
-				payload := make([]byte, n)
-				if _, err := io.ReadFull(br, payload); err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: reading payload: %v", ErrMalformed, err))
-					return
-				}
-				if !yield(fstree.Object{Key: k, Bytes: payload}, nil) {
+				if !yield(fstree.Object{Key: rec.Key, Bytes: payload}, nil) {
 					return
 				}
 			default:
