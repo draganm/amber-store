@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/admin"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowstore"
 	"github.com/draganm/amber-store/internal/identity"
@@ -165,6 +166,11 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return err
 	}
 	defer store.Close()
+	ib, err := inbox.Open(filepath.Join(cfg.store, "inbox"), store, 0, logger)
+	if err != nil {
+		return err
+	}
+	defer ib.Close()
 	refs, err := refstore.Open(filepath.Join(cfg.store, "refs"), cfg.sync)
 	if err != nil {
 		return err
@@ -191,6 +197,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 
 	handler := server.New(server.Config{
 		Store:    store,
+		Inbox:    ib,
 		Refs:     refs,
 		Allow:    keys.Current,
 		Identity: signer,

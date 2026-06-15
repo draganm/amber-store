@@ -14,6 +14,7 @@ import (
 
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/refstore"
@@ -35,6 +36,11 @@ func startRemoteServer(t *testing.T, clientPub ssh.PublicKey) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +54,7 @@ func startRemoteServer(t *testing.T, clientPub ssh.PublicKey) *httptest.Server {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))

@@ -10,6 +10,7 @@ import (
 
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/refstore"
@@ -34,6 +35,7 @@ func testSigner(t *testing.T) ssh.Signer {
 type harness struct {
 	srv      *httptest.Server
 	store    *packstore.Store
+	inbox    *inbox.Inbox
 	refs     *refstore.Store
 	identity ssh.Signer
 	client   ssh.Signer
@@ -59,6 +61,11 @@ func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	identity, client, admin := testSigner(t), testSigner(t), testSigner(t)
 	content := string(ssh.MarshalAuthorizedKey(client.PublicKey())) +
 		"admin " + string(ssh.MarshalAuthorizedKey(admin.PublicKey()))
@@ -67,7 +74,7 @@ func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 		t.Fatal(err)
 	}
 	var handler http.Handler = server.New(server.Config{
-		Store: store, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	})
@@ -76,7 +83,7 @@ func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 	}
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &harness{srv: srv, store: store, refs: refs, identity: identity, client: client, admin: admin}
+	return &harness{srv: srv, store: store, inbox: ib, refs: refs, identity: identity, client: client, admin: admin}
 }
 
 func (h *harness) rc(t *testing.T) *remoteclient.Client {

@@ -150,7 +150,7 @@ func (h *handler) remotePush(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := newEventStream(w)
 	opts.Progress = func(done, total int) { stream.send(syncEvent{Done: done, Total: total}) }
-	stats, err := remotesync.Push(r.Context(), h.store, rc, root, opts)
+	stats, err := remotesync.Push(r.Context(), h.store, rc, name, root, opts)
 	if err != nil {
 		h.log.Warn("push failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})

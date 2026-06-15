@@ -3,10 +3,10 @@ package remoteclient
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
@@ -25,35 +25,26 @@ func (c *Client) Missing(ctx context.Context, keys []key.Key) ([]key.Key, error)
 	return keylist.Parse(body)
 }
 
-// Stats mirrors the server's upload response.
-type Stats struct {
-	Stored      int   `json:"objects_stored"`
-	Deduped     int   `json:"objects_deduped"`
-	BytesStored int64 `json:"bytes_stored"`
-}
-
-// PushPack uploads objs as one amberpack stream; the server verifies every
-// payload against its key before storing.
-func (c *Client) PushPack(ctx context.Context, objs []fstree.Object) (Stats, error) {
+// PushPack uploads objs as one amberpack to the remote, tagged with the (ref,
+// root) the objects belong to. The server stages the pack durably and acks
+// before processing it; this returns once the pack is accepted, not once it is
+// stored. Completeness is enforced when the reference is set.
+func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []fstree.Object) error {
 	var buf bytes.Buffer
 	pw := amberpack.NewWriter(&buf)
 	for _, o := range objs {
 		if err := pw.Add(o); err != nil {
-			return Stats{}, err
+			return err
 		}
 	}
 	if err := pw.Close(); err != nil {
-		return Stats{}, err
+		return err
 	}
-	_, body, err := c.do(ctx, http.MethodPost, "/v1/objects", "application/octet-stream", buf.Bytes())
-	if err != nil {
-		return Stats{}, err
-	}
-	var s Stats
-	if err := json.Unmarshal(body, &s); err != nil {
-		return Stats{}, fmt.Errorf("decoding upload response: %w", err)
-	}
-	return s, nil
+	q := url.Values{}
+	q.Set("ref", ref)
+	q.Set("root", root.String())
+	_, _, err := c.do(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", buf.Bytes())
+	return err
 }
 
 // ReachableKeys asks the server for the full set of keys reachable from root:

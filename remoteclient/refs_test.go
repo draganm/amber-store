@@ -41,7 +41,9 @@ func TestRefRoundTripAndListing(t *testing.T) {
 	c := h.rc(t)
 	ctx := context.Background()
 	obj := blobs(t, "ref target")[0]
-	if _, err := c.PushPack(ctx, []fstree.Object{obj}); err != nil {
+	// PUT /v1/refs below waits on the inbox internally, so no explicit
+	// WaitFor is needed between this push and setting the reference.
+	if err := c.PushPack(ctx, "main", obj.Key, []fstree.Object{obj}); err != nil {
 		t.Fatal(err)
 	}
 	rec := signedRecord(t, "main", obj.Key[:], testSigner(t))
