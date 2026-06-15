@@ -107,14 +107,20 @@ func SignRequest(req *http.Request, signer ssh.Signer, timestamp int64, nonce, b
 	return nil
 }
 
-// VerifyRequest checks r's Amber-* headers against body: the timestamp must
-// be within window of now and the signature must verify over the
-// reconstructed payload with the claimed public key. It returns the claimed
-// key and the nonce; the caller still must check the nonce for replay and
-// the key against an allowlist. Callers should map any non-nil error to a 401
-// response. The nonce is returned even on failure so error responses can be
-// signed over it.
+// VerifyRequest checks r's Amber-* headers against body. See VerifyRequestHash.
 func VerifyRequest(r *http.Request, body []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
+	return VerifyRequestHash(r, HashBody(body), now, window)
+}
+
+// VerifyRequestHash is VerifyRequest for callers that have already hashed the
+// body (e.g. a streaming receiver). bodyHash must be blake3-256 of the exact
+// request body bytes: the timestamp must be within window of now and the
+// signature must verify over the reconstructed payload with the claimed public
+// key. It returns the claimed key and the nonce; the caller still must check
+// the nonce for replay and the key against an allowlist. Callers should map any
+// non-nil error to a 401 response. The nonce is returned even on failure so
+// error responses can be signed over it.
+func VerifyRequestHash(r *http.Request, bodyHash []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
 	pubB64 := r.Header.Get(HeaderPublicKey)
 	tsStr := r.Header.Get(HeaderTimestamp)
 	nonceB64 := r.Header.Get(HeaderNonce)
@@ -146,7 +152,7 @@ func VerifyRequest(r *http.Request, body []byte, now time.Time, window time.Dura
 	if d < -window || d > window {
 		return nil, nonce, fmt.Errorf("request timestamp outside the ±%s window", window)
 	}
-	payload, err := requestSigPayload(r.Method, r.URL.RequestURI(), ts, nonce, HashBody(body))
+	payload, err := requestSigPayload(r.Method, r.URL.RequestURI(), ts, nonce, bodyHash)
 	if err != nil {
 		return nil, nonce, fmt.Errorf("encoding request signature payload: %w", err)
 	}

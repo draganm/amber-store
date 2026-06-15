@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/httpsig"
@@ -33,6 +34,7 @@ type Config struct {
 	Log      *slog.Logger  // nil discards
 	Window   time.Duration // timestamp validity window; 0 = httpsig.DefaultWindow
 	MaxBody  int64         // request body cap; 0 = DefaultMaxBody
+	Inbox    *inbox.Inbox  // receives pushed packs; required
 }
 
 type handler struct {
@@ -43,6 +45,7 @@ type handler struct {
 	log      *slog.Logger
 	window   time.Duration
 	maxBody  int64
+	inbox    *inbox.Inbox
 	nonces   *nonces.Cache
 }
 
@@ -68,12 +71,13 @@ func New(cfg Config) http.Handler {
 		log:      log,
 		window:   window,
 		maxBody:  maxBody,
+		inbox:    cfg.Inbox,
 		nonces:   nonces.New(window),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/identity", h.getIdentity)
 	mux.HandleFunc("POST /v1/objects/missing", h.auth(h.postMissing))
-	mux.HandleFunc("POST /v1/objects", h.auth(h.postObjects))
+	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("POST /v1/objects/get", h.auth(h.postObjectsGet))
 	mux.HandleFunc("POST /v1/objects/reachable", h.auth(h.postObjectsReachable))
 	mux.HandleFunc("PUT /v1/refs", h.auth(h.putRef))

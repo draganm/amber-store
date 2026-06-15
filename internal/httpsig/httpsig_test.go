@@ -1,6 +1,7 @@
 package httpsig_test
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"net/http"
@@ -156,5 +157,29 @@ func TestResponseNilNonceEqualsEmpty(t *testing.T) {
 	}
 	if err := httpsig.VerifyResponse(signer.PublicKey().Marshal(), []byte{}, 200, httpsig.HashBody([]byte("b")), sig); err != nil {
 		t.Fatalf("nil-signed nonce did not verify as empty: %v", err)
+	}
+}
+
+func TestVerifyRequestHashMatchesVerifyRequest(t *testing.T) {
+	signer := testSigner(t)
+	body := []byte("streamed body bytes")
+	req, err := http.NewRequest(http.MethodPost, "http://x/v1/objects?root=abc", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := []byte("nonce-1234567890")
+	now := time.Unix(1000, 0)
+	if err := httpsig.SignRequest(req, signer, now.UnixNano(), nonce, body); err != nil {
+		t.Fatal(err)
+	}
+	pub, gotNonce, err := httpsig.VerifyRequestHash(req, httpsig.HashBody(body), now, httpsig.DefaultWindow)
+	if err != nil {
+		t.Fatalf("VerifyRequestHash: %v", err)
+	}
+	if !bytes.Equal(gotNonce, nonce) {
+		t.Fatalf("nonce mismatch")
+	}
+	if pub.Type() != signer.PublicKey().Type() {
+		t.Fatalf("unexpected key type")
 	}
 }

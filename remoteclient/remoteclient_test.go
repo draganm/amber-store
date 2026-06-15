@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -36,6 +37,7 @@ func testSigner(t *testing.T) ssh.Signer {
 type harness struct {
 	srv      *httptest.Server
 	store    *packstore.Store
+	inbox    *inbox.Inbox
 	refs     *refstore.Store
 	identity ssh.Signer
 	client   ssh.Signer
@@ -55,6 +57,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	identity, client, admin := testSigner(t), testSigner(t), testSigner(t)
 	content := string(ssh.MarshalAuthorizedKey(client.PublicKey())) +
 		"admin " + string(ssh.MarshalAuthorizedKey(admin.PublicKey()))
@@ -63,12 +70,12 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
 	t.Cleanup(srv.Close)
-	return &harness{srv: srv, store: store, refs: refs, identity: identity, client: client, admin: admin}
+	return &harness{srv: srv, store: store, inbox: ib, refs: refs, identity: identity, client: client, admin: admin}
 }
 
 // rc is used by the object/ref method tests added in the next task.

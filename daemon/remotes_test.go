@@ -19,6 +19,7 @@ import (
 	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/internal/allowlist"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/internal/sshsign"
@@ -51,13 +52,14 @@ type remoteHarness struct {
 	refs         *refstore.Store  // local daemon's refs
 	srvStore     *packstore.Store // remote server's store
 	srvRefs      *refstore.Store
+	srvInbox     *inbox.Inbox // remote server's inbox
 	identity     ssh.Signer
 	clientSigner ssh.Signer // the SSH signer allowed by the remote server
 	registry     *remotes.Registry
 }
 
 // newRemoteServer starts an in-process remote server allowing clientPub.
-func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey) (*httptest.Server, *packstore.Store, *refstore.Store) {
+func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey) (*httptest.Server, *packstore.Store, *refstore.Store, *inbox.Inbox) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
@@ -70,21 +72,26 @@ func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	allow, err := allowlist.Parse(ssh.MarshalAuthorizedKey(clientPub))
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs,
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
 	t.Cleanup(srv.Close)
-	return srv, store, refs
+	return srv, store, refs, ib
 }
 
 // newDaemonFor starts a local daemon with remote support against serverSrv.
-func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh.Signer, srvStore *packstore.Store, srvRefs *refstore.Store) *remoteHarness {
+func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh.Signer, srvStore *packstore.Store, srvRefs *refstore.Store, srvInbox *inbox.Inbox) *remoteHarness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
@@ -109,7 +116,7 @@ func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh
 	t.Cleanup(daemonSrv.Close)
 	return &remoteHarness{
 		daemonSrv: daemonSrv, serverSrv: serverSrv,
-		store: store, refs: refs, srvStore: srvStore, srvRefs: srvRefs,
+		store: store, refs: refs, srvStore: srvStore, srvRefs: srvRefs, srvInbox: srvInbox,
 		identity: identity, clientSigner: client, registry: registry,
 	}
 }
@@ -117,8 +124,8 @@ func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh
 func newRemoteHarness(t *testing.T) *remoteHarness {
 	t.Helper()
 	identity, client := testSignerD(t), testSignerD(t)
-	srv, srvStore, srvRefs := newRemoteServer(t, identity, client.PublicKey())
-	h := newDaemonFor(t, srv, identity, client, srvStore, srvRefs)
+	srv, srvStore, srvRefs, srvInbox := newRemoteServer(t, identity, client.PublicKey())
+	h := newDaemonFor(t, srv, identity, client, srvStore, srvRefs, srvInbox)
 	return h
 }
 
@@ -172,7 +179,7 @@ func (h *remoteHarness) addRemote(t *testing.T, name string) {
 // server, reusing the same allowed client signer so the new daemon can auth.
 func newRemoteHarnessWithServer(t *testing.T, h *remoteHarness, client ssh.Signer) *remoteHarness {
 	t.Helper()
-	return newDaemonFor(t, h.serverSrv, h.identity, client, h.srvStore, h.srvRefs)
+	return newDaemonFor(t, h.serverSrv, h.identity, client, h.srvStore, h.srvRefs, h.srvInbox)
 }
 
 // putLocalRef stores a signed ref in the local daemon's refstore, pointing at

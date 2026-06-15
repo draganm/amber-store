@@ -37,13 +37,12 @@ func TestPushPackAndMissing(t *testing.T) {
 	if len(missing) != 2 {
 		t.Fatalf("missing before push = %d, want 2", len(missing))
 	}
-	stats, err := c.PushPack(ctx, objs)
-	if err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
 		t.Fatal(err)
 	}
-	if stats.Stored != 2 {
-		t.Fatalf("stored = %d, want 2", stats.Stored)
-	}
+	// PushPack acks before the pack is processed; drain the inbox so the
+	// objects are stored before re-checking Missing.
+	h.inbox.WaitFor(objs[0].Key)
 	missing, err = c.Missing(ctx, keys)
 	if err != nil {
 		t.Fatal(err)
@@ -58,9 +57,11 @@ func TestFetchObjects(t *testing.T) {
 	c := h.rc(t)
 	ctx := context.Background()
 	objs := blobs(t, "fo one", "fo two")
-	if _, err := c.PushPack(ctx, objs); err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
 		t.Fatal(err)
 	}
+	// Drain the staged pack so the objects exist before fetching them.
+	h.inbox.WaitFor(objs[0].Key)
 	got, err := c.FetchObjects(ctx, []key.Key{objs[0].Key, objs[1].Key})
 	if err != nil {
 		t.Fatal(err)
@@ -93,9 +94,10 @@ func TestFetchObjectsWrongPinFails(t *testing.T) {
 	c := h.rc(t)
 	ctx := context.Background()
 	objs := blobs(t, "pin check")
-	if _, err := c.PushPack(ctx, objs); err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
 		t.Fatal(err)
 	}
+	h.inbox.WaitFor(objs[0].Key)
 	wrong, err := remoteclient.New(h.srv.URL, h.client, testSigner(t).PublicKey().Marshal())
 	if err != nil {
 		t.Fatal(err)

@@ -19,13 +19,16 @@ func TestPushTransfersAllReachableObjects(t *testing.T) {
 	local := newLocalStore(t)
 	root := buildTree(t, local)
 
-	stats, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{})
+	stats, err := remotesync.Push(context.Background(), local, h.rc(t), "site", root, remotesync.Opts{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stats.ObjectsTotal != 4 || stats.ObjectsPushed != 4 {
 		t.Fatalf("stats = %+v, want 4/4", stats)
 	}
+	// Push acks before the pack is processed; drain the inbox so the
+	// server-side reachable walk below sees the stored objects.
+	h.inbox.WaitFor(root)
 	// every reachable object is now on the server
 	keys, err := fstree.ReachableKeys(root, h.store.Get)
 	if err != nil {
@@ -42,10 +45,13 @@ func TestPushIsMinimalOnRerun(t *testing.T) {
 	root := buildTree(t, local)
 	ctx := context.Background()
 	rc := h.rc(t)
-	if _, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{}); err != nil {
+	if _, err := remotesync.Push(ctx, local, rc, "site", root, remotesync.Opts{}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{})
+	// Drain the first push's pack before re-negotiating, or the server may
+	// still report the objects missing and the re-push would not be a no-op.
+	h.inbox.WaitFor(root)
+	stats, err := remotesync.Push(ctx, local, rc, "site", root, remotesync.Opts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +65,7 @@ func TestPushReportsProgress(t *testing.T) {
 	local := newLocalStore(t)
 	root := buildTree(t, local)
 	var last, total int
-	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), "site", root, remotesync.Opts{
 		Progress: func(done, t int) { last, total = done, t },
 	})
 	if err != nil {
@@ -140,15 +146,19 @@ func TestPushCoalescesSparseMissingKeys(t *testing.T) {
 		}
 		allKeys = append(allKeys, o.Key)
 	}
-	if _, err := remotesync.Push(ctx, local, rc, buildFileTree(t, local, oldKeys), opts); err != nil {
+	rootA := buildFileTree(t, local, oldKeys)
+	if _, err := remotesync.Push(ctx, local, rc, "site", rootA, opts); err != nil {
 		t.Fatal(err)
 	}
+	// Drain the first tree's pack so its blobs are present on the server and
+	// the second push's negotiation correctly counts them as not-missing.
+	h.inbox.WaitFor(rootA)
 
 	// the second tree interleaves old (present) and new (missing) blobs, so
 	// every 2000-byte check batch is half-present: ~1 missing key each
 	rootB := buildFileTree(t, local, allKeys)
 	uploads.Store(0)
-	stats, err := remotesync.Push(ctx, local, rc, rootB, opts)
+	stats, err := remotesync.Push(ctx, local, rc, "site", rootB, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,13 +194,16 @@ func TestPushNoOpMakesNoUploads(t *testing.T) {
 	root := buildTree(t, local)
 	ctx := context.Background()
 	rc := h.rc(t)
-	if _, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{}); err != nil {
+	if _, err := remotesync.Push(ctx, local, rc, "site", root, remotesync.Opts{}); err != nil {
 		t.Fatal(err)
 	}
+	// Drain the first push so the no-op push below sees every object present
+	// and makes zero uploads.
+	h.inbox.WaitFor(root)
 
 	uploads.Store(0)
 	var last, total int
-	stats, err := remotesync.Push(ctx, local, rc, root, remotesync.Opts{
+	stats, err := remotesync.Push(ctx, local, rc, "site", root, remotesync.Opts{
 		Progress: func(d, tot int) { last, total = d, tot },
 	})
 	if err != nil {
@@ -216,7 +229,7 @@ func TestPushProgressIsMonotonic(t *testing.T) {
 	root := buildTree(t, local)
 	var mu sync.Mutex
 	var seen []int
-	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), "site", root, remotesync.Opts{
 		Progress: func(done, total int) {
 			if total != 4 {
 				t.Errorf("total = %d, want 4", total) // Errorf: callback runs off the test goroutine
@@ -243,7 +256,7 @@ func TestPushSurfacesUploadFailure(t *testing.T) {
 	h := newHarnessMW(t, failPath("/v1/objects"))
 	local := newLocalStore(t)
 	root := buildTree(t, local)
-	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{})
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), "site", root, remotesync.Opts{})
 	if err == nil {
 		t.Fatal("push succeeded although every upload failed")
 	}
@@ -257,7 +270,7 @@ func TestPushSurfacesNegotiationFailure(t *testing.T) {
 	h := newHarnessMW(t, failPath("/v1/objects/missing"))
 	local := newLocalStore(t)
 	root := buildTree(t, local)
-	_, err := remotesync.Push(context.Background(), local, h.rc(t), root, remotesync.Opts{})
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), "site", root, remotesync.Opts{})
 	if err == nil {
 		t.Fatal("push succeeded although negotiation failed")
 	}

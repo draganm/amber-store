@@ -85,6 +85,11 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	// Uploads are acked as soon as they are durably staged, not stored. Wait for
+	// any packs tagged with this root to finish processing before checking
+	// completeness; a pack that failed to process was quarantined, so its
+	// objects stay absent and CheckComplete reports the ref incomplete.
+	h.inbox.WaitFor(k)
 	// The referenced content must be complete: every object reachable from
 	// the key must exist in the store. The walk runs parallel lookups —
 	// referenced trees can be large.

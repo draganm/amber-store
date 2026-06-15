@@ -54,7 +54,7 @@ type PushStats struct {
 // of byte-balanced packs holding exactly the missing objects. Collecting the
 // whole missing set before batching coalesces sparse misses into full packs.
 // Idempotent: a re-run pushes nothing.
-func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, root key.Key, opts Opts) (PushStats, error) {
+func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, name string, root key.Key, opts Opts) (PushStats, error) {
 	keys, err := fstree.ReachableKeys(root, store.Get)
 	if err != nil {
 		return PushStats{}, fmt.Errorf("walking reachable objects: %w", err)
@@ -121,7 +121,7 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 				objs[i] = fstree.Object{Key: k, Bytes: data}
 				pushedBytes += int64(len(data))
 			}
-			if _, err := rc.PushPack(upCtx, objs); err != nil {
+			if err := rc.PushPack(upCtx, name, root, objs); err != nil {
 				return err
 			}
 			settle(len(batch), len(batch), pushedBytes)
