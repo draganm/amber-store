@@ -1,6 +1,7 @@
 package fstree_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
@@ -122,5 +123,69 @@ func TestReachableKeys_MissingObject(t *testing.T) {
 	// The store holds only the parent: walking into "gone" must fail.
 	if _, err := fstree.ReachableKeys(parent.Key, mapGetter(parent)); err == nil {
 		t.Fatal("expected error for a missing child object")
+	}
+}
+
+// TestReachableKeys_WideParallel walks a root with many subdirectories, forcing
+// a wide frontier so the concurrent fetch path runs many workers at once (run
+// under -race to guard the walk). Every subdirectory also references one shared
+// blob, so the round that fetches the sub-leaves concurrently discovers that
+// blob many times — confirming the dedup that follows the parallel round lists
+// it exactly once. Asserts root-first, the full set, and that every key is unique.
+func TestReachableKeys_WideParallel(t *testing.T) {
+	const n = 64
+	var objs []fstree.Object
+	add := func(o fstree.Object) { objs = append(objs, o) }
+
+	// A blob shared by every subdirectory: discovered concurrently from many
+	// parallel fetches in the same round, it must still be listed once.
+	shared, err := fstree.EncodeBlob([]byte("shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	add(shared)
+
+	var entries []fstree.Entry
+	for i := 0; i < n; i++ {
+		blob, err := fstree.EncodeBlob([]byte(fmt.Sprintf("content-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(blob)
+		sub, err := fstree.EncodeDirLeaf([]fstree.Entry{
+			{Name: []byte("uniq"), Mode: 0o100644, ContentKey: blob.Key[:]},
+			{Name: []byte("shared"), Mode: 0o100644, ContentKey: shared.Key[:]},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(sub)
+		entries = append(entries, fstree.Entry{
+			Name: []byte(fmt.Sprintf("d%02d", i)), Mode: 0o040755, ContentKey: sub.Key[:],
+		})
+	}
+	root, err := fstree.EncodeDirLeaf(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	add(root)
+
+	got, err := fstree.ReachableKeys(root.Key, mapGetter(objs...))
+	if err != nil {
+		t.Fatalf("ReachableKeys: %v", err)
+	}
+	if len(got) == 0 || got[0] != root.Key {
+		t.Fatalf("first key = %v, want the root %s", got, root.Key)
+	}
+	// root + n sub-leaves + n unique blobs + 1 shared blob (deduped from n refs).
+	if want := 1 + 2*n + 1; len(got) != want {
+		t.Fatalf("got %d keys, want %d", len(got), want)
+	}
+	seen := map[key.Key]bool{}
+	for _, k := range got {
+		if seen[k] {
+			t.Errorf("duplicate key %s", k)
+		}
+		seen[k] = true
 	}
 }
