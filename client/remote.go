@@ -217,9 +217,10 @@ func syncQuery(remote, name string, jobs int, batchBytes uint64) string {
 	return "?" + q.Encode()
 }
 
-// RemotePushObjects pushes the objects reachable from local ref name.
-func (c *Client) RemotePushObjects(ctx context.Context, remote, name string, jobs int, batchBytes uint64, onProgress func(done, total int)) (PushStats, error) {
-	ev, err := c.runSync(ctx, "/v1/remote/push-objects"+syncQuery(remote, name, jobs, batchBytes), onProgress)
+// RemotePush pushes the objects reachable from local ref name AND the signed
+// reference to the remote — one streamed operation.
+func (c *Client) RemotePush(ctx context.Context, remote, name string, jobs int, batchBytes uint64, onProgress func(done, total int)) (PushStats, error) {
+	ev, err := c.runSync(ctx, "/v1/remote/push"+syncQuery(remote, name, jobs, batchBytes), onProgress)
 	if err != nil {
 		return PushStats{}, err
 	}
@@ -229,10 +230,11 @@ func (c *Client) RemotePushObjects(ctx context.Context, remote, name string, job
 	return *ev.PushStats, nil
 }
 
-// RemotePullObjects pulls the objects reachable from the SERVER's ref name;
-// it returns the resolved root key (hex) alongside the stats.
-func (c *Client) RemotePullObjects(ctx context.Context, remote, name string, jobs int, batchBytes uint64, onProgress func(done, total int)) (PullStats, string, error) {
-	ev, err := c.runSync(ctx, "/v1/remote/pull-objects"+syncQuery(remote, name, jobs, batchBytes), onProgress)
+// RemotePull fetches the reference name from the remote AND every object it
+// reaches into the local store — one streamed operation; returns the resolved
+// root key (hex).
+func (c *Client) RemotePull(ctx context.Context, remote, name string, jobs int, batchBytes uint64, onProgress func(done, total int)) (PullStats, string, error) {
+	ev, err := c.runSync(ctx, "/v1/remote/pull"+syncQuery(remote, name, jobs, batchBytes), onProgress)
 	if err != nil {
 		return PullStats{}, "", err
 	}
@@ -240,39 +242,6 @@ func (c *Client) RemotePullObjects(ctx context.Context, remote, name string, job
 		return PullStats{}, "", fmt.Errorf("sync stream ended without pull stats")
 	}
 	return *ev.PullStats, ev.Key, nil
-}
-
-// remoteRefAction POSTs push-ref/pull-ref style routes expecting 204.
-func (c *Client) remoteRefAction(ctx context.Context, route, remote, name string) error {
-	q := url.Values{}
-	if remote != "" {
-		q.Set("remote", remote)
-	}
-	q.Set("name", name)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+route+"?"+q.Encode(), nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return c.dialHint(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("%s failed: %s: %s", route, resp.Status, msg)
-	}
-	return nil
-}
-
-// RemotePushRef uploads the local ref record to the remote.
-func (c *Client) RemotePushRef(ctx context.Context, remote, name string) error {
-	return c.remoteRefAction(ctx, "/v1/remote/push-ref", remote, name)
-}
-
-// RemotePullRef fetches the remote ref record into the local refstore.
-func (c *Client) RemotePullRef(ctx context.Context, remote, name string) error {
-	return c.remoteRefAction(ctx, "/v1/remote/pull-ref", remote, name)
 }
 
 // RemoteRefInfo mirrors the remote listing lines (same shape as RefInfo).

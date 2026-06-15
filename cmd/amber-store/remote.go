@@ -20,10 +20,8 @@ func remoteCommand() *cli.Command {
 			remoteAddCommand(),
 			remoteRmCommand(),
 			remoteLsCommand(),
-			remoteSyncCommand("push-objects", "push objects reachable from local ref NAME to the remote"),
-			remoteSyncCommand("pull-objects", "pull objects reachable from the remote's ref NAME"),
-			remoteRefCommand("push-ref", "upload the local reference record NAME to the remote"),
-			remoteRefCommand("pull-ref", "fetch the remote reference record NAME into the local store"),
+			remotePushPullCommand("push"),
+			remotePushPullCommand("pull"),
 			remoteLsRefsCommand(),
 		},
 	}
@@ -126,12 +124,16 @@ func remoteLsCommand() *cli.Command {
 	}
 }
 
-// remoteSyncCommand builds push-objects / pull-objects (same flags and arg
-// shape; the route differs).
-func remoteSyncCommand(name, usage string) *cli.Command {
+// remotePushPullCommand builds the push / pull commands (same flags and arg
+// shape; each performs the whole objects+reference transfer in one operation).
+func remotePushPullCommand(name string) *cli.Command {
 	var socket string
 	var jobs int
 	var batchBytes uint64
+	usage := "push the local reference NAME and all its objects to the remote"
+	if name == "pull" {
+		usage = "pull the reference NAME and all its objects from the remote"
+	}
 	return &cli.Command{
 		Name:      name,
 		Usage:     usage,
@@ -166,49 +168,21 @@ func remoteSyncCommand(name, usage string) *cli.Command {
 				}
 			}
 			defer fmt.Fprintln(os.Stderr)
-			if name == "push-objects" {
-				stats, err := cl.RemotePushObjects(c.Context, remote, refName, jobs, batchBytes, progress)
+			if name == "push" {
+				stats, err := cl.RemotePush(c.Context, remote, refName, jobs, batchBytes, progress)
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(c.App.Writer, "pushed %d objects (%d bytes), %d already present\n",
-					stats.ObjectsPushed, stats.BytesPushed, stats.ObjectsTotal-stats.ObjectsPushed)
+				fmt.Fprintf(c.App.Writer, "pushed %s: %d objects (%d bytes), %d already present\n",
+					refName, stats.ObjectsPushed, stats.BytesPushed, stats.ObjectsTotal-stats.ObjectsPushed)
 				return nil
 			}
-			stats, rootKey, err := cl.RemotePullObjects(c.Context, remote, refName, jobs, batchBytes, progress)
+			stats, rootKey, err := cl.RemotePull(c.Context, remote, refName, jobs, batchBytes, progress)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(c.App.Writer, "pulled %d objects (%d bytes), root %s\n",
-				stats.ObjectsFetched, stats.BytesFetched, rootKey)
-			return nil
-		},
-	}
-}
-
-// remoteRefCommand builds push-ref / pull-ref.
-func remoteRefCommand(name, usage string) *cli.Command {
-	var socket string
-	return &cli.Command{
-		Name:      name,
-		Usage:     usage,
-		ArgsUsage: "[REMOTE] NAME",
-		Flags:     []cli.Flag{socketFlag(&socket)},
-		Action: func(c *cli.Context) error {
-			remote, refName, err := remoteAndName(c, "remote "+name)
-			if err != nil {
-				return err
-			}
-			cl := client.New(socketpath.Resolve(socket))
-			if name == "push-ref" {
-				err = cl.RemotePushRef(c.Context, remote, refName)
-			} else {
-				err = cl.RemotePullRef(c.Context, remote, refName)
-			}
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(c.App.Writer, "%s %s: ok\n", name, refName)
+			fmt.Fprintf(c.App.Writer, "pulled %s: %d objects (%d bytes), root %s\n",
+				refName, stats.ObjectsFetched, stats.BytesFetched, rootKey)
 			return nil
 		},
 	}

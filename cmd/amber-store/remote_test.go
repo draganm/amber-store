@@ -181,15 +181,12 @@ func TestRemotePushPullCycle(t *testing.T) {
 	if _, err := runApp(t, "", "ingest", "--no-progress", "--socket", sock, "snap", dir); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	out, err := runApp(t, "", "remote", "push-objects", "--socket", sock, "origin", "snap")
+	out, err := runApp(t, "", "remote", "push", "--socket", sock, "origin", "snap")
 	if err != nil {
-		t.Fatalf("push-objects: %v", err)
+		t.Fatalf("push: %v", err)
 	}
 	if !strings.Contains(out, "pushed") {
-		t.Fatalf("push-objects output: %q", out)
-	}
-	if _, err := runApp(t, "", "remote", "push-ref", "--socket", sock, "origin", "snap"); err != nil {
-		t.Fatalf("push-ref: %v", err)
+		t.Fatalf("push output: %q", out)
 	}
 	out, err = runApp(t, "", "remote", "ls-refs", "--socket", sock, "origin")
 	if err != nil || !strings.Contains(out, "snap") {
@@ -201,15 +198,12 @@ func TestRemotePushPullCycle(t *testing.T) {
 	if _, err := runApp(t, "y\n", "remote", "add", "--socket", sock2, "origin", srv.URL); err != nil {
 		t.Fatal(err)
 	}
-	out, err = runApp(t, "", "remote", "pull-objects", "--socket", sock2, "snap")
+	out, err = runApp(t, "", "remote", "pull", "--socket", sock2, "snap")
 	if err != nil {
-		t.Fatalf("pull-objects: %v", err)
+		t.Fatalf("pull: %v", err)
 	}
 	if !strings.Contains(out, "root ") {
-		t.Fatalf("pull-objects output shows no root key: %q", out)
-	}
-	if _, err := runApp(t, "", "remote", "pull-ref", "--socket", sock2, "snap"); err != nil {
-		t.Fatalf("pull-ref: %v", err)
+		t.Fatalf("pull output shows no root key: %q", out)
 	}
 	// the content round-trips
 	restoreDir := t.TempDir()
@@ -226,11 +220,11 @@ func TestRemoteArgParsing(t *testing.T) {
 	keyPath, _ := writeSigningKey(t)
 	signer := signerFromKeyPath(t, keyPath)
 	sock := startDaemonWithRemotes(t, signer)
-	if _, err := runApp(t, "", "remote", "push-objects", "--socket", sock); err == nil {
-		t.Fatal("no-arg push-objects succeeded")
+	if _, err := runApp(t, "", "remote", "push", "--socket", sock); err == nil {
+		t.Fatal("no-arg push succeeded")
 	}
-	if _, err := runApp(t, "", "remote", "push-objects", "--socket", sock, "a", "b", "c"); err == nil {
-		t.Fatal("3-arg push-objects succeeded")
+	if _, err := runApp(t, "", "remote", "push", "--socket", sock, "a", "b", "c"); err == nil {
+		t.Fatal("3-arg push succeeded")
 	}
 	if _, err := runApp(t, "", "remote", "add", "--socket", sock, "only-name"); err == nil {
 		t.Fatal("add without URL succeeded")
@@ -271,11 +265,11 @@ func TestRemotePushWithAutoIdentity(t *testing.T) {
 	if _, err := runApp(t, "", "ingest", "--no-progress", "--socket", sock, "snap", dir); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	out, err := runApp(t, "", "remote", "push-objects", "--socket", sock, "origin", "snap")
+	out, err := runApp(t, "", "remote", "push", "--socket", sock, "origin", "snap")
 	if err != nil {
-		t.Fatalf("push-objects: %v", err)
+		t.Fatalf("push: %v", err)
 	}
 	if !strings.Contains(out, "pushed") {
-		t.Fatalf("push-objects output: %q", out)
+		t.Fatalf("push output: %q", out)
 	}
 }

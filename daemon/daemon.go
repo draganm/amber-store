@@ -78,10 +78,8 @@ func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.L
 		mux.HandleFunc("PUT /v1/remotes", h.putRemote)
 		mux.HandleFunc("GET /v1/remotes", h.listRemotes)
 		mux.HandleFunc("DELETE /v1/remotes", h.deleteRemote)
-		mux.HandleFunc("POST /v1/remote/push-objects", h.remotePushObjects)
-		mux.HandleFunc("POST /v1/remote/pull-objects", h.remotePullObjects)
-		mux.HandleFunc("POST /v1/remote/push-ref", h.remotePushRef)
-		mux.HandleFunc("POST /v1/remote/pull-ref", h.remotePullRef)
+		mux.HandleFunc("POST /v1/remote/push", h.remotePush)
+		mux.HandleFunc("POST /v1/remote/pull", h.remotePull)
 		mux.HandleFunc("GET /v1/remote/refs", h.remoteLsRefs)
 	}
 	return logRequests(logger, mux)

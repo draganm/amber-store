@@ -59,7 +59,7 @@ func syncOpts(r *http.Request) (remotesync.Opts, error) {
 	return opts, nil
 }
 
-// syncEvent is one NDJSON line of a push/pull-objects response. Progress
+// syncEvent is one NDJSON line of a push/pull response. Progress
 // lines carry done/total; the final line carries stats or an error. The 200
 // status is committed before the work runs, so failures surface here.
 type syncEvent struct {
@@ -102,22 +102,14 @@ func (s *eventStream) send(ev syncEvent) {
 	_ = s.rc.Flush()
 }
 
-// localRefKey resolves a name in the local refstore to its key.
-func (h *handler) localRefKey(name string) (key.Key, error) {
-	data, err := h.refs.Get(name)
-	if err != nil {
-		return key.Key{}, err
-	}
-	rec, err := reference.Decode(data)
-	if err != nil {
-		return key.Key{}, err
-	}
-	return key.Parse(rec.Key)
-}
-
-// remotePushObjects pushes everything reachable from the local ref ?name= to
-// the remote, streaming NDJSON progress.
-func (h *handler) remotePushObjects(w http.ResponseWriter, r *http.Request) {
+// remotePush pushes everything reachable from the local ref ?name= to the
+// remote and then uploads the signed reference — one operation, streaming
+// NDJSON progress. The signed record is read and validated up front, so a
+// missing or unsigned reference is a clean 404/422 before any object moves.
+// Once the stream is open the 200 is committed, so a later failure — including a
+// remote PutRef rejection such as an ownership 403 — is delivered as a
+// syncEvent{Error} line, not an HTTP status.
+func (h *handler) remotePush(w http.ResponseWriter, r *http.Request) {
 	rc, status, err := h.remoteFor(r)
 	if err != nil {
 		http.Error(w, err.Error(), status)
@@ -129,11 +121,29 @@ func (h *handler) remotePushObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.URL.Query().Get("name")
-	root, err := h.localRefKey(name)
+	if name == "" {
+		http.Error(w, "missing name query parameter", http.StatusUnprocessableEntity)
+		return
+	}
+	raw, err := h.refs.Get(name)
 	if errors.Is(err, refstore.ErrNotFound) {
 		http.Error(w, "reference not found", http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rec, err := reference.Decode(raw)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(rec.Signature) == 0 || len(rec.PublicKey) == 0 {
+		http.Error(w, "reference is not signed — configure a signing key and re-create it", http.StatusUnprocessableEntity)
+		return
+	}
+	root, err := key.Parse(rec.Key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -142,11 +152,18 @@ func (h *handler) remotePushObjects(w http.ResponseWriter, r *http.Request) {
 	opts.Progress = func(done, total int) { stream.send(syncEvent{Done: done, Total: total}) }
 	stats, err := remotesync.Push(r.Context(), h.store, rc, root, opts)
 	if err != nil {
-		h.log.Warn("push-objects failed", "name", name, "error", err)
+		h.log.Warn("push failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return
 	}
-	h.log.Info("push-objects complete", "name", name, "pushed", stats.ObjectsPushed)
+	// Objects are up; push the signed reference. The server re-verifies it and
+	// the no-dangling rule, which now holds.
+	if err := rc.PutRef(r.Context(), name, raw); err != nil {
+		h.log.Warn("push reference failed", "name", name, "error", err)
+		stream.send(syncEvent{Error: err.Error()})
+		return
+	}
+	h.log.Info("push complete", "name", name, "pushed", stats.ObjectsPushed)
 	stream.send(syncEvent{PushStats: &pushStatsLine{
 		ObjectsTotal:  stats.ObjectsTotal,
 		ObjectsPushed: stats.ObjectsPushed,
@@ -184,9 +201,12 @@ func fetchAndVerifyRemoteRef(r *http.Request, rc *remoteclient.Client, name stri
 	return raw, rec, 0, nil
 }
 
-// remotePullObjects resolves ?name= on the REMOTE (so it works before any
-// local ref exists) and pulls everything reachable from its key.
-func (h *handler) remotePullObjects(w http.ResponseWriter, r *http.Request) {
+// remotePull resolves ?name= on the REMOTE (so it works before any local ref
+// exists), pulls everything reachable from its key, and then writes the
+// verified reference into the local refstore — one operation, streaming NDJSON
+// progress. Pull's completeness gate guarantees the whole tree is local before
+// the reference is written (the no-dangling rule).
+func (h *handler) remotePull(w http.ResponseWriter, r *http.Request) {
 	rc, status, err := h.remoteFor(r)
 	if err != nil {
 		http.Error(w, err.Error(), status)
@@ -198,7 +218,7 @@ func (h *handler) remotePullObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.URL.Query().Get("name")
-	_, rec, status, err := fetchAndVerifyRemoteRef(r, rc, name)
+	raw, rec, status, err := fetchAndVerifyRemoteRef(r, rc, name)
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
@@ -212,96 +232,20 @@ func (h *handler) remotePullObjects(w http.ResponseWriter, r *http.Request) {
 	opts.Progress = func(done, total int) { stream.send(syncEvent{Done: done, Total: total}) }
 	stats, err := remotesync.Pull(r.Context(), h.store, rc, root, opts)
 	if err != nil {
-		h.log.Warn("pull-objects failed", "name", name, "error", err)
+		h.log.Warn("pull failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return
 	}
-	h.log.Info("pull-objects complete", "name", name, "fetched", stats.ObjectsFetched)
+	if err := h.refs.Put(name, raw); err != nil {
+		h.log.Warn("pull reference write failed", "name", name, "error", err)
+		stream.send(syncEvent{Error: err.Error()})
+		return
+	}
+	h.log.Info("pull complete", "name", name, "fetched", stats.ObjectsFetched, "key", root)
 	stream.send(syncEvent{Key: root.String(), PullStats: &pullStatsLine{
 		ObjectsFetched: stats.ObjectsFetched,
 		BytesFetched:   stats.BytesFetched,
 	}})
-}
-
-// remotePushRef uploads the local ref record verbatim. It must be signed —
-// the server would reject it anyway, but failing here gives a clearer error
-// before any network traffic.
-func (h *handler) remotePushRef(w http.ResponseWriter, r *http.Request) {
-	rc, status, err := h.remoteFor(r)
-	if err != nil {
-		http.Error(w, err.Error(), status)
-		return
-	}
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "missing name query parameter", http.StatusUnprocessableEntity)
-		return
-	}
-	raw, err := h.refs.Get(name)
-	if errors.Is(err, refstore.ErrNotFound) {
-		http.Error(w, "reference not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	rec, err := reference.Decode(raw)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if len(rec.Signature) == 0 || len(rec.PublicKey) == 0 {
-		http.Error(w, "reference is not signed — configure a signing key and re-create it", http.StatusUnprocessableEntity)
-		return
-	}
-	if err := rc.PutRef(r.Context(), name, raw); err != nil {
-		var se *remoteclient.StatusError
-		if errors.As(err, &se) {
-			http.Error(w, se.Msg, se.Code)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	h.log.Info("push-ref complete", "name", name)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// remotePullRef fetches and verifies the remote record, requires its objects
-// to already be local (no-dangling rule), and stores it.
-func (h *handler) remotePullRef(w http.ResponseWriter, r *http.Request) {
-	rc, status, err := h.remoteFor(r)
-	if err != nil {
-		http.Error(w, err.Error(), status)
-		return
-	}
-	name := r.URL.Query().Get("name")
-	raw, rec, status, err := fetchAndVerifyRemoteRef(r, rc, name)
-	if err != nil {
-		http.Error(w, err.Error(), status)
-		return
-	}
-	k, err := key.Parse(rec.Key)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	has, err := h.store.Has(k)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !has {
-		http.Error(w, "referenced objects are not local yet — run pull-objects first", http.StatusConflict)
-		return
-	}
-	if err := h.refs.Put(name, raw); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	h.log.Info("pull-ref complete", "name", name, "key", k)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // remoteLsRefs proxies the remote's reference listing as NDJSON.
