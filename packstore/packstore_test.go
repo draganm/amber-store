@@ -7,10 +7,12 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
 	"github.com/draganm/amber-store/amberpack"
+	"github.com/draganm/amber-store/key"
 )
 
 func openStore(t *testing.T, dir string, opts ...Option) *Store {
@@ -139,6 +141,56 @@ func TestStoredSizeMatchesRecordPayload(t *testing.T) {
 	}
 	if _, ok, err := s.StoredSize(blobObj(t, []byte("nope")).Key); ok || err != nil {
 		t.Fatalf("StoredSize(absent) = ok %v, err %v, want false, nil", ok, err)
+	}
+}
+
+func TestSortByLocationOrdersByDiskLayout(t *testing.T) {
+	// Objects spread across several sealed segments and the active segment. Read
+	// keys handed to SortByLocation in a non-disk order must come back ordered by
+	// physical layout — grouped by segment, ascending offset within a segment —
+	// so a read sweep follows the files instead of jumping around.
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(2048))
+	var keys []key.Key
+	for i := 0; i < 60; i++ {
+		o := blobObj(t, append(incompressible(1500), byte(i), byte(i>>8)))
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, o.Key)
+	}
+	// Reverse so the input is not already in disk order; SortByLocation must fix
+	// it regardless of the starting permutation.
+	slices.Reverse(keys)
+
+	s.SortByLocation(keys)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var prevSeg, prevOff uint64
+	for i, k := range keys {
+		seg, off, ok := s.locateLocked(k)
+		if !ok {
+			t.Fatalf("locate %s: not found", k)
+		}
+		if i > 0 && (seg < prevSeg || (seg == prevSeg && off < prevOff)) {
+			t.Fatalf("out of disk order at %d: (%d,%d) follows (%d,%d)", i, seg, off, prevSeg, prevOff)
+		}
+		prevSeg, prevOff = seg, off
+	}
+}
+
+func TestSortByLocationPutsAbsentKeysLast(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	present := blobObj(t, []byte("here"))
+	if err := s.Put(present.Key, present.Data); err != nil {
+		t.Fatal(err)
+	}
+	absent := blobObj(t, []byte("gone")).Key
+	keys := []key.Key{absent, present.Key}
+	s.SortByLocation(keys)
+	if keys[0] != present.Key || keys[1] != absent {
+		t.Fatalf("absent key not sorted last: got %v", keys)
 	}
 }
 

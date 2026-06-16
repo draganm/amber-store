@@ -73,6 +73,40 @@ func TestPushBytesPushedIsCompressed(t *testing.T) {
 	}
 }
 
+func TestPushPipelineTransfersEverythingWithShallowPrefetch(t *testing.T) {
+	// Many small packs through a shallow prefetch queue (Prefetch 1) and more
+	// uploaders than the buffer depth: exercises the reader→queue→uploader
+	// pipeline's backpressure and drain without losing or duplicating objects.
+	h := newHarness(t)
+	local := newLocalStore(t)
+	ctx := context.Background()
+	var blobKeys []key.Key
+	for i := range 50 {
+		blobKeys = append(blobKeys, putBlob(t, local, byte(i), 1000).Key)
+	}
+	root := buildFileTree(t, local, blobKeys)
+
+	stats, err := remotesync.Push(ctx, local, h.rc(t), "site", root, remotesync.Opts{
+		BatchBytes: 2000, // ~1 blob/pack → many packs
+		Jobs:       4,
+		Prefetch:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ObjectsPushed != 52 { // 50 blobs + FileNode + DirLeaf
+		t.Fatalf("pushed %d objects, want 52", stats.ObjectsPushed)
+	}
+	h.inbox.WaitFor(root)
+	keys, err := fstree.ReachableKeys(root, h.store.Get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 52 {
+		t.Fatalf("server has %d reachable objects, want 52", len(keys))
+	}
+}
+
 func TestPushIsMinimalOnRerun(t *testing.T) {
 	h := newHarness(t)
 	local := newLocalStore(t)

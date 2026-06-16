@@ -412,3 +412,13 @@ func (g *sealedSegment) storedSize(k key.Key) (uint32, bool) {
 	_, slen, ok := g.fv.lookup(k)
 	return slen, ok
 }
+
+// locate returns k's record offset within this segment and whether it was
+// found, from the index alone — for ordering reads by disk layout.
+func (g *sealedSegment) locate(k key.Key) (uint64, bool) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return 0, false
+	}
+	off, _, ok := g.fv.lookup(k)
+	return off, ok
+}

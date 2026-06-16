@@ -7,14 +7,17 @@
 package remotesync
 
 import (
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 )
 
-// DefaultBatchBytes is the default per-batch payload target. It is held below
-// the remote server's 64 MiB request-body cap: the target measures uncompressed
-// payload, while the wire body is the compressed records plus ~46 B/record of
-// framing, so the headroom keeps even an incompressible pack under the cap.
+// DefaultBatchBytes is the default per-batch payload target, measured in stored
+// (post-compression) bytes — the bytes that travel — held just under the remote
+// server's 64 MiB request-body cap (~46 B/record of framing fits the headroom).
+// It is deliberately large: the server durably stages each pack (two fsyncs)
+// and verifies/signs it before acking, all fixed per-pack costs, so fewer big
+// packs amortize that overhead far better than many small ones. Peak push
+// memory is roughly (Prefetch + 2*Jobs) packs at once; see Opts.
 const DefaultBatchBytes = 60 << 20 // 60 MiB
 
 // maxBatchKeys bounds a batch's key count so pathological trees of tiny

@@ -13,13 +13,19 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// DefaultJobs is the default number of parallel transfer workers.
-const DefaultJobs = 4
+// DefaultJobs is the default number of parallel transfer workers (reader and
+// uploader pool size).
+const DefaultJobs = 8
 
 // Opts configures Push and Pull.
 type Opts struct {
 	BatchBytes uint64 // per-batch payload target; 0 = DefaultBatchBytes
 	Jobs       int    // parallel workers; <= 0 = DefaultJobs
+	// Prefetch is the number of assembled-but-not-yet-uploaded packs Push keeps
+	// queued ahead of the uploaders, so a slow disk read never starves the
+	// network and vice versa; <= 0 = Jobs. Peak push memory is roughly
+	// (Prefetch + 2*Jobs) * BatchBytes, so lower it (or BatchBytes) to cap RAM.
+	Prefetch int
 	// Progress, when non-nil, is called as work completes, possibly
 	// concurrently from several workers. For Push, done counts settled keys
 	// — confirmed present at negotiation, or uploaded — out of total
@@ -40,6 +46,13 @@ func (o Opts) jobs() int {
 		return DefaultJobs
 	}
 	return o.Jobs
+}
+
+func (o Opts) prefetch() int {
+	if o.Prefetch <= 0 {
+		return o.jobs()
+	}
+	return o.Prefetch
 }
 
 // PushStats summarizes one Push.
@@ -107,58 +120,91 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 		return stats, err
 	}
 
-	// Phase 2: upload byte-balanced packs holding exactly the missing objects.
-	// readSlots bounds concurrent record reads across all upload workers: a pack
-	// assembling alone (while its peers upload) gets up to jobs()-way parallel
-	// reads — overlapping cold page faults — without letting total in-flight
-	// reads exceed jobs().
-	readSlots := make(chan struct{}, opts.jobs())
-	up, upCtx := errgroup.WithContext(ctx)
-	up.SetLimit(opts.jobs())
-	for _, batch := range Batches(missing, opts.batchBytes(), PushSizer(store)) {
-		up.Go(func() error {
-			recs := make([][]byte, len(batch))
-			// Read the pack's records concurrently into their slots; each read
-			// holds a shared slot only while it runs. Distinct indices, so no
-			// lock is needed on recs.
-			rg, rgCtx := errgroup.WithContext(upCtx)
-			for i, k := range batch {
-				rg.Go(func() error {
-					select {
-					case readSlots <- struct{}{}:
-					case <-rgCtx.Done():
-						return rgCtx.Err()
-					}
-					defer func() { <-readSlots }()
-					// Copy the on-disk record verbatim: it is wire-format-
-					// identical, so the push skips the decompress/recompress
-					// round trip.
-					rec, err := store.GetRecord(k)
-					if err != nil {
-						return fmt.Errorf("reading %s: %w", k, err)
-					}
-					recs[i] = rec
+	// Order the missing set by on-disk layout before batching so each pack's
+	// reads sweep the segment files sequentially instead of chasing the
+	// reachable-walk order across random offsets.
+	store.SortByLocation(missing)
+
+	// Phase 2: assemble and upload byte-balanced packs holding exactly the
+	// missing objects, as a decoupled pipeline — a reader pool assembles packs
+	// (reading records in the disk order set above) into a bounded prefetch
+	// queue, an uploader pool drains it. Decoupling keeps the disk continuously
+	// reading ahead and the network continuously uploading, so neither stalls
+	// waiting on the other; a coupled read-then-upload worker would idle the
+	// network during every next-pack read.
+	batches := Batches(missing, opts.batchBytes(), PushSizer(store))
+	ready := make(chan assembledPack, opts.prefetch())
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Reader pool: assemble packs into ready, then close it so the uploaders
+	// drain and finish. Bounded by jobs(); each reader sweeps its pack's records
+	// sequentially in disk order.
+	g.Go(func() error {
+		rg, rgCtx := errgroup.WithContext(gctx)
+		rg.SetLimit(opts.jobs())
+		for _, batch := range batches {
+			rg.Go(func() error {
+				pack, err := assemblePack(rgCtx, store, batch)
+				if err != nil {
+					return err
+				}
+				select {
+				case ready <- pack:
 					return nil
-				})
+				case <-rgCtx.Done():
+					return rgCtx.Err()
+				}
+			})
+		}
+		err := rg.Wait()
+		close(ready)
+		return err
+	})
+
+	// Uploader pool: drain ready. Running directly in g means an upload error
+	// cancels gctx, which stops the readers.
+	for range opts.jobs() {
+		g.Go(func() error {
+			for pack := range ready {
+				if err := rc.PushPackRaw(gctx, name, root, pack.recs); err != nil {
+					return err
+				}
+				settle(pack.count, pack.count, pack.bytes)
 			}
-			if err := rg.Wait(); err != nil {
-				return err
-			}
-			var pushedBytes int64
-			for _, rec := range recs {
-				pushedBytes += int64(len(rec) - amberpack.RecHeaderSize)
-			}
-			if err := rc.PushPackRaw(upCtx, name, root, recs); err != nil {
-				return err
-			}
-			settle(len(batch), len(batch), pushedBytes)
 			return nil
 		})
 	}
-	if err := up.Wait(); err != nil {
+	if err := g.Wait(); err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+// assembledPack is one pack read from the store, ready to upload.
+type assembledPack struct {
+	recs  [][]byte
+	count int   // objects in the pack
+	bytes int64 // stored (on-the-wire) payload bytes
+}
+
+// assemblePack reads every record of batch from the store in order, copying the
+// on-disk records verbatim (they are wire-format-identical, so no decompress/
+// recompress). It checks ctx between reads so a cancelled push stops promptly.
+func assemblePack(ctx context.Context, store *packstore.Store, batch []key.Key) (assembledPack, error) {
+	recs := make([][]byte, len(batch))
+	var pushedBytes int64
+	for i, k := range batch {
+		if err := ctx.Err(); err != nil {
+			return assembledPack{}, err
+		}
+		rec, err := store.GetRecord(k)
+		if err != nil {
+			return assembledPack{}, fmt.Errorf("reading %s: %w", k, err)
+		}
+		recs[i] = rec
+		pushedBytes += int64(len(rec) - amberpack.RecHeaderSize)
+	}
+	return assembledPack{recs: recs, count: len(batch), bytes: pushedBytes}, nil
 }
 
 // checkChunks splits the reachable key list into have/want request bodies, each

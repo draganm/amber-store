@@ -9,6 +9,7 @@ import (
 
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/remotesync"
 	"github.com/urfave/cli/v2"
 )
 
@@ -143,13 +144,13 @@ func remotePushPullCommand(name string) *cli.Command {
 			&cli.IntFlag{
 				Name:        "jobs",
 				Aliases:     []string{"j"},
-				Value:       4,
+				Value:       remotesync.DefaultJobs,
 				Usage:       "parallel transfer workers",
 				Destination: &jobs,
 			},
 			&cli.Uint64Flag{
 				Name:        "batch-bytes",
-				Value:       60 << 20,
+				Value:       remotesync.DefaultBatchBytes,
 				Usage:       "per-batch payload target in bytes (kept under the server's 64 MiB body cap)",
 				Destination: &batchBytes,
 			},

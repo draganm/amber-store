@@ -554,6 +554,63 @@ func (s *Store) StoredSize(k key.Key) (uint64, bool, error) {
 	return 0, false, nil
 }
 
+// locateLocked returns the segment id and record offset where k lives, for
+// ordering reads by physical layout. The caller must hold s.mu (read or write).
+func (s *Store) locateLocked(k key.Key) (seg, off uint64, ok bool) {
+	if s.active != nil {
+		if loc, ok := s.active.index[k]; ok {
+			return s.active.id, uint64(loc.off), true
+		}
+	}
+	for i := len(s.sealed) - 1; i >= 0; i-- {
+		if o, found := s.sealed[i].locate(k); found {
+			return s.sealed[i].id, o, true
+		}
+	}
+	return 0, 0, false
+}
+
+// SortByLocation reorders keys in place to follow the store's on-disk layout —
+// grouped by segment, ascending offset within a segment — so reading them in
+// order is a near-sequential sweep per segment rather than scattered random
+// access. Absent keys sort last (their reads surface ErrNotFound later). It is
+// a no-op on a closed store.
+func (s *Store) SortByLocation(keys []key.Key) {
+	type located struct {
+		k        key.Key
+		seg, off uint64
+		ok       bool
+	}
+	items := make([]located, len(keys))
+	s.mu.RLock()
+	closed := s.closed
+	if !closed {
+		for i, k := range keys {
+			seg, off, ok := s.locateLocked(k)
+			items[i] = located{k, seg, off, ok}
+		}
+	}
+	s.mu.RUnlock()
+	if closed {
+		return
+	}
+	slices.SortFunc(items, func(a, b located) int {
+		if a.ok != b.ok {
+			if a.ok { // present keys before absent ones
+				return -1
+			}
+			return 1
+		}
+		if c := cmp.Compare(a.seg, b.seg); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.off, b.off)
+	})
+	for i := range items {
+		keys[i] = items[i].k
+	}
+}
+
 // Has reports whether an object is stored under k.
 func (s *Store) Has(k key.Key) (bool, error) {
 	s.mu.RLock()
