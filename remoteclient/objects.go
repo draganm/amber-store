@@ -30,17 +30,15 @@ func (c *Client) Missing(ctx context.Context, keys []key.Key) ([]key.Key, error)
 // before processing it; this returns once the pack is accepted, not once it is
 // stored. Completeness is enforced when the reference is set.
 func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []fstree.Object) error {
-	var buf bytes.Buffer
-	pw := amberpack.NewWriter(&buf)
-	for _, o := range objs {
-		if err := pw.Add(o); err != nil {
-			return err
+	return c.postPack(ctx, ref, root, func(w io.Writer) error {
+		pw := amberpack.NewWriter(w)
+		for _, o := range objs {
+			if err := pw.Add(o); err != nil {
+				return err
+			}
 		}
-	}
-	if err := pw.Close(); err != nil {
-		return err
-	}
-	return c.postPack(ctx, ref, root, buf.Bytes())
+		return pw.Close()
+	})
 }
 
 // PushPackRaw uploads pre-encoded records (EncodeRecord outputs, as stored
@@ -49,25 +47,41 @@ func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []
 // read straight from a local packstore are wire-format-identical, so they travel
 // untouched. The server validates each record's framing and CRC on receipt.
 func (c *Client) PushPackRaw(ctx context.Context, ref string, root key.Key, records [][]byte) error {
-	var buf bytes.Buffer
-	pw := amberpack.NewWriter(&buf)
-	for _, rec := range records {
-		if err := pw.AddRecord(rec); err != nil {
-			return err
+	return c.postPack(ctx, ref, root, func(w io.Writer) error {
+		pw := amberpack.NewWriter(w)
+		for _, rec := range records {
+			if err := pw.AddRecord(rec); err != nil {
+				return err
+			}
 		}
-	}
-	if err := pw.Close(); err != nil {
-		return err
-	}
-	return c.postPack(ctx, ref, root, buf.Bytes())
+		return pw.Close()
+	})
 }
 
-// postPack POSTs an assembled pack body tagged with (ref, root).
-func (c *Client) postPack(ctx context.Context, ref string, root key.Key, body []byte) error {
+// postPack streams an amberpack body (emitted by writeBody) tagged with
+// (ref, root) to the server without ever holding the whole pack in memory. The
+// pack is written twice: first into a blake3 hasher to compute the body hash
+// the request signature needs (the signature header must precede the body),
+// then into a pipe feeding the request body. For PushPackRaw both passes are
+// cheap copies of records that already live in memory; this avoids the extra
+// full-pack buffer the upload would otherwise allocate per in-flight pack.
+func (c *Client) postPack(ctx context.Context, ref string, root key.Key, writeBody func(io.Writer) error) error {
+	h := blake3.New()
+	if err := writeBody(h); err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		if err := writeBody(pw); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		pw.Close()
+	}()
 	q := url.Values{}
 	q.Set("ref", ref)
 	q.Set("root", root.String())
-	_, _, err := c.do(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", body)
+	_, _, err := c.doStreaming(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", h.Sum(nil), pr)
 	return err
 }
 
@@ -82,13 +96,16 @@ func (c *Client) ReachableKeys(ctx context.Context, root key.Key) ([]key.Key, er
 	return keylist.Parse(body)
 }
 
-// FetchObjects downloads the requested objects as a streamed amberpack,
-// verifying the trailer signature (over the exact body bytes) against the
-// pinned server key before returning. Error responses are buffered and
-// header-signed like every other response.
+// FetchObjects downloads the requested objects as an amberpack carrying an
+// in-band trailing signature (httpsig.AppendSignatureTrailer): the server
+// streams the pack while hashing it and appends the signature once the body
+// hash is known. The signature is part of the body — not an HTTP trailer — so
+// it survives reverse proxies that drop trailers. The client buffers the
+// response (bounded by the pull batch size), splits off the signature, verifies
+// it over the exact pack bytes against the pinned key, then parses the pack.
+// Error responses (non-200) are header-signed like every other endpoint.
 func (c *Client) FetchObjects(ctx context.Context, keys []key.Key) ([]fstree.Object, error) {
-	body := keylist.Flatten(keys)
-	req, nonce, err := c.signedRequest(ctx, http.MethodPost, "/v1/objects/get", "application/octet-stream", body)
+	req, nonce, err := c.signedRequest(ctx, http.MethodPost, "/v1/objects/get", "application/octet-stream", keylist.Flatten(keys))
 	if err != nil {
 		return nil, err
 	}
@@ -97,33 +114,30 @@ func (c *Client) FetchObjects(ctx context.Context, keys []key.Key) ([]fstree.Obj
 		return nil, fmt.Errorf("contacting remote %s: %w", c.base, err)
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if rerr != nil {
-			return nil, rerr
-		}
 		if err := httpsig.VerifyResponse(c.serverPubWire, nonce, resp.StatusCode,
-			httpsig.HashBody(respBody), resp.Header.Get(httpsig.HeaderSignature)); err != nil {
+			httpsig.HashBody(body), resp.Header.Get(httpsig.HeaderSignature)); err != nil {
 			return nil, fmt.Errorf("server identity mismatch for %s: %w", c.base, err)
 		}
-		return nil, &StatusError{Code: resp.StatusCode, Msg: string(respBody)}
+		return nil, &StatusError{Code: resp.StatusCode, Msg: string(body)}
 	}
-	hasher := blake3.New()
-	tee := io.TeeReader(resp.Body, hasher)
+	pack, sig, ok := httpsig.SplitSignatureTrailer(body)
+	if !ok {
+		return nil, fmt.Errorf("server identity mismatch for %s: response is missing its in-band signature", c.base)
+	}
+	if err := httpsig.VerifyResponse(c.serverPubWire, nonce, http.StatusOK, httpsig.HashBody(pack), sig); err != nil {
+		return nil, fmt.Errorf("server identity mismatch for %s: %w", c.base, err)
+	}
 	var objs []fstree.Object
-	for o, err := range amberpack.NewReader(tee).All() {
+	for o, err := range amberpack.NewReader(bytes.NewReader(pack)).All() {
 		if err != nil {
 			return nil, fmt.Errorf("reading object stream: %w", err)
 		}
 		objs = append(objs, o)
-	}
-	// Drain to EOF so the hash covers the whole body and the trailer arrives.
-	if _, err := io.Copy(io.Discard, tee); err != nil {
-		return nil, err
-	}
-	if err := httpsig.VerifyResponse(c.serverPubWire, nonce, http.StatusOK,
-		hasher.Sum(nil), resp.Trailer.Get(httpsig.HeaderSignature)); err != nil {
-		return nil, fmt.Errorf("server identity mismatch for %s: %w", c.base, err)
 	}
 	return objs, nil
 }

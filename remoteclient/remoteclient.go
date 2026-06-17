@@ -127,6 +127,36 @@ func (c *Client) do(ctx context.Context, method, pathQuery, contentType string, 
 	if err != nil {
 		return 0, nil, err
 	}
+	return c.send(req, nonce)
+}
+
+// doStreaming sends a signed request whose body is streamed from body (never
+// held whole), so the caller must pass the body's precomputed blake3 as
+// bodyHash — the signature header is set before the body is read. body is taken
+// as a ReadCloser so the transport closes it on completion or error, unblocking
+// a producer goroutine writing into a pipe.
+func (c *Client) doStreaming(ctx context.Context, method, pathQuery, contentType string, bodyHash []byte, body io.ReadCloser) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+pathQuery, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	nonce, err := newNonce()
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := httpsig.SignRequestHash(req, c.signer, time.Now().UnixNano(), nonce, bodyHash); err != nil {
+		return 0, nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return c.send(req, nonce)
+}
+
+// send performs req, buffers and verifies the response against the pinned key,
+// and maps non-2xx statuses to StatusError. nonce is what the response
+// signature must cover.
+func (c *Client) send(req *http.Request, nonce []byte) (int, []byte, error) {
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("contacting remote %s: %w", c.base, err)

@@ -9,8 +9,10 @@ package httpsig
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -69,6 +71,44 @@ func HashBody(body []byte) []byte {
 	return h[:]
 }
 
+// trailerLenSize is the fixed big-endian uint32 length suffix that frames an
+// in-band response signature.
+const trailerLenSize = 4
+
+// AppendSignatureTrailer writes an in-band response signature after an
+// already-written body: the base64 signature followed by its big-endian uint32
+// length. Unlike an HTTP trailer (which proxies routinely drop) it is part of
+// the body, so it survives any intermediary; unlike a header it can be emitted
+// after a streamed body, when the body hash is finally known. SplitSignatureTrailer
+// recovers it. The signature itself still covers {nonce, status, blake3(prefix)}
+// via SignResponse, so a tampered or truncated prefix fails verification.
+func AppendSignatureTrailer(w io.Writer, sigB64 string) error {
+	if _, err := io.WriteString(w, sigB64); err != nil {
+		return err
+	}
+	var l [trailerLenSize]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(sigB64)))
+	_, err := w.Write(l[:])
+	return err
+}
+
+// SplitSignatureTrailer splits a fully-buffered body into the signed prefix and
+// the base64 signature appended by AppendSignatureTrailer. ok is false if the
+// body is too short or its trailing length is inconsistent — both of which then
+// fail closed at signature verification.
+func SplitSignatureTrailer(body []byte) (prefix []byte, sigB64 string, ok bool) {
+	if len(body) < trailerLenSize {
+		return nil, "", false
+	}
+	end := len(body) - trailerLenSize
+	n := binary.BigEndian.Uint32(body[end:])
+	if uint64(n) > uint64(end) {
+		return nil, "", false
+	}
+	start := end - int(n)
+	return body[:start], string(body[start:end]), true
+}
+
 // notNil maps nil to an empty slice so a nil and an empty nonce/hash encode
 // identically.
 func notNil(b []byte) []byte {
@@ -92,7 +132,15 @@ func requestSigPayload(method, pathQuery string, timestamp int64, nonce, bodyHas
 // sets the four Amber-* headers. body must be the exact bytes the request
 // will send.
 func SignRequest(req *http.Request, signer ssh.Signer, timestamp int64, nonce, body []byte) error {
-	payload, err := requestSigPayload(req.Method, req.URL.RequestURI(), timestamp, nonce, HashBody(body))
+	return SignRequestHash(req, signer, timestamp, nonce, HashBody(body))
+}
+
+// SignRequestHash is SignRequest for a body the caller has already hashed —
+// needed when the body is streamed (so it is never held whole), since the
+// signature header must be set before the body is sent. bodyHash must be the
+// blake3-256 of the exact bytes the request will send.
+func SignRequestHash(req *http.Request, signer ssh.Signer, timestamp int64, nonce, bodyHash []byte) error {
+	payload, err := requestSigPayload(req.Method, req.URL.RequestURI(), timestamp, nonce, bodyHash)
 	if err != nil {
 		return fmt.Errorf("encoding request signature payload: %w", err)
 	}

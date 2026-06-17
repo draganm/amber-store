@@ -94,11 +94,15 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 }
 
 // postObjectsGet streams an amberpack of the requested keys. Existence is
-// checked for every key before the first body byte (the project-wide
-// do-the-work-before-streaming convention), so an absent key is a clean 404
-// naming the missing keys. The response signature travels in an HTTP trailer
-// because the body hash is only known at the end; a mid-stream failure cuts
-// the stream, which clients surface as a missing/invalid trailer signature.
+// checked for every key first (the project-wide do-the-work-before-streaming
+// convention), so an absent key is a clean 404 naming the missing keys. The
+// pack streams straight to the client while being hashed, then the response
+// signature is appended in-band (AppendSignatureTrailer) once the body hash is
+// known. The signature lives in the body, not an HTTP trailer, so it survives
+// reverse proxies that drop trailers — while the server holds only one record
+// in memory, never the whole pack. A mid-stream Get failure (only possible on a
+// race after the existence check) cuts the stream without a signature, which
+// the client rejects as unsigned.
 func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	keys, err := keylist.Parse(a.body)
 	if err != nil {
@@ -119,16 +123,13 @@ func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *auth
 		h.signError(w, a.nonce, http.StatusNotFound, "objects not found:\n"+strings.Join(names, "\n"))
 		return
 	}
-	// Declare the trailer name up-front so HTTP/1.1 chunked encoding includes
-	// it; http.TrailerPrefix alone is only sufficient for HTTP/2.
-	w.Header().Set("Trailer", httpsig.HeaderSignature)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	hasher := blake3.New()
 	pw := amberpack.NewWriter(io.MultiWriter(w, hasher))
 	for _, k := range keys {
 		data, err := h.store.Get(k)
 		if err != nil {
-			// Bytes are already in flight; cut the stream without a trailer.
+			// Bytes are already in flight; cut the stream without a signature.
 			h.log.Error("objects/get stream aborted", "key", k, "error", err)
 			return
 		}
@@ -143,10 +144,12 @@ func (h *handler) postObjectsGet(w http.ResponseWriter, r *http.Request, a *auth
 	}
 	sig, err := httpsig.SignResponse(h.identity, a.nonce, http.StatusOK, hasher.Sum(nil))
 	if err != nil {
-		h.log.Error("signing objects/get trailer failed", "error", err)
+		h.log.Error("signing objects/get response failed", "error", err)
 		return
 	}
-	w.Header().Set(http.TrailerPrefix+httpsig.HeaderSignature, sig)
+	if err := httpsig.AppendSignatureTrailer(w, sig); err != nil {
+		h.log.Error("writing objects/get signature failed", "error", err)
+	}
 }
 
 // postObjectsReachable walks the tree under the requested root key and returns

@@ -148,7 +148,7 @@ func TestObjectUploadRejectsMalformedStream(t *testing.T) {
 	}
 }
 
-func TestObjectsGetStreamsPackWithSignedTrailer(t *testing.T) {
+func TestObjectsGetReturnsInBandSignedPack(t *testing.T) {
 	ts := newTestServer(t)
 	objs := storeBlobs(t, ts, "stream one", "stream two", "stream three")
 	want := []key.Key{objs[0].Key, objs[2].Key}
@@ -174,15 +174,23 @@ func TestObjectsGetStreamsPackWithSignedTrailer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// trailer signature covers the exact body bytes
-	sig := resp.Trailer.Get(httpsig.HeaderSignature)
-	if err := httpsig.VerifyResponse(ts.identity.PublicKey().Marshal(), nonce, 200,
-		httpsig.HashBody(respBody), sig); err != nil {
-		t.Fatalf("trailer signature: %v", err)
+	// The signature is appended in-band, not in a header or trailer, so it
+	// survives proxies that strip trailers while the server still streams.
+	if resp.Header.Get(httpsig.HeaderSignature) != "" || resp.Trailer.Get(httpsig.HeaderSignature) != "" {
+		t.Fatal("fetch success must carry the signature in-band, not in a header/trailer")
 	}
-	// the body is an amberpack of exactly the requested objects
+	pack, sig, ok := httpsig.SplitSignatureTrailer(respBody)
+	if !ok {
+		t.Fatal("response has no in-band signature trailer")
+	}
+	// The in-band signature covers the exact pack bytes.
+	if err := httpsig.VerifyResponse(ts.identity.PublicKey().Marshal(), nonce, 200,
+		httpsig.HashBody(pack), sig); err != nil {
+		t.Fatalf("in-band signature: %v", err)
+	}
+	// the pack is an amberpack of exactly the requested objects
 	got := map[key.Key][]byte{}
-	for o, err := range amberpack.NewReader(bytes.NewReader(respBody)).All() {
+	for o, err := range amberpack.NewReader(bytes.NewReader(pack)).All() {
 		if err != nil {
 			t.Fatal(err)
 		}

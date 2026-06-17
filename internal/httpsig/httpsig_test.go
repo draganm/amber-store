@@ -183,3 +183,34 @@ func TestVerifyRequestHashMatchesVerifyRequest(t *testing.T) {
 		t.Fatalf("unexpected key type")
 	}
 }
+
+func TestSignatureTrailerRoundTrip(t *testing.T) {
+	pack := []byte("AMBERPK\x03...records...\x00")
+	sig := "c2lnbmF0dXJlLWJhc2U2NA==" // arbitrary base64-ish string
+	var buf bytes.Buffer
+	buf.Write(pack)
+	if err := httpsig.AppendSignatureTrailer(&buf, sig); err != nil {
+		t.Fatalf("AppendSignatureTrailer: %v", err)
+	}
+	prefix, gotSig, ok := httpsig.SplitSignatureTrailer(buf.Bytes())
+	if !ok {
+		t.Fatal("SplitSignatureTrailer: ok = false on a well-formed body")
+	}
+	if !bytes.Equal(prefix, pack) {
+		t.Fatalf("prefix = %q, want %q", prefix, pack)
+	}
+	if gotSig != sig {
+		t.Fatalf("sig = %q, want %q", gotSig, sig)
+	}
+}
+
+func TestSplitSignatureTrailerRejectsMalformed(t *testing.T) {
+	if _, _, ok := httpsig.SplitSignatureTrailer([]byte{1, 2}); ok {
+		t.Fatal("ok = true on a body shorter than the length suffix")
+	}
+	// A length suffix larger than the remaining body must be rejected, not panic.
+	bad := []byte{0x00, 0x00, 0x10, 0x00} // claims a 4096-byte signature
+	if _, _, ok := httpsig.SplitSignatureTrailer(bad); ok {
+		t.Fatal("ok = true when the claimed signature length exceeds the body")
+	}
+}

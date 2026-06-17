@@ -1,8 +1,12 @@
 package remoteclient_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/draganm/amber-store/amberpack"
@@ -10,6 +14,72 @@ import (
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remoteclient"
 )
+
+// trailerStrippingProxy forwards requests to backend, preserving method,
+// path+query, headers and body, but copying back only the response headers and
+// body — never HTTP trailers. It models the common reverse proxy / CDN that
+// drops trailers, which is what breaks a trailer-signed fetch in the field.
+func trailerStrippingProxy(t *testing.T, backend string) *httptest.Server {
+	t.Helper()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out, err := http.NewRequestWithContext(r.Context(), r.Method, backend+r.URL.RequestURI(), bytes.NewReader(reqBody))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(out)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			if k == "Trailer" { // hide that any trailer was promised
+				continue
+			}
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		// resp.Trailer is deliberately never copied.
+	}))
+	t.Cleanup(proxy.Close)
+	return proxy
+}
+
+func TestFetchObjectsThroughTrailerStrippingProxy(t *testing.T) {
+	h := newHarness(t)
+	objs := blobs(t, "fp one", "fp two")
+	for _, o := range objs {
+		if err := h.store.Put(o.Key, o.Bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proxy := trailerStrippingProxy(t, h.srv.URL)
+	c, err := remoteclient.New(proxy.URL, h.client, h.identity.PublicKey().Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.FetchObjects(context.Background(), []key.Key{objs[0].Key, objs[1].Key})
+	if err != nil {
+		t.Fatalf("fetch through trailer-stripping proxy: %v", err)
+	}
+	byKey := map[key.Key][]byte{}
+	for _, o := range got {
+		byKey[o.Key] = o.Bytes
+	}
+	if string(byKey[objs[0].Key]) != "fp one" || string(byKey[objs[1].Key]) != "fp two" {
+		t.Fatal("fetched payloads differ through proxy")
+	}
+}
 
 func blobs(t *testing.T, contents ...string) []fstree.Object {
 	t.Helper()
@@ -90,6 +160,42 @@ func TestPushPackRawAndMissing(t *testing.T) {
 	}
 	if string(byKey[objs[0].Key]) != "raw one" || string(byKey[objs[1].Key]) != "raw two" {
 		t.Fatal("raw-pushed payloads differ")
+	}
+}
+
+func TestPushPackRawStreamsBody(t *testing.T) {
+	// A streamed push sends a chunked body (no Content-Length); a buffered one
+	// would set Content-Length to the pack size. Asserting the server sees an
+	// unknown length (-1) pins the streaming path so a regression to a full
+	// in-memory buffer is caught. The response is intentionally unsigned, so the
+	// client's verification error is expected and ignored — the request is what
+	// we inspect.
+	var gotContentLength int64 = -999
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/objects" {
+			_, _ = io.Copy(io.Discard, r.Body)
+			gotContentLength = r.ContentLength
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c, err := remoteclient.New(srv.URL, testSigner(t), testSigner(t).PublicKey().Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs := blobs(t, "stream a", "stream b")
+	recs := make([][]byte, len(objs))
+	for i, o := range objs {
+		rec, err := amberpack.EncodeRecord(o.Key, o.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs[i] = rec
+	}
+	// The unsigned 200 fails response verification; we only care about the request.
+	_ = c.PushPackRaw(context.Background(), "main", objs[0].Key, recs)
+	if gotContentLength != -1 {
+		t.Fatalf("request Content-Length = %d, want -1 (chunked/streamed, not buffered)", gotContentLength)
 	}
 }
 
