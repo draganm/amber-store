@@ -180,3 +180,25 @@ func (c *Client) Tar(ctx context.Context, k key.Key, path string) (io.ReadCloser
 	}
 	return resp.Body, nil
 }
+
+// File requests the reconstructed bytes of the regular-file content object ck (a
+// Blob or FileNode content key, as carried in an Entry's Key). The response body
+// is exactly ck.Length() bytes. The caller must close the returned reader. A
+// non-2xx status is drained and returned as an error.
+func (c *Client) File(ctx context.Context, ck key.Key) (io.ReadCloser, error) {
+	u := baseURL + "/v1/file/" + ck.String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, c.dialHint(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		resp.Body.Close()
+		return nil, fmt.Errorf("file request failed: %s: %s", resp.Status, msg)
+	}
+	return resp.Body, nil
+}

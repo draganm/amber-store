@@ -144,6 +144,7 @@ Three layers, local to remote
 | [`architecture/types.md`](architecture/types.md) | The type model: object types, filesystem entry types, length-field semantics. |
 | [`architecture/fstree.md`](architecture/fstree.md) | On-the-wire CBOR layout of every type, the chunkers, tree construction, and read paths. |
 | [`architecture/daemon.md`](architecture/daemon.md) | The daemon/CLI split: who builds trees, who stores objects, the unix-socket protocol, and the pack-write format. |
+| [`architecture/fuse.md`](architecture/fuse.md) | The `fuse` mount (Linux only): reconstructing files at open into RAM and serving reads through kernel passthrough. |
 | [`architecture/references.md`](architecture/references.md) | Named pointers to keys: record layout, name rules, storage, routes. |
 | [`architecture/remote.md`](architecture/remote.md) | The remote server (`amber-store serve`): identity, signed HTTP protocol, wire routes, sync algorithms. |
 
@@ -175,6 +176,14 @@ amber-store dump KEY[/PATH] -o tree.tar  # PAX tar of the tree (default: stdout)
 amber-store restore KEY[/PATH] ./dest    # recreate the tree on disk
 amber-store ref ls                       # list references
 amber-store ls ref:backups/home@sub/dir  # ref:NAME[@PATH] works wherever KEY[/PATH] does
+```
+
+On Linux, mount a tag as a read-only filesystem instead of extracting it: files
+are reconstructed into RAM at open and served through kernel passthrough (see
+[`architecture/fuse.md`](architecture/fuse.md)):
+
+```sh
+amber-store fuse ref:backups/home /mnt/home  # Ctrl-C to unmount
 ```
 
 To share a store over the network, run a remote server and register it with

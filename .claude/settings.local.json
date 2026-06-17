@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/dragan/.claude/plugins/**)",
+      "Read(//home/dragan/.claude/**)"
+    ]
+  }
+}

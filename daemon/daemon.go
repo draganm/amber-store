@@ -10,13 +10,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/internal/remotes"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/tarexport"
 	"golang.org/x/crypto/ssh"
@@ -68,6 +69,7 @@ func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.L
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
+	mux.HandleFunc("GET /v1/file/{key}", h.getFile)
 	mux.HandleFunc("GET /v1/ls/{key}", h.getLs)
 	mux.HandleFunc("GET /v1/content-keys/{key}", h.getContentKeys)
 	mux.HandleFunc("PUT /v1/refs", h.putRef)
@@ -370,6 +372,42 @@ func (h *handler) getLs(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseHexKey decodes a lowercase-hex key path segment into a validated key.
+// getFile streams the reconstructed bytes of a single regular-file content
+// object (Blob or FileNode) named by its content key. The content key uniquely
+// identifies the bytes, so no path resolution is needed; callers obtain it from
+// an ls entry. Content-Length is set from the key's encoded length, so a
+// truncated body (mid-stream store failure) surfaces as a read error on the
+// client rather than a silent short read.
+func (h *handler) getFile(w http.ResponseWriter, r *http.Request) {
+	k, err := parseHexKey(r.PathValue("key"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if k.Type() != key.Blob && k.Type() != key.FileNode {
+		http.Error(w, "key is not a file-content object", http.StatusBadRequest)
+		return
+	}
+	has, err := h.store.Has(k)
+	if err != nil {
+		h.log.Error("file root lookup failed", "key", k, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !has {
+		http.Error(w, "file object not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatUint(k.Length(), 10))
+	if err := fstree.WriteContent(w, k, h.store.Get); err != nil {
+		// The 200 status and some bytes may already be in flight; we cannot change
+		// the status now. Log and let the truncated body surface as a read error
+		// on the client, like getTar.
+		h.log.Error("file export aborted", "key", k, "error", err)
+	}
+}
+
 func parseHexKey(s string) (key.Key, error) {
 	raw, err := hex.DecodeString(s)
 	if err != nil {

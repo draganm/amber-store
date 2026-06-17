@@ -18,7 +18,9 @@ clients:
   `content-keys`, `ref`) is a client: it connects to the socket, performs one
   operation, and exits. Clients never open the store directory.
   (`config-user` is the one exception — it only writes the local user config,
-  contacting nothing.)
+  contacting nothing. `fuse` is a client too, but a long-lived one: it mounts a
+  read-only filesystem and stays running to service the kernel — see
+  [fuse.md](fuse.md).)
 
 Single-process store ownership is the point: there is no cross-process locking
 protocol, no reader seeing a half-written object, and crash-durability policy
@@ -53,6 +55,7 @@ many small random-access `get`s and therefore belong next to the store.
 | `restore KEY[/P] DIR`   | extract the tar into DIR (perms, mtimes, xattrs)                | resolve path, traverse tree, emit PAX tar         |
 | `ls KEY[/P]`            | render `ls -l` style output                                     | resolve path, collect entries, emit NDJSON        |
 | `content-keys KEY[/P]`  | print one key per line                                          | resolve path, walk every reachable object         |
+| `fuse KEY[/P] MNT`      | mount read-only; reconstruct files into RAM (Linux only)        | list dirs, stream single files by key             |
 | `ref create/ls/show/rm` | render output                                                   | reference CRUD against the refs DB                |
 | `serve`                 | —                                                               | remote server: owns its own store, signed HTTP(S) |
 | `remote add/rm/ls`      | fingerprint confirmation, render listing                        | fetch + pin server identity, registry CRUD        |
@@ -94,6 +97,7 @@ needs object fetches).
 |------------------------------------|--------------------------------------------------------------|
 | `POST /v1/objects`                 | pack-write stream in → store stats JSON out                  |
 | `GET /v1/tar/{key}?path=`          | PAX tar of the directory tree                                |
+| `GET /v1/file/{key}`               | the reconstructed bytes of one regular file (octet-stream)   |
 | `GET /v1/ls/{key}?path=`           | NDJSON, one directory entry per line, name order             |
 | `GET /v1/content-keys/{key}?path=` | text, one hex key per line, root first, deduped              |
 | `PUT /v1/refs?name=`               | CBOR reference record in → 204                               |
@@ -119,11 +123,12 @@ sync algorithms.
 Status mapping: malformed pack streams and hash-verification failures are
 `422`; a key that is not the right object type, a `..` or through-a-file path,
 is `400`; an absent root object or path component is `404`; store failures are
-`500`. Streaming responses (`tar`, `ls`, `content-keys`) do as much work as
-possible **before** the first byte — type/existence checks, path resolution,
+`500`. Streaming responses (`tar`, `file`, `ls`, `content-keys`) do as much work
+as possible **before** the first byte — type/existence checks, path resolution,
 and for `ls`/`content-keys` the full collection — so errors surface as proper
 statuses; a failure after bytes are in flight can only be logged and the
-stream cut, surfacing client-side as a truncated read.
+stream cut, surfacing client-side as a truncated read. `file` additionally sets
+`Content-Length` from the key, so a cut stream is detectable as a short read.
 
 ## The pack-write format
 

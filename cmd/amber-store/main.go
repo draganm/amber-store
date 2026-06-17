@@ -18,22 +18,28 @@ func main() {
 
 // Creates and configures the CLI application.
 func newApp() *cli.App {
+	commands := []*cli.Command{
+		daemonCommand(),
+		serveCommand(),
+		ingestCommand(),
+		loadCommand(),
+		dumpCommand(),
+		restoreCommand(),
+		lsCommand(),
+		contentKeysCommand(),
+		configUserCommand(),
+		refCommand(),
+		remoteCommand(),
+	}
+	// fuseCommand is Linux-only; on other platforms its stub returns nil and the
+	// command is omitted entirely.
+	if fuse := fuseCommand(); fuse != nil {
+		commands = append(commands, fuse)
+	}
 	return &cli.App{
-		Name:  "amber-store",
-		Usage: "content-addressed filesystem tree store",
-		Commands: []*cli.Command{
-			daemonCommand(),
-			serveCommand(),
-			ingestCommand(),
-			loadCommand(),
-			dumpCommand(),
-			restoreCommand(),
-			lsCommand(),
-			contentKeysCommand(),
-			configUserCommand(),
-			refCommand(),
-			remoteCommand(),
-		},
+		Name:     "amber-store",
+		Usage:    "content-addressed filesystem tree store",
+		Commands: commands,
 	}
 }
 

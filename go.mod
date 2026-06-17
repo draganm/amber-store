@@ -8,6 +8,7 @@ require (
 	github.com/cockroachdb/pebble/v2 v2.1.6
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-git/go-git/v5 v5.16.2
+	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/hiddeco/sshsig v0.2.0
 	github.com/klauspost/compress v1.17.11
 	github.com/urfave/cli/v2 v2.27.7

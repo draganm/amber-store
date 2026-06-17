@@ -133,28 +133,10 @@ func (e *exporter) entry(prefix string, ent fstree.Entry) error {
 // writeContent writes the bytes addressed by k to the current tar member,
 // descending FileNode index levels and concatenating Blob leaves in order.
 func (e *exporter) writeContent(k key.Key) error {
-	data, err := e.get(k)
-	if err != nil {
-		return fmt.Errorf("tarexport: reading %s: %w", k, err)
+	if err := fstree.WriteContent(e.tw, k, e.get); err != nil {
+		return fmt.Errorf("tarexport: %w", err)
 	}
-	switch k.Type() {
-	case key.Blob:
-		_, err := e.tw.Write(data)
-		return err
-	case key.FileNode:
-		children, err := fstree.DecodeFileNode(data)
-		if err != nil {
-			return err
-		}
-		for _, ck := range children {
-			if err := e.writeContent(ck); err != nil {
-				return err
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("tarexport: %s is not a file-content object (type %v)", k, k.Type())
-	}
+	return nil
 }
 
 // setXattrs decodes an entry's extended attributes (inline or spilled) into the
