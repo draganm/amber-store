@@ -121,12 +121,15 @@ request nonce binds each response to its request, preventing replay or
 substitution between requests.
 
 - Non-streaming responses carry the signature in an `Amber-Signature` header.
-- Streaming responses (`POST /v1/objects/get`) carry the signature in an
-  `Amber-Signature` HTTP **trailer**, because the body hash is only known at
-  the end. Streamed objects are individually self-verifying (re-hashed against
-  their key) and may be stored on arrival; the trailer signature is checked at
-  batch end — a mismatch aborts the operation. Already-stored valid objects are
-  harmless in a content-addressed store.
+- The fetch response (`POST /v1/objects/get`) streams the pack while hashing it
+  and appends the signature **in-band** at the end of the body: the base64
+  SSHSIG followed by its big-endian `uint32` length. The signature is therefore
+  part of the body, not an HTTP trailer — a deliberate choice, because reverse
+  proxies routinely drop trailers and the client would then reject the response
+  as unsigned. The server still streams (it holds one record, never the whole
+  pack); the client buffers the response, splits off the trailing signature,
+  verifies it over the exact pack bytes against the pinned key, and only then
+  parses the pack. A truncated or tampered body fails verification closed.
 
 TLS is orthogonal: signatures give authenticity and integrity even over plain
 HTTP; TLS adds confidentiality. Run the server behind a TLS-terminating reverse
@@ -154,7 +157,7 @@ hard per-request body cap of 64 MiB.
 | `GET /v1/identity`           | server public key (SSH wire format); unauthenticated                  |
 | `POST /v1/objects/missing`   | concatenated 32-byte keys in → subset the server lacks, same encoding  |
 | `POST /v1/objects`           | amberpack pack in → store stats JSON out                              |
-| `POST /v1/objects/get`       | concatenated 32-byte keys in → amberpack pack out (trailer sig)       |
+| `POST /v1/objects/get`       | concatenated 32-byte keys in → amberpack pack out (in-band sig)       |
 | `POST /v1/objects/reachable` | 32-byte root key in → the reachable set as concatenated 32-byte keys  |
 | `PUT /v1/refs?name=`         | CBOR ref record in → `204`                                            |
 | `GET /v1/refs?name=`         | CBOR ref record out; omit `name=` for NDJSON listing                  |
@@ -189,12 +192,15 @@ fingerprint at `remote add`, not from the signature itself.
 ## Sync algorithms
 
 **Byte-balanced batching.** Both push and pull bin keys into batches whose
-estimated payload size approaches a configurable target (default 60 MiB;
-`--batch-bytes` flag) without exceeding it. The default sits below the server's
-64 MiB body cap because the target measures *uncompressed* payload while the wire
-body is the compressed records plus ~46 B/record of framing — the headroom keeps
-even an incompressible pack under the cap. A single object larger than the target
-gets its own batch. A key-count cap (8192 keys per batch) prevents pathological
+estimated size approaches a configurable target (default 60 MiB; `--batch-bytes`
+flag) without exceeding it. Push sizes each object by its **stored
+(post-compression) length**, read from the local index — the bytes that actually
+travel — so the target maps directly to wire size and sits just under the
+server's 64 MiB body cap once ~46 B/record of framing is added. Pull, which
+knows only the keys, estimates from each key's logical length (a blob's exact
+size; a nominal value for nodes); that over-estimate keeps the compressed
+response comfortably under the cap. A single object larger than the target gets
+its own batch. A key-count cap (8192 keys per batch) prevents pathological
 trees of tiny objects from producing arbitrarily large key-list bodies.
 
 Sizes come from the keys themselves: a blob key encodes its exact payload
