@@ -237,3 +237,8 @@ go build ./...
 
 - Module: `github.com/draganm/amber-store`
 - Go: 1.26+
+
+## License
+
+Licensed under the GNU Affero General Public License v3.0. See [`LICENSE`](LICENSE)
+for the full text.
