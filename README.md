@@ -7,8 +7,8 @@ content.
 
 > **Status:** working implementation. A store-owning daemon serves CLI clients
 > over a unix socket; trees are built client-side and ingested, listed, dumped,
-> and restored through it. The design is specified in
-> [`architecture/`](architecture/).
+> restored, and (on Linux) mounted as a read-only FUSE filesystem through it.
+> The design is specified in [`architecture/`](architecture/).
 
 ## What it is
 
