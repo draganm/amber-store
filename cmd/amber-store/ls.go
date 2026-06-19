@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/socketpath"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 )

@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/draganm/amber-store/internal/allowlist"
+	"github.com/draganm/amber-store/allowlist"
 	"golang.org/x/crypto/ssh"
 )
 

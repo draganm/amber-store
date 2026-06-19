@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/remotesync"
 	"github.com/urfave/cli/v2"
 )

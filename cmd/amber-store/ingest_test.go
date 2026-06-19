@@ -16,7 +16,7 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/amberignore"
+	"github.com/draganm/amber-store/amberignore"
 	"github.com/draganm/amber-store/key"
 )
 

@@ -13,8 +13,8 @@ import (
 
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
-	"github.com/draganm/amber-store/internal/allowlist"
-	"github.com/draganm/amber-store/internal/httpsig"
+	"github.com/draganm/amber-store/allowlist"
+	"github.com/draganm/amber-store/httpsig"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/server"
 	"golang.org/x/crypto/ssh"

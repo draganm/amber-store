@@ -3,7 +3,7 @@ package fstree
 import (
 	"testing"
 
-	"github.com/draganm/amber-store/internal/cborx"
+	"github.com/draganm/amber-store/cborx"
 	"github.com/draganm/amber-store/key"
 )
 

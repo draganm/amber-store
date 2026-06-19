@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/keylist"
+	"github.com/draganm/amber-store/keylist"
 	"github.com/draganm/amber-store/key"
 )
 

@@ -14,9 +14,9 @@ import (
 	"syscall"
 
 	"github.com/draganm/amber-store/daemon"
-	"github.com/draganm/amber-store/internal/identity"
-	"github.com/draganm/amber-store/internal/remotes"
-	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/identity"
+	"github.com/draganm/amber-store/remotes"
+	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/urfave/cli/v2"

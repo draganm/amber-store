@@ -9,7 +9,7 @@ import (
 
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"golang.org/x/crypto/ssh"

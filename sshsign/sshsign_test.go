@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/hiddeco/sshsig"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/draganm/amber-store/internal/remotes"
-	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/remotes"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"

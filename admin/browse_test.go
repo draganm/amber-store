@@ -19,7 +19,7 @@ import (
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/allowstore"
+	"github.com/draganm/amber-store/allowstore"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/draganm/amber-store/internal/allowstore"
+	"github.com/draganm/amber-store/allowstore"
 	"golang.org/x/crypto/ssh"
 )
 

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/draganm/amber-store/internal/allowstore"
+	"github.com/draganm/amber-store/allowstore"
 )
 
 // SessionCookie is the name of the admin session cookie.

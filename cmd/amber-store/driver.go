@@ -7,8 +7,8 @@ import (
 
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/internal/amberignore"
-	"github.com/draganm/amber-store/internal/cborx"
+	"github.com/draganm/amber-store/amberignore"
+	"github.com/draganm/amber-store/cborx"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )

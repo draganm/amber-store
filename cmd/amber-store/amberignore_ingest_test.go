@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/chunkers"
-	"github.com/draganm/amber-store/internal/amberignore"
+	"github.com/draganm/amber-store/amberignore"
 	"github.com/draganm/amber-store/key"
 	"golang.org/x/sys/unix"
 )

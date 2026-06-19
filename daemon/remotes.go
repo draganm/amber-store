@@ -6,7 +6,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/draganm/amber-store/internal/remotes"
+	"github.com/draganm/amber-store/remotes"
 	"github.com/draganm/amber-store/remoteclient"
 	"golang.org/x/crypto/ssh"
 )

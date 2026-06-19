@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/draganm/amber-store/internal/sshsign"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/reference"
 )
 

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/draganm/amber-store/internal/httpsig"
+	"github.com/draganm/amber-store/httpsig"
 	"golang.org/x/crypto/ssh"
 )
 

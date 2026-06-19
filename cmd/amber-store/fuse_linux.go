@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/internal/socketpath"
+	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/key"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"

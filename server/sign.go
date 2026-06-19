@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/draganm/amber-store/internal/httpsig"
+	"github.com/draganm/amber-store/httpsig"
 )
 
 // signAndWrite signs {nonce, status, blake3(body)} with the server identity

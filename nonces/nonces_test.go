@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/draganm/amber-store/internal/nonces"
+	"github.com/draganm/amber-store/nonces"
 )
 
 func TestReplayDetection(t *testing.T) {

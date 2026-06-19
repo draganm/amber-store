@@ -12,7 +12,7 @@ import (
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/inbox"
-	"github.com/draganm/amber-store/internal/allowlist"
+	"github.com/draganm/amber-store/allowlist"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"

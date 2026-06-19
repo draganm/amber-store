@@ -14,8 +14,8 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/internal/sshsign"
-	"github.com/draganm/amber-store/internal/userconfig"
+	"github.com/draganm/amber-store/sshsign"
+	"github.com/draganm/amber-store/userconfig"
 	"github.com/draganm/amber-store/reference"
 	"github.com/hiddeco/sshsig"
 	"golang.org/x/crypto/ssh"

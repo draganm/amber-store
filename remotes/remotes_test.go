@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/draganm/amber-store/internal/remotes"
+	"github.com/draganm/amber-store/remotes"
 )
 
 func open(t *testing.T, path string) *remotes.Registry {
