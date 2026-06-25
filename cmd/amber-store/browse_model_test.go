@@ -26,6 +26,7 @@ type fakeStore struct {
 	ls   map[string][]client.Entry
 	file map[string][]byte
 	tar  map[string][]byte
+	refs []client.RefInfo
 }
 
 func (f fakeStore) Ls(_ context.Context, k key.Key, _ string) ([]client.Entry, error) {
@@ -36,6 +37,9 @@ func (f fakeStore) File(_ context.Context, ck key.Key) (io.ReadCloser, error) {
 }
 func (f fakeStore) Tar(_ context.Context, k key.Key, _ string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.tar[k.String()])), nil
+}
+func (f fakeStore) ListRefs(_ context.Context) ([]client.RefInfo, error) {
+	return f.refs, nil
 }
 
 func dirEntry(name string, k key.Key) client.Entry {

@@ -186,6 +186,7 @@ as raw bytes (`e`):
 
 ```sh
 amber-store browse ref:backups/home@sub/dir  # or browse KEY[/PATH]; q to quit
+amber-store browse                            # no argument: pick from a searchable list of refs
 ```
 
 On Linux, mount a tag as a read-only filesystem instead of extracting it: files

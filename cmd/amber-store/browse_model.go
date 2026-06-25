@@ -20,6 +20,7 @@ const (
 	modeList modelMode = iota
 	modeFile
 	modeExport
+	modeRefs
 )
 
 // frame is one level of the navigation stack; the top frame's key is the
@@ -34,6 +35,7 @@ type browseStore interface {
 	Ls(ctx context.Context, k key.Key, path string) ([]client.Entry, error)
 	File(ctx context.Context, ck key.Key) (io.ReadCloser, error)
 	Tar(ctx context.Context, k key.Key, path string) (io.ReadCloser, error)
+	ListRefs(ctx context.Context) ([]client.RefInfo, error)
 }
 
 type browseModel struct {
@@ -59,6 +61,10 @@ type browseModel struct {
 	exportIsDir bool
 	exportKey   key.Key
 	exportName  string
+
+	refs      []client.RefInfo
+	filter    textinput.Model
+	refCursor int
 }
 
 // newBrowseModel builds a model rooted at the resolved spec key.
@@ -77,7 +83,12 @@ func newBrowseModel(ctx context.Context, store browseStore, cwd string, maxView 
 
 func (m browseModel) cur() frame { return m.stack[len(m.stack)-1] }
 
-func (m browseModel) Init() tea.Cmd { return m.loadDir(m.cur().key) }
+func (m browseModel) Init() tea.Cmd {
+	if m.mode == modeRefs {
+		return m.loadRefs()
+	}
+	return m.loadDir(m.cur().key)
+}
 
 // --- messages ---
 
@@ -174,6 +185,14 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "exported to " + msg.path
 		}
 		return m, nil
+	case refsLoadedMsg:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		m.refs = msg.refs
+		m.refCursor = 0
+		return m, nil
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	}
@@ -188,6 +207,8 @@ func (m browseModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateFileKey(msg)
 	case modeExport:
 		return m.updateExportKey(msg)
+	case modeRefs:
+		return m.updateRefsKey(msg)
 	default:
 		return m, nil
 	}
@@ -321,6 +342,8 @@ func (m browseModel) View() string {
 		return m.file.render(m.height)
 	case modeExport:
 		return m.viewList() + "\n" + m.input.View()
+	case modeRefs:
+		return m.viewRefs()
 	default:
 		return m.viewList()
 	}

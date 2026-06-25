@@ -18,12 +18,12 @@ func TestBrowseCommand_RequiresTerminal(t *testing.T) {
 	}
 }
 
-func TestBrowseCommand_ArgCount(t *testing.T) {
+func TestBrowseCommand_TooManyArgs(t *testing.T) {
 	app := &cli.App{Commands: []*cli.Command{browseCommand()}}
 	app.Writer = &bytes.Buffer{}
 	app.ErrWriter = &bytes.Buffer{}
-	err := app.Run([]string{"amber-store", "browse"})
+	err := app.Run([]string{"amber-store", "browse", "a", "b"})
 	if err == nil {
-		t.Fatal("expected an error with no SPEC argument")
+		t.Fatal("expected an error with more than one SPEC argument")
 	}
 }

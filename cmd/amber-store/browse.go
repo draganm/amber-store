@@ -16,8 +16,8 @@ func browseCommand() *cli.Command {
 	var maxView int64
 	return &cli.Command{
 		Name:      "browse",
-		Usage:     "interactively browse a tree: navigate dirs, view files (text/hex/json), export; accepts KEY[/PATH] or ref:NAME[@PATH]",
-		ArgsUsage: "KEY[/PATH] | ref:NAME[@PATH]",
+		Usage:     "interactively browse a tree: navigate dirs, view files (text/hex/json), export; accepts KEY[/PATH] or ref:NAME[@PATH], or no argument to pick from a searchable reference list",
+		ArgsUsage: "[KEY[/PATH] | ref:NAME[@PATH]]",
 		Flags: []cli.Flag{
 			socketFlag(&socket),
 			&cli.Int64Flag{
@@ -28,28 +28,34 @@ func browseCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if c.NArg() != 1 {
-				return fmt.Errorf("browse requires exactly one KEY[/PATH] argument, got %d", c.NArg())
+			if c.NArg() > 1 {
+				return fmt.Errorf("browse takes at most one KEY[/PATH] argument, got %d", c.NArg())
 			}
 			if !term.IsTerminal(int(os.Stdout.Fd())) {
 				return fmt.Errorf("browse requires a terminal")
 			}
 			cl := client.New(socketpath.Resolve(socket))
-			k, path, err := resolveSpec(c.Context, cl, c.Args().First())
-			if err != nil {
-				return err
-			}
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
 			}
-			rootName := c.Args().First()
-			m := newBrowseModel(c.Context, cl, cwd, maxView, k, rootName)
-			if path != "" {
-				// resolveSpec returns the reference/key root plus a sub-path;
-				// navigation starts at the root, so a deep initial PATH is only
-				// noted, not auto-opened (out of scope per the design).
-				m.status = fmt.Sprintf("note: initial subpath %q not auto-opened; navigate from the root", path)
+
+			var m browseModel
+			if c.NArg() == 0 {
+				// No SPEC: open the searchable reference picker.
+				m = newRefPickerModel(c.Context, cl, cwd, maxView)
+			} else {
+				k, path, err := resolveSpec(c.Context, cl, c.Args().First())
+				if err != nil {
+					return err
+				}
+				m = newBrowseModel(c.Context, cl, cwd, maxView, k, c.Args().First())
+				if path != "" {
+					// resolveSpec returns the reference/key root plus a sub-path;
+					// navigation starts at the root, so a deep initial PATH is
+					// only noted, not auto-opened (out of scope per the design).
+					m.status = fmt.Sprintf("note: initial subpath %q not auto-opened; navigate from the root", path)
+				}
 			}
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			_, err = p.Run()
