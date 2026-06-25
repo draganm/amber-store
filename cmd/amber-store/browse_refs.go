@@ -154,12 +154,14 @@ func (m browseModel) viewRefs() string {
 	var b strings.Builder
 	b.WriteString("references\n")
 
-	// header + status reserved; the filter input takes one more line when active.
-	body := m.height - 2
+	// header + separator + status reserved; the filter input takes one more line
+	// when active.
+	body := m.height - 3
 	if m.refFiltering {
 		fmt.Fprintf(&b, "%s\n", m.filter.View())
 		body--
 	}
+	fmt.Fprintf(&b, "%s\n", hr(m.width))
 	if body < 1 {
 		body = 1
 	}

@@ -27,7 +27,7 @@ func TestFileView_SetModeJSON(t *testing.T) {
 	if fv.mode != modeJSON {
 		t.Fatalf("auto mode = %v, want modeJSON", fv.mode)
 	}
-	out := fv.render(10)
+	out := fv.render(80, 10)
 	if !strings.Contains(out, `"x": 1`) {
 		t.Fatalf("json not rendered:\n%s", out)
 	}
@@ -36,7 +36,7 @@ func TestFileView_SetModeJSON(t *testing.T) {
 func TestFileView_JSONErrorOnTruncated(t *testing.T) {
 	fv := newFileView("big", 999, []byte{0xa1, 0x61}, true) // truncated, undecodable
 	fv.setMode(modeJSON)
-	out := fv.render(10)
+	out := fv.render(80, 10)
 	if !strings.Contains(out, "truncated at cap") {
 		t.Fatalf("expected truncation notice in JSON mode:\n%s", out)
 	}
@@ -49,7 +49,7 @@ func TestFileView_ScrollClamp(t *testing.T) {
 	}
 	fv := newFileView("a", 0, []byte(strings.Join(lines, "\n")), false)
 	fv.scroll(1000, 10) // far past end
-	maxTop := fv.lineCount() - (10 - 1)
+	maxTop := fv.lineCount() - (10 - 2) // height minus header + separator
 	if fv.top != maxTop {
 		t.Fatalf("top = %d, want clamped %d", fv.top, maxTop)
 	}
@@ -64,7 +64,7 @@ func TestFileView_RenderHexWindow(t *testing.T) {
 	if fv.mode != modeHex {
 		t.Fatalf("mode = %v, want modeHex", fv.mode)
 	}
-	out := fv.render(10)
+	out := fv.render(80, 10)
 	if !strings.Contains(out, "00000000  00 01 02 ff") {
 		t.Fatalf("hex not rendered:\n%s", out)
 	}

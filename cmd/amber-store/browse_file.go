@@ -85,9 +85,9 @@ func (fv *fileView) lineCount() int {
 }
 
 // scroll moves the window by delta lines, clamped so the last line stays
-// reachable for the given total height (1 line is the header).
+// reachable for the given total height (2 lines are the header and separator).
 func (fv *fileView) scroll(delta, height int) {
-	body := height - 1
+	body := height - 2
 	if body < 1 {
 		body = 1
 	}
@@ -104,9 +104,10 @@ func (fv *fileView) scroll(delta, height int) {
 	}
 }
 
-// render returns the header plus up to height-1 visible body lines.
-func (fv *fileView) render(height int) string {
-	body := height - 1
+// render returns the header, a separator rule, and up to height-2 visible body
+// lines.
+func (fv *fileView) render(width, height int) string {
+	body := height - 2
 	if body < 1 {
 		body = 1
 	}
@@ -114,7 +115,7 @@ func (fv *fileView) render(height int) string {
 	if fv.truncated {
 		header += "  (truncated)"
 	}
-	lines := []string{header}
+	lines := []string{header, hr(width)}
 	switch fv.mode {
 	case modeText:
 		lines = append(lines, window(fv.textLines, fv.top, body)...)

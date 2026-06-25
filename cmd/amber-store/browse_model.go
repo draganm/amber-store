@@ -485,7 +485,7 @@ func (m browseModel) View() string {
 func (m browseModel) viewBody() string {
 	switch m.mode {
 	case modeFile:
-		return m.file.render(m.height)
+		return m.file.render(m.width, m.height)
 	case modeExport:
 		return m.viewList() + "\n" + m.input.View()
 	case modeRefs:
@@ -510,6 +510,14 @@ func fitLines(s string, w int) string {
 		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// hr renders a horizontal separator rule width columns wide.
+func hr(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	return strings.Repeat("─", width)
 }
 
 // expandTabs replaces tab characters with spaces up to the next 8-column tab
@@ -545,13 +553,14 @@ func (m browseModel) viewList() string {
 
 	entries := m.visibleEntries()
 
-	// Reserve lines for the breadcrumb (already written), the column header, the
-	// status line, and the filter input when active.
-	body := m.height - 3
+	// Reserve lines for the breadcrumb (already written), the separator, the
+	// column header, the status line, and the filter input when active.
+	body := m.height - 4
 	if m.filtering {
 		fmt.Fprintf(&b, "%s\n", m.dirFilter.View())
 		body--
 	}
+	fmt.Fprintf(&b, "%s\n", hr(m.width))
 	if body < 1 {
 		body = 1
 	}
