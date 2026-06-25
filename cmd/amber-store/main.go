@@ -118,16 +118,3 @@ func checkDir(dir string) error {
 	}
 	return nil
 }
-
-// dirArg validates that the command received exactly one argument naming an
-// existing directory, and returns it. cmd names the command for error messages.
-func dirArg(c *cli.Context, cmd string) (string, error) {
-	if c.NArg() != 1 {
-		return "", fmt.Errorf("%s requires exactly one DIR argument, got %d", cmd, c.NArg())
-	}
-	dir := c.Args().First()
-	if err := checkDir(dir); err != nil {
-		return "", err
-	}
-	return dir, nil
-}

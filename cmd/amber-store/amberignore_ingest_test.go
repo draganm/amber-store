@@ -180,7 +180,7 @@ func TestProgressTotalsMatchIngestWithAmberignore(t *testing.T) {
 	}
 	p := NewProgress(files, bytes)
 	var root key.Key
-	for _, err := range ingestObjects(dir, rootMatcher(t, dir), chunkers.NewItemChunker(7), nil, 256, 2, p, &root) {
+	for _, err := range ingestObjects(dirBuildRoot(dir, rootMatcher(t, dir), chunkers.NewItemChunker(7), nil, 256, 2, p), 4, &root) {
 		if err != nil {
 			t.Fatal(err)
 		}

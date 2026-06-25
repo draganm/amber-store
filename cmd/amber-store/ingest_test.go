@@ -38,12 +38,25 @@ func collectSequential(t *testing.T, dir string, ign *amberignore.Matcher, ic ch
 	return root, objs
 }
 
+// dirBuildRoot returns the buildRoot closure that ingestObjects expects for a
+// concurrent directory build (the production wiring used by writePack).
+func dirBuildRoot(dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax, jobs int, p *Progress) func(fstree.Emit) (key.Key, error) {
+	if jobs < 1 {
+		jobs = 1
+	}
+	d := &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax, p: p}
+	return func(emit fstree.Emit) (key.Key, error) {
+		b := &pbuilder{d: d, emit: emit, sem: make(chan struct{}, jobs)}
+		return b.buildDir(dir, ign, emit)
+	}
+}
+
 // collectParallel drains ingestObjects into a key->bytes map and returns the root.
 func collectParallel(t *testing.T, dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax, jobs int) (key.Key, map[key.Key][]byte) {
 	t.Helper()
 	objs := map[key.Key][]byte{}
 	var root key.Key
-	for o, err := range ingestObjects(dir, ign, ic, byteOpts, xattrInlineMax, jobs, nil, &root) {
+	for o, err := range ingestObjects(dirBuildRoot(dir, ign, ic, byteOpts, xattrInlineMax, jobs, nil), jobs*2, &root) {
 		if err != nil {
 			t.Fatalf("parallel build: %v", err)
 		}
@@ -172,15 +185,43 @@ func TestRunIngest_DeterministicAcrossJobs(t *testing.T) {
 	}
 }
 
-func TestRunIngest_RejectsNonDirectory(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "f")
-	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+// TestRunIngest_File ingests a single regular file to a pack and checks that the
+// resolved root is a file-content key (Blob or FileNode), not a directory.
+func TestRunIngest_File(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(f, []byte("hello world"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	out := filepath.Join(t.TempDir(), "p.amberpack")
+	app := newApp()
+	var buf bytes.Buffer
+	app.Writer = &buf
+	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "-o", out, f}); err != nil {
+		t.Fatalf("ingesting a file: %v", err)
+	}
+	raw, err := hex.DecodeString(strings.TrimSpace(buf.String()))
+	if err != nil {
+		t.Fatalf("root hex %q: %v", buf.String(), err)
+	}
+	k, err := key.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse root: %v", err)
+	}
+	if !isFileKey(k) {
+		t.Fatalf("file ingest root has type %v, want a file key", k.Type())
+	}
+	if info, err := os.Stat(out); err != nil || info.Size() == 0 {
+		t.Fatalf("pack not written: %v", err)
+	}
+}
+
+// TestRunIngest_RejectsMissingPath checks that a non-existent path is rejected.
+func TestRunIngest_RejectsMissingPath(t *testing.T) {
 	app := newApp()
 	out := filepath.Join(t.TempDir(), "p.amberpack")
-	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "-o", out, f}); err == nil {
-		t.Errorf("expected error ingesting a non-directory")
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if err := app.Run([]string{"amber-store", "ingest", "--no-progress", "-o", out, missing}); err == nil {
+		t.Errorf("expected error ingesting a missing path")
 	}
 }
 
@@ -234,7 +275,7 @@ func TestIngestObjects_ReportsProgress(t *testing.T) {
 	}
 	p := NewProgress(2, 11)
 	var root key.Key
-	for _, err := range ingestObjects(dir, nil, chunkers.NewItemChunker(7), nil, 256, 2, p, &root) {
+	for _, err := range ingestObjects(dirBuildRoot(dir, nil, chunkers.NewItemChunker(7), nil, 256, 2, p), 4, &root) {
 		if err != nil {
 			t.Fatal(err)
 		}

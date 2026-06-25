@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/amberignore"
@@ -29,22 +28,22 @@ import (
 // the object iterator early. It never escapes ingestObjects.
 var errIngestStopped = errors.New("ingest: consumer stopped")
 
-// ingestObjects returns an iterator over every CAS object in the tree rooted at
-// dir (entries excluded by ign are skipped, ignored directories pruned),
-// yielding fstree.Objects for serialization into a pack-write stream. The
-// tree is built concurrently by up to jobs workers (file reads, content-defined
-// chunking and hashing run in parallel across sibling files and subdirectories);
-// built objects stream to the consumer through a buffered channel, so production
-// and serialization overlap. Object order is unspecified — the store is a flat
-// content-addressed bag and dedups by key — but the resolved tree is identical
-// to the sequential walk: per-file chunk order and per-directory entry order are
-// preserved, so every object's key, and the root, are deterministic.
+// ingestObjects returns an iterator over every CAS object produced by buildRoot,
+// yielding fstree.Objects for serialization into a pack-write stream. buildRoot
+// receives the (concurrency-safe) emit sink and returns the resolved root key;
+// it builds either a directory tree (fanned out across workers) or a single
+// file. Built objects stream to the consumer through a buffered channel of
+// bufSize, so production and serialization overlap. Object order is unspecified
+// — the store is a flat content-addressed bag and dedups by key — but the
+// resolved tree is identical to the sequential walk: per-file chunk order and
+// per-directory entry order are preserved, so every object's key, and the root,
+// are deterministic.
 //
-// Once the walk completes successfully the resolved root key is written to
+// Once the build completes successfully the resolved root key is written to
 // *root; a build error is yielded to the consumer instead.
-func ingestObjects(dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker, byteOpts *chunkers.ByteOpts, xattrInlineMax int, jobs int, p *Progress, root *key.Key) iter.Seq2[fstree.Object, error] {
-	if jobs < 1 {
-		jobs = 1
+func ingestObjects(buildRoot func(fstree.Emit) (key.Key, error), bufSize int, root *key.Key) iter.Seq2[fstree.Object, error] {
+	if bufSize < 1 {
+		bufSize = 1
 	}
 	return func(yield func(fstree.Object, error) bool) {
 		// ctx is cancelled only when the consumer stops pulling early (yield
@@ -53,7 +52,7 @@ func ingestObjects(dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		ch := make(chan fstree.Object, jobs*2)
+		ch := make(chan fstree.Object, bufSize)
 		var buildErr error
 
 		go func() {
@@ -66,12 +65,7 @@ func ingestObjects(dir string, ign *amberignore.Matcher, ic chunkers.ItemChunker
 					return errIngestStopped
 				}
 			}
-			b := &pbuilder{
-				d:    &driver{ic: ic, byteOpts: byteOpts, xattrInlineMax: xattrInlineMax, p: p},
-				emit: emit,
-				sem:  make(chan struct{}, jobs),
-			}
-			rk, err := b.buildDir(dir, ign, emit)
+			rk, err := buildRoot(emit)
 			if err != nil {
 				// errIngestStopped means the consumer quit; not a real error.
 				if !errors.Is(err, errIngestStopped) {
@@ -208,23 +202,46 @@ func ingestCommand() *cli.Command {
 	)
 	return &cli.Command{
 		Name:      "ingest",
-		Usage:     "build the content-addressed tree for DIR, store it via the daemon under reference NAME (or write a pack file with --output, no NAME)",
-		ArgsUsage: "NAME DIR  (with --output: DIR)",
+		Usage:     "build the content-addressed tree for PATH (a directory or a single file), store it via the daemon under reference NAME (or write a pack file with --output, no NAME)",
+		ArgsUsage: "NAME PATH  (with --output: PATH)",
 		Flags:     flags,
 		Action:    func(c *cli.Context) error { return runIngest(c, cfg) },
 	}
 }
 
-// writePack builds the tree at dir and serializes every object into dst as a
-// pack-write stream, returning the resolved root key.
-func writePack(dst io.Writer, dir string, ign *amberignore.Matcher, cc *chunkConfig, jobs int, p *Progress) (key.Key, error) {
+// writePack builds the content-addressed tree at path — a directory tree or, when
+// isDir is false, a single regular file — and serializes every object into dst as
+// a pack-write stream, returning the resolved root key. A directory root is a
+// DirNode; a file root is the file's content key (Blob or FileNode).
+func writePack(dst io.Writer, path string, isDir bool, ign *amberignore.Matcher, cc *chunkConfig, jobs int, p *Progress) (key.Key, error) {
 	byteOpts, err := cc.byteOpts()
 	if err != nil {
 		return key.Key{}, err
 	}
+	if jobs < 1 {
+		jobs = 1
+	}
+	d := &driver{ic: cc.itemChunker(), byteOpts: byteOpts, xattrInlineMax: cc.xattrInlineMax, p: p}
+
+	var buildRoot func(fstree.Emit) (key.Key, error)
+	if isDir {
+		buildRoot = func(emit fstree.Emit) (key.Key, error) {
+			b := &pbuilder{d: d, emit: emit, sem: make(chan struct{}, jobs)}
+			return b.buildDir(path, ign, emit)
+		}
+	} else {
+		buildRoot = func(emit fstree.Emit) (key.Key, error) {
+			k, err := d.buildFile(path, emit)
+			if err == nil {
+				d.p.FileDone()
+			}
+			return k, err
+		}
+	}
+
 	pw := amberpack.NewWriter(dst)
 	var root key.Key
-	for o, err := range ingestObjects(dir, ign, cc.itemChunker(), byteOpts, cc.xattrInlineMax, jobs, p, &root) {
+	for o, err := range ingestObjects(buildRoot, jobs*2, &root) {
 		if err != nil {
 			return key.Key{}, err
 		}
@@ -238,6 +255,23 @@ func writePack(dst io.Writer, dir string, ign *amberignore.Matcher, cc *chunkCon
 	return root, nil
 }
 
+// ingestStat reports whether path is a directory. It errors if path does not
+// exist or is neither a regular file nor a directory (symlinks are followed).
+func ingestStat(path string) (isDir bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case info.IsDir():
+		return true, nil
+	case info.Mode().IsRegular():
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s is neither a regular file nor a directory", path)
+	}
+}
+
 // shellQuote renders s as a single POSIX-shell word, so a copy-pasteable
 // command hint stays correct for names containing spaces, '$', or backticks.
 func shellQuote(s string) string {
@@ -246,28 +280,35 @@ func shellQuote(s string) string {
 
 // Handles the 'ingest' command.
 func runIngest(c *cli.Context, cfg *ingestConfig) error {
-	var refName, dir, user, signingKey string
+	var refName, path, user, signingKey string
 	if cfg.output != "" {
-		d, err := dirArg(c, "ingest")
-		if err != nil {
-			return err
+		if c.NArg() != 1 {
+			return fmt.Errorf("ingest with --output requires exactly one PATH argument, got %d", c.NArg())
 		}
-		dir = d
+		path = c.Args().First()
 	} else {
 		if c.NArg() != 2 {
-			return fmt.Errorf("ingest requires NAME DIR arguments, got %d", c.NArg())
+			return fmt.Errorf("ingest requires NAME PATH arguments, got %d", c.NArg())
 		}
 		refName = c.Args().Get(0)
-		dir = c.Args().Get(1)
+		path = c.Args().Get(1)
 		if err := reference.ValidateName(refName); err != nil {
 			return err
 		}
-		if err := checkDir(dir); err != nil {
+	}
+
+	isDir, err := ingestStat(path)
+	if err != nil {
+		if cfg.output == "" {
 			// Make the failing argument's role explicit: path-like strings are
-			// valid reference names, so a swapped `ingest DIR NAME` otherwise
+			// valid reference names, so a swapped `ingest PATH NAME` otherwise
 			// fails with a bare stat error on the name.
-			return fmt.Errorf("DIR argument: %w", err)
+			return fmt.Errorf("PATH argument: %w", err)
 		}
+		return err
+	}
+
+	if cfg.output == "" {
 		ucfg, err := userconfig.Load()
 		if err != nil {
 			return err
@@ -277,10 +318,11 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	}
 
 	// .amberignore filtering applies to the build walk and the progress
-	// pre-scan alike, so the bar's totals match what is actually ingested.
+	// pre-scan alike, so the bar's totals match what is actually ingested. It is
+	// a per-directory mechanism, so it does not apply to a single-file ingest.
 	var ign *amberignore.Matcher
-	if !cfg.noIgnore {
-		m, err := amberignore.Root(dir)
+	if isDir && !cfg.noIgnore {
+		m, err := amberignore.Root(path)
 		if err != nil {
 			return err
 		}
@@ -296,9 +338,18 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 	defer pwg.Wait()
 	defer cancel()
 	if !cfg.noProgress {
-		totalFiles, totalBytes, err := scanTree(dir, ign, cfg.jobs)
-		if err != nil {
-			return err
+		var totalFiles, totalBytes int64
+		if isDir {
+			totalFiles, totalBytes, err = scanTree(path, ign, cfg.jobs)
+			if err != nil {
+				return err
+			}
+		} else {
+			info, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			totalFiles, totalBytes = 1, info.Size()
 		}
 		prog = NewProgress(totalFiles, totalBytes)
 		isTTY := isTerminal(os.Stderr)
@@ -313,7 +364,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		if err != nil {
 			return err
 		}
-		root, err = writePack(f, dir, ign, &cfg.chunk, cfg.jobs, prog)
+		root, err = writePack(f, path, isDir, ign, &cfg.chunk, cfg.jobs, prog)
 		if err != nil {
 			f.Close()
 			return err
@@ -331,7 +382,7 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 		}
 		resCh := make(chan result, 1)
 		go func() {
-			r, err := writePack(pw, dir, ign, &cfg.chunk, cfg.jobs, prog)
+			r, err := writePack(pw, path, isDir, ign, &cfg.chunk, cfg.jobs, prog)
 			if err != nil {
 				pw.CloseWithError(err)
 			} else {

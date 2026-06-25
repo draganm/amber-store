@@ -159,12 +159,15 @@ client talking to it over a unix socket (see
 amber-store daemon --store /path/to/store      # run the store-owning daemon
 ```
 
-Ingest a directory — the tree is built (walked, chunked, hashed) client-side
-and streamed to the daemon; the root key (hex) is printed to stdout:
+Ingest a directory or a single file — the content is built (walked, chunked,
+hashed) client-side and streamed to the daemon; the root key (hex) is printed to
+stdout. A directory root is a `DirNode`; a single-file root is the file's content
+key, which `browse` opens directly in the file viewer:
 
 ```sh
 amber-store config-user alice              # once — who creates references
-amber-store ingest backups/home ./some/dir # ingest + name the root
+amber-store ingest backups/home ./some/dir # ingest a directory + name the root
+amber-store ingest notes ./notes.md        # ingest a single file
 ```
 
 Inspect and export by key or reference, optionally addressing a subdirectory with
