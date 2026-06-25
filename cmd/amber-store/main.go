@@ -30,6 +30,7 @@ func newApp() *cli.App {
 		configUserCommand(),
 		refCommand(),
 		remoteCommand(),
+		browseCommand(),
 	}
 	// fuseCommand is Linux-only; on other platforms its stub returns nil and the
 	// command is omitted entirely.
