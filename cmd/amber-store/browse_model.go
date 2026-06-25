@@ -68,6 +68,15 @@ type browseModel struct {
 
 	dirFilter textinput.Model
 	filtering bool
+
+	rootKey  key.Key
+	rootName string
+}
+
+// isFileKey reports whether k addresses file content (a Blob or FileNode) rather
+// than a directory.
+func isFileKey(k key.Key) bool {
+	return k.Type() == key.Blob || k.Type() == key.FileNode
 }
 
 // newTextInput builds a textinput with the given prompt.
@@ -77,27 +86,40 @@ func newTextInput(prompt string) textinput.Model {
 	return ti
 }
 
-// newBrowseModel builds a model rooted at the resolved spec key.
+// newBrowseModel builds a model rooted at the resolved spec key. A directory
+// root seeds the navigation stack; a file root has no directory to list, so the
+// stack stays empty and Init opens the file viewer directly.
 func newBrowseModel(ctx context.Context, store browseStore, cwd string, maxView int64, root key.Key, rootName string) browseModel {
-	return browseModel{
+	m := browseModel{
 		ctx:       ctx,
 		store:     store,
 		cwd:       cwd,
 		maxView:   maxView,
-		stack:     []frame{{key: root, name: rootName}},
 		input:     newTextInput("export to: "),
 		filter:    newTextInput("filter: "),
 		dirFilter: newTextInput("filter: "),
+		rootKey:   root,
+		rootName:  rootName,
 	}
+	if isFileKey(root) {
+		m.mode = modeFile
+	} else {
+		m.stack = []frame{{key: root, name: rootName}}
+	}
+	return m
 }
 
 func (m browseModel) cur() frame { return m.stack[len(m.stack)-1] }
 
 func (m browseModel) Init() tea.Cmd {
-	if m.mode == modeRefs {
+	switch {
+	case m.mode == modeRefs:
 		return m.loadRefs()
+	case isFileKey(m.rootKey):
+		return m.fetchFile(m.rootKey, m.rootName, m.rootKey.Length())
+	default:
+		return m.loadDir(m.cur().key)
 	}
-	return m.loadDir(m.cur().key)
 }
 
 // --- messages ---
@@ -130,12 +152,19 @@ func (m browseModel) loadDir(k key.Key) tea.Cmd {
 }
 
 func (m browseModel) loadFile(e client.Entry) tea.Cmd {
+	k, err := parseHexKey(e.Key)
+	if err != nil {
+		return func() tea.Msg { return fileLoadedMsg{err: err} }
+	}
+	return m.fetchFile(k, e.Name, e.Size)
+}
+
+// fetchFile streams the file content object k (up to the view cap) and reports it
+// as a fileLoadedMsg. Used both for files chosen in a directory and for a file
+// that is itself the browse root.
+func (m browseModel) fetchFile(k key.Key, name string, size uint64) tea.Cmd {
 	ctx, store, cap := m.ctx, m.store, m.maxView
 	return func() tea.Msg {
-		k, err := parseHexKey(e.Key)
-		if err != nil {
-			return fileLoadedMsg{err: err}
-		}
 		rc, err := store.File(ctx, k)
 		if err != nil {
 			return fileLoadedMsg{err: err}
@@ -149,7 +178,7 @@ func (m browseModel) loadFile(e client.Entry) tea.Cmd {
 		if truncated {
 			data = data[:cap]
 		}
-		return fileLoadedMsg{key: k, name: e.Name, size: e.Size, data: data, truncated: truncated}
+		return fileLoadedMsg{key: k, name: name, size: size, data: data, truncated: truncated}
 	}
 }
 
@@ -185,6 +214,11 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fileLoadedMsg:
 		if msg.err != nil {
 			m.status = msg.err.Error()
+			// A file with no parent directory (the browse root) falls back to
+			// the reference list rather than an empty directory view.
+			if len(m.stack) == 0 {
+				return m.gotoRefs()
+			}
 			m.mode = modeList
 			return m, nil
 		}
@@ -371,7 +405,14 @@ func (m browseModel) gotoRefs() (tea.Model, tea.Cmd) {
 
 func (m browseModel) updateFileKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q", "esc", "backspace", "h", "left":
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q", "esc", "backspace", "h", "left":
+		// A file opened as the browse root has no parent directory; back goes to
+		// the reference list instead.
+		if len(m.stack) == 0 {
+			return m.gotoRefs()
+		}
 		m.mode = modeList
 		return m, nil
 	case "t":

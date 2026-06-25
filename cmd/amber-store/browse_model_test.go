@@ -13,10 +13,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// testKey is a directory key by default; most roots/entries in these tests are
+// directories.
 func testKey(seed byte) key.Key {
 	var h [32]byte
 	h[0] = seed
-	k, err := key.NewFromHash(key.Blob, 1, h)
+	k, err := key.NewFromHash(key.DirNode, 1, h)
+	if err != nil {
+		panic(err)
+	}
+	return k
+}
+
+// testBlobKey is a file-content key with the given logical length.
+func testBlobKey(seed byte, length uint64) key.Key {
+	var h [32]byte
+	h[0] = seed
+	k, err := key.NewFromHash(key.Blob, length, h)
 	if err != nil {
 		panic(err)
 	}
@@ -146,6 +159,70 @@ func TestModel_ListRenderingNameFirstAligned(t *testing.T) {
 	}
 	if !dirSeen {
 		t.Fatalf("directory 'docs' did not render with a trailing slash:\n%s", out)
+	}
+}
+
+func TestModel_FileRootOpensViewer(t *testing.T) {
+	data := []byte("hello world")
+	fk := testBlobKey(1, uint64(len(data)))
+	store := fakeStore{
+		file: map[string][]byte{fk.String(): data},
+		refs: []client.RefInfo{{Name: "doc", Key: fk.String(), User: "u"}},
+	}
+	m := newBrowseModel(context.Background(), store, "/tmp", 10<<20, fk, "ref:doc")
+	m.width, m.height = 80, 24
+	if len(m.stack) != 0 {
+		t.Fatalf("file root must not seed a directory stack: %+v", m.stack)
+	}
+
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatal("expected Init to return a command for a file root")
+	}
+	mi, _ := m.Update(cmd().(fileLoadedMsg))
+	m = mi.(browseModel)
+	if m.mode != modeFile {
+		t.Fatalf("mode = %v, want modeFile", m.mode)
+	}
+	if m.file.name != "ref:doc" || m.file.size != uint64(len(data)) {
+		t.Fatalf("file view = %q (%d bytes)", m.file.name, m.file.size)
+	}
+
+	// Back from a root file drops to the reference picker.
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = mi.(browseModel)
+	if m.mode != modeRefs {
+		t.Fatalf("mode = %v, want modeRefs after back from file root", m.mode)
+	}
+}
+
+func TestModel_RefPickerFileRefOpensViewer(t *testing.T) {
+	data := []byte("payload")
+	fk := testBlobKey(7, uint64(len(data)))
+	store := fakeStore{
+		file: map[string][]byte{fk.String(): data},
+		refs: []client.RefInfo{{Name: "blobref", Key: fk.String(), User: "u"}},
+	}
+	m := newRefPickerModel(context.Background(), store, "/tmp", 10<<20)
+	m.width, m.height = 80, 24
+	mi, _ := m.Update(refsLoadedMsg{refs: store.refs})
+	m = mi.(browseModel)
+
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mi.(browseModel)
+	if len(m.stack) != 0 {
+		t.Fatalf("selecting a file ref must not seed a stack: %+v", m.stack)
+	}
+	if cmd == nil {
+		t.Fatal("expected a fetchFile command for a file ref")
+	}
+	mi, _ = m.Update(cmd().(fileLoadedMsg))
+	m = mi.(browseModel)
+	if m.mode != modeFile {
+		t.Fatalf("mode = %v, want modeFile after selecting a file ref", m.mode)
+	}
+	if m.file.name != "ref:blobref" {
+		t.Fatalf("file name = %q, want ref:blobref", m.file.name)
 	}
 }
 

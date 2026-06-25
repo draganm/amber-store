@@ -81,7 +81,14 @@ func (m browseModel) updateRefsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.filter.Blur()
-		m.stack = []frame{{key: k, name: "ref:" + sel.Name}}
+		name := "ref:" + sel.Name
+		if isFileKey(k) {
+			// A file reference has no directory to list; open it directly. The
+			// empty stack marks it as a root file so "back" returns here.
+			m.stack = nil
+			return m, m.fetchFile(k, name, k.Length())
+		}
+		m.stack = []frame{{key: k, name: name}}
 		m.mode = modeList
 		return m, m.loadDir(k)
 	}
