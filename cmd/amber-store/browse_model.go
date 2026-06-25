@@ -448,8 +448,11 @@ func (m browseModel) viewList() string {
 	}
 	fmt.Fprintf(&b, "%s\n", strings.Join(crumb, "/"))
 
-	// One line for the filter input is reserved whenever filtering is active.
-	body := m.height - 2
+	entries := m.visibleEntries()
+
+	// Reserve lines for the breadcrumb (already written), the column header, the
+	// status line, and the filter input when active.
+	body := m.height - 3
 	if m.filtering {
 		fmt.Fprintf(&b, "%s\n", m.dirFilter.View())
 		body--
@@ -458,7 +461,17 @@ func (m browseModel) viewList() string {
 		body = 1
 	}
 
-	entries := m.visibleEntries()
+	// Column widths over all visible entries, so columns stay aligned while
+	// scrolling. Name comes first (directories get a trailing slash), then size.
+	nameW, sizeW := len("NAME"), len("SIZE")
+	for _, e := range entries {
+		nameW = max(nameW, len(listName(e)))
+		sizeW = max(sizeW, len(listSize(e)))
+	}
+
+	fmt.Fprintf(&b, "  %-*s  %*s  %-12s  %s\n",
+		nameW, "NAME", sizeW, "SIZE", "MODIFIED", "MODE")
+
 	if m.cursor < m.listTop {
 		m.listTop = m.cursor
 	}
@@ -472,13 +485,13 @@ func (m browseModel) viewList() string {
 		if i == m.cursor {
 			cursor = "> "
 		}
-		name := e.Name
+		link := ""
 		if e.LinkTarget != "" {
-			name += " -> " + e.LinkTarget
+			link = "  -> " + e.LinkTarget
 		}
-		fmt.Fprintf(&b, "%s%s %s %s %s\n",
-			cursor, modeString(e.Mode), sizeString(e),
-			formatMtime(time.Unix(0, e.MtimeNs), now), name)
+		fmt.Fprintf(&b, "%s%-*s  %*s  %-12s  %s%s\n",
+			cursor, nameW, listName(e), sizeW, listSize(e),
+			formatMtime(time.Unix(0, e.MtimeNs), now), modeString(e.Mode), link)
 	}
 	if m.filtering && len(entries) == 0 {
 		b.WriteString("  (no matching entries)\n")
@@ -487,4 +500,22 @@ func (m browseModel) viewList() string {
 		fmt.Fprintf(&b, "\n%s", m.status)
 	}
 	return b.String()
+}
+
+// listName is an entry's display name in the directory list: directories get a
+// trailing slash so they stand out from files.
+func listName(e client.Entry) string {
+	if entryIsDir(e) {
+		return e.Name + "/"
+	}
+	return e.Name
+}
+
+// listSize is the size column: a dash for directories, the byte size (or
+// major,minor for devices) otherwise.
+func listSize(e client.Entry) string {
+	if entryIsDir(e) {
+		return "-"
+	}
+	return sizeString(e)
 }

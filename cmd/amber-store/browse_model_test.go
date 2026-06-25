@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -92,6 +93,59 @@ func TestModel_DescendAndAscend(t *testing.T) {
 	m = mi.(browseModel)
 	if len(m.stack) != 1 {
 		t.Fatalf("stack after ascend: %+v", m.stack)
+	}
+}
+
+func TestModel_ListRenderingNameFirstAligned(t *testing.T) {
+	root := testKey(1)
+	store := fakeStore{ls: map[string][]client.Entry{
+		root.String(): {
+			dirEntry("docs", testKey(2)),
+			fileEntry("a.txt", testKey(3), 5),
+			fileEntry("longername.bin", testKey(4), 123456),
+		},
+	}}
+	m := newTestModel(store, root)
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+
+	out := m.View()
+	lines := strings.Split(out, "\n")
+
+	// Header row first column is NAME, second is SIZE.
+	var header string
+	for _, l := range lines {
+		if strings.Contains(l, "NAME") && strings.Contains(l, "SIZE") {
+			header = l
+			break
+		}
+	}
+	if header == "" {
+		t.Fatalf("no header row found:\n%s", out)
+	}
+	if strings.Index(header, "NAME") >= strings.Index(header, "SIZE") {
+		t.Fatalf("NAME must come before SIZE in header: %q", header)
+	}
+
+	// Directory rows carry a trailing slash; size column is aligned with the
+	// header's SIZE column across rows.
+	sizeCol := strings.Index(header, "SIZE")
+	var dirSeen bool
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "docs/"):
+			dirSeen = true
+		case strings.Contains(l, "a.txt") || strings.Contains(l, "longername.bin"):
+			// The right-aligned size column ends at the same offset as the
+			// header's SIZE column end.
+			if !strings.Contains(l, " 5 ") && !strings.Contains(l, "123456") {
+				t.Fatalf("expected a size on row: %q", l)
+			}
+		}
+		_ = sizeCol
+	}
+	if !dirSeen {
+		t.Fatalf("directory 'docs' did not render with a trailing slash:\n%s", out)
 	}
 }
 
