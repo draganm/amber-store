@@ -95,6 +95,77 @@ func TestModel_DescendAndAscend(t *testing.T) {
 	}
 }
 
+func TestModel_DirFilterAndOpen(t *testing.T) {
+	root, dk := testKey(1), testKey(2)
+	store := fakeStore{ls: map[string][]client.Entry{
+		root.String(): {
+			dirEntry("apple", dk),
+			fileEntry("banana", testKey(3), 1),
+			dirEntry("apricot", testKey(4)),
+		},
+		dk.String(): {fileEntry("inside", testKey(5), 1)},
+	}}
+	m := newTestModel(store, root)
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+
+	// Start filtering and narrow to "ap" -> apple, apricot.
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = mi.(browseModel)
+	if !m.filtering {
+		t.Fatal("expected filtering to be active after '/'")
+	}
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m = mi.(browseModel)
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = mi.(browseModel)
+	ve := m.visibleEntries()
+	if len(ve) != 2 || ve[0].Name != "apple" || ve[1].Name != "apricot" {
+		t.Fatalf("filtered entries wrong: %+v", ve)
+	}
+
+	// Enter opens the highlighted (first) entry, descending into "apple".
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mi.(browseModel)
+	mi, _ = m.Update(cmd().(dirLoadedMsg))
+	m = mi.(browseModel)
+	if m.filtering {
+		t.Fatal("filter should reset after descending")
+	}
+	if len(m.stack) != 2 || m.stack[1].name != "apple" {
+		t.Fatalf("stack after open: %+v", m.stack)
+	}
+	if len(m.entries) != 1 || m.entries[0].Name != "inside" {
+		t.Fatalf("entries after open: %+v", m.entries)
+	}
+}
+
+func TestModel_BackAtRootGoesToRefs(t *testing.T) {
+	root := testKey(1)
+	store := fakeStore{
+		ls:   map[string][]client.Entry{root.String(): {fileEntry("f", testKey(3), 1)}},
+		refs: []client.RefInfo{{Name: "alpha", Key: root.String(), User: "u"}},
+	}
+	m := newTestModel(store, root)
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+
+	// Back at the root drops to the reference picker.
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = mi.(browseModel)
+	if m.mode != modeRefs {
+		t.Fatalf("mode = %v, want modeRefs after back at root", m.mode)
+	}
+	if cmd == nil {
+		t.Fatal("expected a loadRefs command")
+	}
+	mi, _ = m.Update(cmd().(refsLoadedMsg))
+	m = mi.(browseModel)
+	if len(m.filteredRefs()) != 1 || m.filteredRefs()[0].Name != "alpha" {
+		t.Fatalf("refs not loaded: %+v", m.refs)
+	}
+}
+
 func TestModel_CursorClamp(t *testing.T) {
 	root := testKey(1)
 	store := fakeStore{ls: map[string][]client.Entry{

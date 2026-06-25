@@ -65,19 +65,29 @@ type browseModel struct {
 	refs      []client.RefInfo
 	filter    textinput.Model
 	refCursor int
+
+	dirFilter textinput.Model
+	filtering bool
+}
+
+// newTextInput builds a textinput with the given prompt.
+func newTextInput(prompt string) textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = prompt
+	return ti
 }
 
 // newBrowseModel builds a model rooted at the resolved spec key.
 func newBrowseModel(ctx context.Context, store browseStore, cwd string, maxView int64, root key.Key, rootName string) browseModel {
-	ti := textinput.New()
-	ti.Prompt = "export to: "
 	return browseModel{
-		ctx:     ctx,
-		store:   store,
-		cwd:     cwd,
-		maxView: maxView,
-		stack:   []frame{{key: root, name: rootName}},
-		input:   ti,
+		ctx:       ctx,
+		store:     store,
+		cwd:       cwd,
+		maxView:   maxView,
+		stack:     []frame{{key: root, name: rootName}},
+		input:     newTextInput("export to: "),
+		filter:    newTextInput("filter: "),
+		dirFilter: newTextInput("filter: "),
 	}
 }
 
@@ -161,6 +171,10 @@ func (m browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.entries = msg.entries
+		// Each directory starts unfiltered.
+		m.filtering = false
+		m.dirFilter.Blur()
+		m.dirFilter.SetValue("")
 		m.cursor = m.cur().cursor
 		if m.cursor >= len(m.entries) {
 			m.cursor = 0
@@ -214,12 +228,56 @@ func (m browseModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// visibleEntries returns the directory entries matching the dirFilter text
+// (case-insensitive substring on name); an empty filter matches everything.
+func (m browseModel) visibleEntries() []client.Entry {
+	q := strings.ToLower(m.dirFilter.Value())
+	if q == "" {
+		return m.entries
+	}
+	var out []client.Entry
+	for _, e := range m.entries {
+		if strings.Contains(strings.ToLower(e.Name), q) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// openEntry descends into a directory or opens a file; used by both normal and
+// filtered navigation. Descending leaves the dirLoadedMsg handler to reset the
+// filter.
+func (m browseModel) openEntry(e client.Entry) (tea.Model, tea.Cmd) {
+	if entryIsDir(e) {
+		k, err := parseHexKey(e.Key)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.stack[len(m.stack)-1].cursor = m.cursor
+		m.stack = append(m.stack, frame{key: k, name: e.Name})
+		return m, m.loadDir(k)
+	}
+	if entryIsReg(e) {
+		return m, m.loadFile(e)
+	}
+	return m, nil
+}
+
 func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.filtering {
+		return m.updateListFilterKey(msg)
+	}
+	ve := m.visibleEntries()
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "/":
+		m.filtering = true
+		m.dirFilter.Focus()
+		return m, nil
 	case "down", "j":
-		if m.cursor < len(m.entries)-1 {
+		if m.cursor < len(ve)-1 {
 			m.cursor++
 		}
 		return m, nil
@@ -232,41 +290,28 @@ func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		return m, nil
 	case "end":
-		m.cursor = len(m.entries) - 1
+		m.cursor = len(ve) - 1
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
 		return m, nil
 	case "enter", "l", "right":
-		if len(m.entries) == 0 {
+		if len(ve) == 0 {
 			return m, nil
 		}
-		e := m.entries[m.cursor]
-		if entryIsDir(e) {
-			k, err := parseHexKey(e.Key)
-			if err != nil {
-				m.status = err.Error()
-				return m, nil
-			}
-			m.stack[len(m.stack)-1].cursor = m.cursor
-			m.stack = append(m.stack, frame{key: k, name: e.Name})
-			return m, m.loadDir(k)
-		}
-		if entryIsReg(e) {
-			return m, m.loadFile(e)
-		}
-		return m, nil
+		return m.openEntry(ve[m.cursor])
 	case "backspace", "h", "left":
 		if len(m.stack) > 1 {
 			m.stack = m.stack[:len(m.stack)-1]
 			return m, m.loadDir(m.cur().key)
 		}
-		return m, nil
+		// Already at the root: drop down to the reference list.
+		return m.gotoRefs()
 	case "e":
-		if len(m.entries) == 0 {
+		if len(ve) == 0 {
 			return m, nil
 		}
-		e := m.entries[m.cursor]
+		e := ve[m.cursor]
 		k, err := parseHexKey(e.Key)
 		if err != nil {
 			m.status = err.Error()
@@ -276,6 +321,52 @@ func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// updateListFilterKey handles keys while the directory filter input is focused.
+func (m browseModel) updateListFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.filtering = false
+		m.dirFilter.Blur()
+		m.dirFilter.SetValue("")
+		m.cursor = 0
+		return m, nil
+	case "enter":
+		ve := m.visibleEntries()
+		if len(ve) == 0 {
+			return m, nil
+		}
+		return m.openEntry(ve[m.cursor])
+	case "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+	case "down":
+		if m.cursor < len(m.visibleEntries())-1 {
+			m.cursor++
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.dirFilter, cmd = m.dirFilter.Update(msg)
+	// Editing the filter can shrink the list out from under the cursor.
+	if m.cursor >= len(m.visibleEntries()) {
+		m.cursor = 0
+	}
+	return m, cmd
+}
+
+// gotoRefs switches to the searchable reference picker and loads the refs.
+func (m browseModel) gotoRefs() (tea.Model, tea.Cmd) {
+	m.mode = modeRefs
+	m.refCursor = 0
+	m.filter.SetValue("")
+	m.filter.Focus()
+	return m, m.loadRefs()
 }
 
 func (m browseModel) updateFileKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -357,10 +448,17 @@ func (m browseModel) viewList() string {
 	}
 	fmt.Fprintf(&b, "%s\n", strings.Join(crumb, "/"))
 
+	// One line for the filter input is reserved whenever filtering is active.
 	body := m.height - 2
+	if m.filtering {
+		fmt.Fprintf(&b, "%s\n", m.dirFilter.View())
+		body--
+	}
 	if body < 1 {
 		body = 1
 	}
+
+	entries := m.visibleEntries()
 	if m.cursor < m.listTop {
 		m.listTop = m.cursor
 	}
@@ -368,8 +466,8 @@ func (m browseModel) viewList() string {
 		m.listTop = m.cursor - body + 1
 	}
 	now := time.Now()
-	for i := m.listTop; i < m.listTop+body && i < len(m.entries); i++ {
-		e := m.entries[i]
+	for i := m.listTop; i < m.listTop+body && i < len(entries); i++ {
+		e := entries[i]
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
@@ -381,6 +479,9 @@ func (m browseModel) viewList() string {
 		fmt.Fprintf(&b, "%s%s %s %s %s\n",
 			cursor, modeString(e.Mode), sizeString(e),
 			formatMtime(time.Unix(0, e.MtimeNs), now), name)
+	}
+	if m.filtering && len(entries) == 0 {
+		b.WriteString("  (no matching entries)\n")
 	}
 	if m.status != "" {
 		fmt.Fprintf(&b, "\n%s", m.status)

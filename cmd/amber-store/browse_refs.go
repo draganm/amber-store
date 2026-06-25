@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/draganm/amber-store/client"
 )
@@ -13,19 +12,17 @@ import (
 // newRefPickerModel builds a model that opens on a searchable reference list
 // instead of a directory. Used when `browse` is invoked without a SPEC.
 func newRefPickerModel(ctx context.Context, store browseStore, cwd string, maxView int64) browseModel {
-	ti := textinput.New()
-	ti.Prompt = "export to: "
-	f := textinput.New()
-	f.Prompt = "filter: "
+	f := newTextInput("filter: ")
 	f.Focus()
 	return browseModel{
-		ctx:     ctx,
-		store:   store,
-		cwd:     cwd,
-		maxView: maxView,
-		input:   ti,
-		filter:  f,
-		mode:    modeRefs,
+		ctx:       ctx,
+		store:     store,
+		cwd:       cwd,
+		maxView:   maxView,
+		input:     newTextInput("export to: "),
+		filter:    f,
+		dirFilter: newTextInput("filter: "),
+		mode:      modeRefs,
 	}
 }
 

@@ -179,10 +179,12 @@ amber-store ref ls                       # list references
 amber-store ls ref:backups/home@sub/dir  # ref:NAME[@PATH] works wherever KEY[/PATH] does
 ```
 
-For interactive exploration, `browse` opens a terminal UI: navigate directories,
-view a file as text, a hex dump, or — for CBOR content — pretty-printed JSON
-(`t`/`x`/`j` to switch), and export the highlighted directory as a tar or a file
-as raw bytes (`e`):
+For interactive exploration, `browse` opens a terminal UI: navigate directories
+(`/` filters the current listing by name), view a file as text, a hex dump, or —
+for CBOR content — pretty-printed JSON (`t`/`x`/`j` to switch), and export the
+highlighted directory as a tar or a file as raw bytes (`e`). Going back from a
+directory's root drops to the searchable reference list, so you can hop between
+references without leaving the UI:
 
 ```sh
 amber-store browse ref:backups/home@sub/dir  # or browse KEY[/PATH]; q to quit
