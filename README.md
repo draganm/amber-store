@@ -7,7 +7,8 @@ content.
 
 > **Status:** working implementation. A store-owning daemon serves CLI clients
 > over a unix socket; trees are built client-side and ingested, listed, dumped,
-> restored, and (on Linux) mounted as a read-only FUSE filesystem through it.
+> restored, browsed in an interactive TUI, and (on Linux) mounted as a read-only
+> FUSE filesystem through it.
 > The design is specified in [`architecture/`](architecture/).
 
 ## What it is
@@ -178,6 +179,15 @@ amber-store ref ls                       # list references
 amber-store ls ref:backups/home@sub/dir  # ref:NAME[@PATH] works wherever KEY[/PATH] does
 ```
 
+For interactive exploration, `browse` opens a terminal UI: navigate directories,
+view a file as text, a hex dump, or — for CBOR content — pretty-printed JSON
+(`t`/`x`/`j` to switch), and export the highlighted directory as a tar or a file
+as raw bytes (`e`):
+
+```sh
+amber-store browse ref:backups/home@sub/dir  # or browse KEY[/PATH]; q to quit
+```
+
 On Linux, mount a tag as a read-only filesystem instead of extracting it: files
 are reconstructed into RAM at open and served through kernel passthrough (see
 [`architecture/fuse.md`](architecture/fuse.md)):
@@ -237,6 +247,8 @@ go build ./...
 
 - Module: `github.com/draganm/amber-store`
 - Go: 1.26+
+- The `browse` TUI is built on [Bubble Tea](https://github.com/charmbracelet/bubbletea)
+  (with `bubbles` and `lipgloss`); the rest of the CLI has no UI dependencies.
 
 ## License
 
