@@ -471,12 +471,15 @@ func (m browseModel) updateExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- view ---
 
-// View truncates every line of the active screen to the terminal width. A line
-// longer than the width would be wrapped by the terminal, which throws off
-// Bubble Tea's line accounting and leaves stale characters behind when a later,
-// shorter screen is drawn (e.g. returning from a file to the reference list).
+// View prepares every line of the active screen for the terminal: tabs are
+// expanded to spaces and each line is clamped to the terminal width. Both matter
+// for correct redraws — a literal tab moves the cursor without erasing the cells
+// it skips (leaving stale characters from the previous frame under the new
+// line's indentation), and a line wider than the terminal wraps, which throws
+// off Bubble Tea's line accounting and leaves stale characters when a shorter
+// screen is later drawn.
 func (m browseModel) View() string {
-	return truncateLines(m.viewBody(), m.width)
+	return fitLines(m.viewBody(), m.width)
 }
 
 func (m browseModel) viewBody() string {
@@ -492,20 +495,44 @@ func (m browseModel) viewBody() string {
 	}
 }
 
-// truncateLines clamps each line of s to w display columns. A non-positive w
-// (no window size yet) leaves the text untouched.
-func truncateLines(s string, w int) string {
-	if w <= 0 {
-		return s
-	}
+// fitLines expands tabs to spaces and clamps each line to w columns. A
+// non-positive w (no window size yet) skips the width clamp but still expands
+// tabs.
+func fitLines(s string, w int) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		r := []rune(line)
-		if len(r) > w {
-			lines[i] = string(r[:w])
+		line = expandTabs(line)
+		if w > 0 {
+			if r := []rune(line); len(r) > w {
+				line = string(r[:w])
+			}
 		}
+		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// expandTabs replaces tab characters with spaces up to the next 8-column tab
+// stop, so the rendered text overwrites the cells a literal tab would skip.
+func expandTabs(s string) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			n := 8 - col%8
+			for range n {
+				b.WriteByte(' ')
+			}
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String()
 }
 
 func (m browseModel) viewList() string {

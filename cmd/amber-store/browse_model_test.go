@@ -248,6 +248,46 @@ func TestModel_ViewTruncatesToWidth(t *testing.T) {
 	}
 }
 
+func TestExpandTabs(t *testing.T) {
+	cases := map[string]string{
+		"\tx":      "        x",  // tab -> 8 spaces
+		"ab\tc":    "ab      c",  // tab fills to column 8
+		"abcdefgh\tx": "abcdefgh        x", // already at a stop -> full 8
+		"no tabs":  "no tabs",
+	}
+	for in, want := range cases {
+		if got := expandTabs(in); got != want {
+			t.Errorf("expandTabs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestModel_ViewExpandsTabsInFile(t *testing.T) {
+	root, fk := testKey(1), testKey(9)
+	// Two lines that occupy the same screen row across a scroll; the tab-indented
+	// one must not leave the previous line's text under its indentation.
+	data := []byte("require (\n\tgithub.com/x/y v1.0.0\n")
+	store := fakeStore{
+		ls:   map[string][]client.Entry{root.String(): {fileEntry("f", fk, uint64(len(data)))}},
+		file: map[string][]byte{fk.String(): data},
+	}
+	m := newTestModel(store, root)
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mi.(browseModel)
+	mi, _ = m.Update(cmd().(fileLoadedMsg))
+	m = mi.(browseModel)
+
+	out := m.View()
+	if strings.Contains(out, "\t") {
+		t.Fatalf("rendered output still contains a tab:\n%q", out)
+	}
+	if !strings.Contains(out, "        github.com/x/y v1.0.0") {
+		t.Fatalf("tab not expanded to spaces:\n%s", out)
+	}
+}
+
 func TestModel_DirFilterAndOpen(t *testing.T) {
 	root, dk := testKey(1), testKey(2)
 	store := fakeStore{ls: map[string][]client.Entry{
