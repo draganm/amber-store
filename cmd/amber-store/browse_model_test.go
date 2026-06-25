@@ -149,6 +149,28 @@ func TestModel_ListRenderingNameFirstAligned(t *testing.T) {
 	}
 }
 
+func TestModel_ViewTruncatesToWidth(t *testing.T) {
+	root, fk := testKey(1), testKey(9)
+	long := strings.Repeat("x", 500) // a single line far wider than the terminal
+	store := fakeStore{
+		ls:   map[string][]client.Entry{root.String(): {fileEntry("wide.txt", fk, uint64(len(long)))}},
+		file: map[string][]byte{fk.String(): []byte(long)},
+	}
+	m := newTestModel(store, root) // width 80
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mi.(browseModel)
+	mi, _ = m.Update(cmd().(fileLoadedMsg))
+	m = mi.(browseModel)
+
+	for _, line := range strings.Split(m.View(), "\n") {
+		if len([]rune(line)) > m.width {
+			t.Fatalf("line exceeds width %d: %d runes", m.width, len([]rune(line)))
+		}
+	}
+}
+
 func TestModel_DirFilterAndOpen(t *testing.T) {
 	root, dk := testKey(1), testKey(2)
 	store := fakeStore{ls: map[string][]client.Entry{

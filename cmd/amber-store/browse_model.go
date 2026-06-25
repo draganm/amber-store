@@ -427,7 +427,15 @@ func (m browseModel) updateExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- view ---
 
+// View truncates every line of the active screen to the terminal width. A line
+// longer than the width would be wrapped by the terminal, which throws off
+// Bubble Tea's line accounting and leaves stale characters behind when a later,
+// shorter screen is drawn (e.g. returning from a file to the reference list).
 func (m browseModel) View() string {
+	return truncateLines(m.viewBody(), m.width)
+}
+
+func (m browseModel) viewBody() string {
 	switch m.mode {
 	case modeFile:
 		return m.file.render(m.height)
@@ -438,6 +446,22 @@ func (m browseModel) View() string {
 	default:
 		return m.viewList()
 	}
+}
+
+// truncateLines clamps each line of s to w display columns. A non-positive w
+// (no window size yet) leaves the text untouched.
+func truncateLines(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		r := []rune(line)
+		if len(r) > w {
+			lines[i] = string(r[:w])
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m browseModel) viewList() string {
