@@ -280,7 +280,7 @@ func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m browseModel) updateFileKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q", "esc", "backspace":
+	case "ctrl+c", "q", "esc", "backspace", "h", "left":
 		m.mode = modeList
 		return m, nil
 	case "t":

@@ -154,3 +154,35 @@ func TestModel_FileModeSwitchAndExit(t *testing.T) {
 		t.Fatalf("mode = %v, want modeList after esc", m.mode)
 	}
 }
+
+// In a file view, the same "back" gestures as the directory list (left/h, plus
+// esc/backspace) must return to the list.
+func TestModel_FileModeBackKeys(t *testing.T) {
+	root, fk := testKey(1), testKey(9)
+	store := fakeStore{
+		ls:   map[string][]client.Entry{root.String(): {fileEntry("notes.txt", fk, 5)}},
+		file: map[string][]byte{fk.String(): []byte("hello")},
+	}
+	for _, k := range []tea.KeyMsg{
+		{Type: tea.KeyLeft},
+		{Type: tea.KeyRunes, Runes: []rune{'h'}},
+		{Type: tea.KeyBackspace},
+		{Type: tea.KeyEsc},
+	} {
+		m := newTestModel(store, root)
+		mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+		m = mi.(browseModel)
+		mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = mi.(browseModel)
+		mi, _ = m.Update(cmd().(fileLoadedMsg))
+		m = mi.(browseModel)
+		if m.mode != modeFile {
+			t.Fatalf("setup: mode = %v, want modeFile", m.mode)
+		}
+		mi, _ = m.Update(k)
+		m = mi.(browseModel)
+		if m.mode != modeList {
+			t.Fatalf("key %v: mode = %v, want modeList", k, m.mode)
+		}
+	}
+}
