@@ -62,9 +62,10 @@ type browseModel struct {
 	exportKey   key.Key
 	exportName  string
 
-	refs      []client.RefInfo
-	filter    textinput.Model
-	refCursor int
+	refs         []client.RefInfo
+	filter       textinput.Model
+	refCursor    int
+	refFiltering bool
 
 	dirFilter textinput.Model
 	filtering bool
@@ -306,7 +307,7 @@ func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case "/":
+	case "/", "f":
 		m.filtering = true
 		m.dirFilter.Focus()
 		return m, nil
@@ -334,7 +335,7 @@ func (m browseModel) updateListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.openEntry(ve[m.cursor])
-	case "backspace", "h", "left":
+	case "esc", "backspace", "h", "left":
 		if len(m.stack) > 1 {
 			m.stack = m.stack[:len(m.stack)-1]
 			return m, m.loadDir(m.cur().key)
@@ -394,12 +395,14 @@ func (m browseModel) updateListFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// gotoRefs switches to the searchable reference picker and loads the refs.
+// gotoRefs switches to the searchable reference picker (in navigation mode) and
+// reloads the refs.
 func (m browseModel) gotoRefs() (tea.Model, tea.Cmd) {
 	m.mode = modeRefs
 	m.refCursor = 0
+	m.refFiltering = false
 	m.filter.SetValue("")
-	m.filter.Focus()
+	m.filter.Blur()
 	return m, m.loadRefs()
 }
 

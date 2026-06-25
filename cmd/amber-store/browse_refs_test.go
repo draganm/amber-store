@@ -28,7 +28,12 @@ func TestModel_RefPickerFilterAndSelect(t *testing.T) {
 		t.Fatalf("want 2 refs, got %d", len(m.filteredRefs()))
 	}
 
-	// Type "al" to filter down to alpha.
+	// '/' enters filter mode, then type "al" to filter down to alpha.
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = mi.(browseModel)
+	if !m.refFiltering {
+		t.Fatal("expected refFiltering after '/'")
+	}
 	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m = mi.(browseModel)
 	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
@@ -57,6 +62,53 @@ func TestModel_RefPickerFilterAndSelect(t *testing.T) {
 	}
 }
 
+func isQuit(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, ok := cmd().(tea.QuitMsg)
+	return ok
+}
+
+func TestModel_RefFilterTriggers(t *testing.T) {
+	store := fakeStore{refs: []client.RefInfo{{Name: "x"}}}
+	for _, trigger := range []rune{'/', 'f'} {
+		m := newRefPickerModel(context.Background(), store, "/tmp", 10<<20)
+		m.width, m.height = 80, 24
+		mi, _ := m.Update(refsLoadedMsg{refs: store.refs})
+		m = mi.(browseModel)
+		mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{trigger}})
+		m = mi.(browseModel)
+		if !m.refFiltering {
+			t.Fatalf("%q did not start ref filtering", trigger)
+		}
+		// esc leaves filtering (one level up), staying on the ref list.
+		mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = mi.(browseModel)
+		if m.refFiltering {
+			t.Fatalf("%q: esc did not leave filtering", trigger)
+		}
+		if m.mode != modeRefs {
+			t.Fatalf("%q: esc should stay on ref list, got mode %v", trigger, m.mode)
+		}
+		if isQuit(cmd) {
+			t.Fatalf("%q: esc from filter must not quit", trigger)
+		}
+	}
+}
+
+func TestModel_RefEscQuits(t *testing.T) {
+	store := fakeStore{refs: []client.RefInfo{{Name: "x"}}}
+	m := newRefPickerModel(context.Background(), store, "/tmp", 10<<20)
+	m.width, m.height = 80, 24
+	mi, _ := m.Update(refsLoadedMsg{refs: store.refs})
+	m = mi.(browseModel)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !isQuit(cmd) {
+		t.Fatal("esc at the reference list should quit")
+	}
+}
+
 func TestModel_RefPickerCursorClampsOnFilter(t *testing.T) {
 	store := fakeStore{refs: []client.RefInfo{
 		{Name: "alpha"}, {Name: "alpine"}, {Name: "beta"},
@@ -66,7 +118,7 @@ func TestModel_RefPickerCursorClampsOnFilter(t *testing.T) {
 	mi, _ := m.Update(refsLoadedMsg{refs: store.refs})
 	m = mi.(browseModel)
 
-	// Move cursor to the last entry, then filter so the list shrinks.
+	// Move cursor to the last entry (nav mode), then filter so the list shrinks.
 	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = mi.(browseModel)
 	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -74,6 +126,8 @@ func TestModel_RefPickerCursorClampsOnFilter(t *testing.T) {
 	if m.refCursor != 2 {
 		t.Fatalf("refCursor = %d, want 2", m.refCursor)
 	}
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}) // enter filter mode
+	m = mi.(browseModel)
 	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}}) // only "beta"
 	m = mi.(browseModel)
 	if got := len(m.filteredRefs()); got != 1 {

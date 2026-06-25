@@ -293,6 +293,59 @@ func TestModel_DirFilterAndOpen(t *testing.T) {
 	}
 }
 
+func TestModel_DirFilterTriggers(t *testing.T) {
+	root := testKey(1)
+	store := fakeStore{ls: map[string][]client.Entry{
+		root.String(): {dirEntry("a", testKey(2)), fileEntry("b", testKey(3), 1)},
+	}}
+	for _, trigger := range []rune{'/', 'f'} {
+		m := newTestModel(store, root)
+		mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+		m = mi.(browseModel)
+		mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{trigger}})
+		m = mi.(browseModel)
+		if !m.filtering {
+			t.Fatalf("%q did not start directory filtering", trigger)
+		}
+	}
+}
+
+func TestModel_EscNavigatesUp(t *testing.T) {
+	root, sub := testKey(1), testKey(2)
+	store := fakeStore{ls: map[string][]client.Entry{
+		root.String(): {dirEntry("sub", sub)},
+		sub.String():  {fileEntry("f", testKey(3), 1)},
+	}}
+	m := newTestModel(store, root)
+	mi, _ := m.Update(dirLoadedMsg{entries: store.ls[root.String()]})
+	m = mi.(browseModel)
+
+	// Descend into sub.
+	mi, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mi.(browseModel)
+	mi, _ = m.Update(cmd().(dirLoadedMsg))
+	m = mi.(browseModel)
+	if len(m.stack) != 2 {
+		t.Fatalf("stack depth = %d, want 2", len(m.stack))
+	}
+
+	// esc goes up to the parent directory.
+	mi, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mi.(browseModel)
+	mi, _ = m.Update(cmd().(dirLoadedMsg))
+	m = mi.(browseModel)
+	if len(m.stack) != 1 {
+		t.Fatalf("after esc, stack depth = %d, want 1", len(m.stack))
+	}
+
+	// esc at the root drops to the reference list.
+	mi, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mi.(browseModel)
+	if m.mode != modeRefs {
+		t.Fatalf("after esc at root, mode = %v, want modeRefs", m.mode)
+	}
+}
+
 func TestModel_BackAtRootGoesToRefs(t *testing.T) {
 	root := testKey(1)
 	store := fakeStore{
