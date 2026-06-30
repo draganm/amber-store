@@ -16,6 +16,11 @@ import (
 // ErrRefNotFound reports an absent reference name.
 var ErrRefNotFound = errors.New("reference not found")
 
+// ErrRemoteRefNotFound reports that a remote sync (push/pull) responded HTTP 404
+// — for pull this means the remote does not have the named reference. Wrapped by
+// runSync so callers can errors.Is it instead of inspecting status text.
+var ErrRemoteRefNotFound = errors.New("remote reference not found")
+
 // refsURL builds the /v1/refs URL, with the name as a query parameter (names
 // may contain '/', '..' and other path-hostile characters).
 func refsURL(name string) string {

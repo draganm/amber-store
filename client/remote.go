@@ -167,6 +167,9 @@ func (c *Client) runSync(ctx context.Context, pathQuery string, onProgress func(
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %s", ErrRemoteRefNotFound, bytes.TrimSpace(msg))
+		}
 		return nil, fmt.Errorf("sync failed: %s: %s", resp.Status, msg)
 	}
 	var last *syncEvent
