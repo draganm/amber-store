@@ -1,0 +1,4 @@
+.git/
+.direnv/
+.jobsdev/
+cmd/amber-store/ui/node_modules/
