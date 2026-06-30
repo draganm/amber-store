@@ -257,6 +257,39 @@ go build ./...
 - The `browse` TUI is built on [Bubble Tea](https://github.com/charmbracelet/bubbletea)
   (with `bubbles` and `lipgloss`); the rest of the CLI has no UI dependencies.
 
+## Building with JOBS
+
+[`BUILD.jobs`](BUILD.jobs) builds the `amber-store` daemon with
+[JOBS](https://github.com/draganm/jobs) — **fully offline, hermetic, and
+CGO-free**. One recipe drives two toolchains:
+
+1. **The admin UI is rebuilt from source.** A pinned musl Node runs
+   `npm ci --offline` (every tarball in `cmd/amber-store/ui/package-lock.json` is
+   fetched as a content-addressed input and seeded into npm's cache) then
+   `vite build`, producing `cmd/amber-store/ui/dist`.
+2. **The Go daemon is compiled offline.** Every module in the root `go.sum` is a
+   content-addressed input; `go build ./cmd/amber-store` runs with
+   `CGO_ENABLED=0`, embedding the **freshly built** `ui/dist` via `go:embed`.
+
+No network and no C compiler are used at build time: `esbuild` is a static Go
+binary, `rollup` ships a prebuilt `linux-musl` native (pinned in the lockfile),
+and `zeebo/blake3`'s SIMD is Go assembly that `CGO_ENABLED=0` keeps. The output
+is a single static binary that serves its `/admin/` SPA.
+
+```sh
+# build and smoke-run the CLI (run appends trailing args to the entrypoint):
+jb run    --source . --build-file BUILD.jobs -- daemon --help
+
+# package a loadable OCI image:
+jb image  --source . --build-file BUILD.jobs -o /tmp/amber-store.oci.tar
+
+# debug the hermetic build interactively:
+jb develop --source . --build-file BUILD.jobs
+```
+
+Builds on `linux/amd64` and `linux/arm64`. The UI rebuild needs JOBS's
+`nodeplugin` with `package-lock.json` support.
+
 ## License
 
 Licensed under the GNU Affero General Public License v3.0. See [`LICENSE`](LICENSE)
