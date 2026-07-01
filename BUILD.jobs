@@ -46,7 +46,12 @@ def build():
             "sha256": GO_SHA[goarch],
         }),
         "node": imp(fetcher = "tarball+https", params = {"url": node_url, "sha256": node_sha, "strip": 1}),
-        "musl": imp(fetcher = "hostmusl", params = {}),
+        # hostmusl vendors the musl loader from its per-platform fetcher ARTIFACT
+        # (not an arch-specific URL), and node execs against it on the build's
+        # platform — so pin the import to this build's platform, else an
+        # imports-run-anywhere placement on the other-arch runner yields the wrong
+        # loader (node: "required file not found").
+        "musl": imp(fetcher = "hostmusl", params = {}, platform = platform),
     }
 
     # libstdc++ is a build-only dep for the x64 musl Node only.
