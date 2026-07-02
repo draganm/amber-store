@@ -7,12 +7,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
+	"github.com/draganm/amber-store/sshsign"
 )
 
 // refName extracts and validates the ?name= query parameter.
@@ -70,7 +70,7 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 			h.signError(w, a.nonce, http.StatusInternalServerError, derr.Error())
 			return
 		}
-		if !bytes.Equal(old.PublicKey, rec.PublicKey) && !a.admin {
+		if !bytes.Equal(old.PublicKey, rec.PublicKey) && !a.entry.Admin {
 			h.signError(w, a.nonce, http.StatusForbidden, "reference is owned by a different signer key")
 			return
 		}
@@ -185,12 +185,9 @@ func (h *handler) listRefs(w http.ResponseWriter, a *authedRequest) {
 
 // deleteRef removes a reference. Ownership lives in the ref signature, but a
 // DELETE carries no record to sign, so deletion is restricted to admin
-// transport keys (spec §4).
+// transport keys (spec §4) — enforced by the route's admin capability
+// requirement (h.auth(allowlist.CapAdmin, ...)), not here.
 func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
-	if !a.admin {
-		h.signError(w, a.nonce, http.StatusForbidden, "reference deletion requires an admin key")
-		return
-	}
 	name, err := refName(r)
 	if err != nil {
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())

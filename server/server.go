@@ -1,23 +1,29 @@
 // Package server implements the amber-store remote server: a TCP HTTP(S)
 // sibling of the local daemon that other amber daemons push objects and
 // references to and pull them from. Every request must carry a valid
-// signature by an allowed SSH key (internal/httpsig); every response is
-// signed with the server's identity key so clients can enforce their pinned
-// key. See architecture/remote.md.
+// signature by an allowed SSH key (internal/httpsig); requests are then
+// authorized against the server's allowlist capabilities or a delegate-issued
+// capability grant (package grant); every response is signed with the
+// server's identity key so clients can enforce their pinned key. See
+// architecture/remote.md.
 package server
 
 import (
 	"bytes"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/draganm/amber-store/inbox"
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/allowlist"
+	"github.com/draganm/amber-store/grant"
 	"github.com/draganm/amber-store/httpsig"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/nonces"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"golang.org/x/crypto/ssh"
 )
@@ -76,13 +82,13 @@ func New(cfg Config) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/identity", h.getIdentity)
-	mux.HandleFunc("POST /v1/objects/missing", h.auth(h.postMissing))
-	mux.HandleFunc("POST /v1/objects", h.postObjects)
-	mux.HandleFunc("POST /v1/objects/get", h.auth(h.postObjectsGet))
-	mux.HandleFunc("POST /v1/objects/reachable", h.auth(h.postObjectsReachable))
-	mux.HandleFunc("PUT /v1/refs", h.auth(h.putRef))
-	mux.HandleFunc("GET /v1/refs", h.auth(h.getRefs))
-	mux.HandleFunc("DELETE /v1/refs", h.auth(h.deleteRef))
+	mux.HandleFunc("POST /v1/objects/missing", h.auth(allowlist.CapRead, h.postMissing))
+	mux.HandleFunc("POST /v1/objects", h.postObjects) // streams; authorizes inline, needs push-objects
+	mux.HandleFunc("POST /v1/objects/get", h.auth(allowlist.CapRead, h.postObjectsGet))
+	mux.HandleFunc("POST /v1/objects/reachable", h.auth(allowlist.CapRead, h.postObjectsReachable))
+	mux.HandleFunc("PUT /v1/refs", h.auth(allowlist.CapWriteRefs, h.putRef))
+	mux.HandleFunc("GET /v1/refs", h.auth(allowlist.CapRead, h.getRefs))
+	mux.HandleFunc("DELETE /v1/refs", h.auth(allowlist.CapAdmin, h.deleteRef))
 	return logRequests(log, mux)
 }
 
@@ -117,19 +123,48 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 
 // authedRequest is what the middleware hands an authenticated handler.
 type authedRequest struct {
-	pubWire []byte // the client's key, SSH wire format
-	admin   bool
-	nonce   []byte // the request nonce; responses sign over it
-	body    []byte // the fully-read request body
+	pubWire []byte          // the client's key, SSH wire format
+	entry   allowlist.Entry // effective capabilities (allowlist entry or grant)
+	nonce   []byte          // the request nonce; responses sign over it
+	body    []byte          // the fully-read request body
 }
 
 type authedHandler func(w http.ResponseWriter, r *http.Request, a *authedRequest)
 
+// authorize resolves the request key to its effective capabilities: an
+// allowlisted key uses its entry; an unlisted key may present a capability
+// grant (Amber-Grant header) minted by an allowlisted delegate. Anything else
+// is a 403-worthy error.
+func (h *handler) authorize(pub ssh.PublicKey, r *http.Request, now time.Time) (allowlist.Entry, error) {
+	if ent, ok := h.allow().Lookup(pub.Marshal()); ok {
+		return ent, nil
+	}
+	gB64 := r.Header.Get(grant.Header)
+	if gB64 == "" {
+		return allowlist.Entry{}, errors.New("public key is not in the server allowlist")
+	}
+	raw, err := base64.StdEncoding.DecodeString(gB64)
+	if err != nil {
+		return allowlist.Entry{}, fmt.Errorf("decoding %s: %w", grant.Header, err)
+	}
+	g, issuerWire, err := grant.Verify(raw, pub.Marshal(), now, h.window)
+	if err != nil {
+		return allowlist.Entry{}, fmt.Errorf("capability grant: %w", err)
+	}
+	issuer, ok := h.allow().Lookup(issuerWire)
+	if !ok || !issuer.Allows(allowlist.CapDelegate) {
+		return allowlist.Entry{}, errors.New("grant issuer is not an allowlisted delegate")
+	}
+	return allowlist.ParseCaps(g.Caps)
+}
+
 // auth reads the (size-capped) body, verifies the request signature, checks
-// the nonce for replay and the key against the allowlist — all before the
-// wrapped handler can cause any side effect. Bad signature/timestamp/replay
-// are 401; a valid signature by an unlisted key is 403.
-func (h *handler) auth(next authedHandler) http.HandlerFunc {
+// the nonce for replay and resolves the key's effective capabilities
+// (allowlist or grant) against the route's required capability — all before
+// the wrapped handler can cause any side effect. Bad signature/timestamp/
+// replay are 401; a valid signature that is not authorized, or lacks the
+// required capability, is 403.
+func (h *handler) auth(need string, next authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody+1))
 		if err != nil {
@@ -154,14 +189,18 @@ func (h *handler) auth(next authedHandler) http.HandlerFunc {
 			h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
 			return
 		}
-		ent, ok := h.allow().Lookup(pub.Marshal())
-		if !ok {
-			h.log.Warn("key not allowed", "key", ssh.FingerprintSHA256(pub))
-			h.signError(w, nonce, http.StatusForbidden, "public key is not in the server allowlist")
+		ent, err := h.authorize(pub, r, now)
+		if err != nil {
+			h.log.Warn("key not authorized", "key", ssh.FingerprintSHA256(pub), "error", err)
+			h.signError(w, nonce, http.StatusForbidden, err.Error())
+			return
+		}
+		if !ent.Allows(need) {
+			h.signError(w, nonce, http.StatusForbidden, "key lacks the "+need+" capability")
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		next(w, r, &authedRequest{pubWire: pub.Marshal(), admin: ent.Admin, nonce: nonce, body: body})
+		next(w, r, &authedRequest{pubWire: pub.Marshal(), entry: ent, nonce: nonce, body: body})
 	}
 }
 
