@@ -1,8 +1,9 @@
 // Package allowstore persists the remote server's allowed client keys in a
 // Pebble DB under the store directory: SSH wire-format public key → JSON
-// record {admin, comment}. The DB is the sole source of truth and the
+// record {admin, comment, caps}. The DB is the sole source of truth and the
 // admin API is its only writer; a lock-free snapshot of the allowlist
-// serves the per-request lookup.
+// serves the per-request lookup. A record with an empty caps field keeps
+// the legacy meaning: admin if admin:true, else full non-admin access.
 package allowstore
 
 import (
@@ -22,17 +23,37 @@ import (
 // Key is one allowed key as the admin UI sees it. Line is the canonical
 // authorized_keys rendering of the stored record.
 type Key struct {
-	Line        string `json:"line"`
-	Type        string `json:"type"`        // e.g. ssh-ed25519
-	Fingerprint string `json:"fingerprint"` // SHA256:…
-	Comment     string `json:"comment"`
-	Admin       bool   `json:"admin"`
+	Line        string   `json:"line"`
+	Type        string   `json:"type"`        // e.g. ssh-ed25519
+	Fingerprint string   `json:"fingerprint"` // SHA256:…
+	Comment     string   `json:"comment"`
+	Admin       bool     `json:"admin"`
+	Caps        []string `json:"caps,omitempty"`
 }
 
-// record is the stored value for one key.
+// record is the stored value for one key. An empty Caps keeps the pre-caps
+// meaning: admin if Admin, full non-admin access otherwise. A non-empty Caps
+// is authoritative.
 type record struct {
-	Admin   bool   `json:"admin"`
-	Comment string `json:"comment"`
+	Admin   bool     `json:"admin"`
+	Comment string   `json:"comment"`
+	Caps    []string `json:"caps,omitempty"`
+}
+
+// entry resolves the record to its effective capabilities. Undecodable caps
+// fail closed (scan validates, so this is belt and braces).
+func (r record) entry() allowlist.Entry {
+	if len(r.Caps) == 0 {
+		if r.Admin {
+			return allowlist.Entry{Admin: true}
+		}
+		return allowlist.FullAccess()
+	}
+	e, err := allowlist.ParseCaps(r.Caps)
+	if err != nil {
+		return allowlist.Entry{}
+	}
+	return e
 }
 
 // Store is a Pebble-backed allowed-keys set. Current is lock-free so the
@@ -85,12 +106,16 @@ func (s *Store) scan() error {
 	}
 	defer it.Close()
 	for it.First(); it.Valid(); it.Next() {
-		if _, err := ssh.ParsePublicKey(it.Key()); err != nil {
+		pub, err := ssh.ParsePublicKey(it.Key())
+		if err != nil {
 			return fmt.Errorf("allowstore: stored key does not parse: %w", err)
 		}
 		var rec record
 		if err := json.Unmarshal(it.Value(), &rec); err != nil {
 			return fmt.Errorf("allowstore: decoding record: %w", err)
+		}
+		if _, err := allowlist.ParseCaps(rec.Caps); err != nil {
+			return fmt.Errorf("allowstore: record for %s: %w", ssh.FingerprintSHA256(pub), err)
 		}
 		s.recs[string(it.Key())] = rec
 	}
@@ -102,7 +127,7 @@ func (s *Store) scan() error {
 func (s *Store) swap() {
 	entries := make(map[string]allowlist.Entry, len(s.recs))
 	for wire, rec := range s.recs {
-		entries[wire] = allowlist.Entry{Admin: rec.Admin}
+		entries[wire] = rec.entry()
 	}
 	s.list.Store(allowlist.New(entries))
 }
@@ -129,8 +154,11 @@ func (s *Store) List() []Key {
 // makeKey renders one stored record for the admin UI.
 func makeKey(pub ssh.PublicKey, rec record) Key {
 	parts := []string{}
-	if rec.Admin {
+	switch {
+	case rec.Admin && len(rec.Caps) == 0:
 		parts = append(parts, "admin")
+	case len(rec.Caps) > 0:
+		parts = append(parts, strings.Join(rec.Caps, ","))
 	}
 	parts = append(parts, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))))
 	if rec.Comment != "" {
@@ -142,6 +170,7 @@ func makeKey(pub ssh.PublicKey, rec record) Key {
 		Fingerprint: ssh.FingerprintSHA256(pub),
 		Comment:     rec.Comment,
 		Admin:       rec.Admin,
+		Caps:        rec.Caps,
 	}
 }
 
@@ -158,12 +187,18 @@ func (s *Store) Add(line string, admin bool) error {
 	if len(strings.TrimSpace(string(rest))) > 0 {
 		return fmt.Errorf("trailing content after the key: %q", rest)
 	}
-	rec := record{Admin: admin, Comment: comment}
-	for _, o := range options {
-		if o != "admin" {
-			return fmt.Errorf("unsupported key option %q", o)
+	rec := record{Comment: comment}
+	if len(options) > 0 {
+		ent, err := allowlist.ParseCaps(options)
+		if err != nil {
+			return fmt.Errorf("parsing key options: %w", err)
 		}
+		rec.Caps = ent.Caps()
+		rec.Admin = ent.Admin
+	}
+	if admin {
 		rec.Admin = true
+		rec.Caps = nil // admin is total; the legacy empty-caps form says it best
 	}
 	val, err := json.Marshal(rec)
 	if err != nil {
