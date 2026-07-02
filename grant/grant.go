@@ -26,7 +26,8 @@ const Namespace = "amber-store-grant"
 // Header carries the base64-encoded signed grant on remote-protocol requests.
 const Header = "Amber-Grant"
 
-// AllowedCaps is every capability a grant may convey.
+// AllowedCaps lists every capability a grant may convey. Informational: validation
+// checks the capability constants directly, so mutating this slice has no effect.
 var AllowedCaps = []string{allowlist.CapRead, allowlist.CapPushObjects}
 
 // Grant is the signed statement: subject may exercise caps until ExpiresAt.
@@ -63,7 +64,9 @@ func validateCaps(caps []string) error {
 		return errors.New("grant carries no capabilities")
 	}
 	for _, c := range caps {
-		if !slices.Contains(AllowedCaps, c) {
+		switch c {
+		case allowlist.CapRead, allowlist.CapPushObjects:
+		default:
 			return fmt.Errorf("capability %q cannot be delegated by a grant", c)
 		}
 	}
@@ -80,6 +83,10 @@ func Sign(g Grant, issuer ssh.Signer) ([]byte, error) {
 	if len(g.Subject) == 0 {
 		return nil, errors.New("grant has no subject key")
 	}
+	if g.IssuedAt > g.ExpiresAt {
+		return nil, errors.New("grant expires before it is issued")
+	}
+	g.Caps = slices.Clone(g.Caps)
 	slices.Sort(g.Caps)
 	payload, err := encMode.Marshal(g)
 	if err != nil {

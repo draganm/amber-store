@@ -49,6 +49,53 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSignDoesNotMutateCaps(t *testing.T) {
+	issuer, subject := testSigner(t), testSigner(t)
+	now := time.Now()
+	// Deliberately unsorted to detect mutation
+	caps := []string{allowlist.CapPushObjects, allowlist.CapRead}
+	capsCopy := make([]string, len(caps))
+	copy(capsCopy, caps)
+
+	g := Grant{
+		Subject:   subject.PublicKey().Marshal(),
+		Caps:      caps,
+		IssuedAt:  now.UnixNano(),
+		ExpiresAt: now.Add(15 * time.Minute).UnixNano(),
+	}
+	_, err := Sign(g, issuer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the original slice was not mutated
+	if caps[0] != capsCopy[0] || caps[1] != capsCopy[1] {
+		t.Fatalf("Sign mutated caller's slice: was %v, now %v", capsCopy, caps)
+	}
+}
+
+func TestMutatingAllowedCapsDoesNotWeakenValidation(t *testing.T) {
+	issuer, subject := testSigner(t), testSigner(t)
+	now := time.Now()
+
+	// Save original and restore after test
+	orig := AllowedCaps
+	defer func() { AllowedCaps = orig }()
+
+	// Mutate AllowedCaps to include a privileged capability
+	AllowedCaps = append(AllowedCaps, allowlist.CapWriteRefs)
+
+	// Sign must still reject write-refs, since validateCaps checks constants
+	_, err := Sign(Grant{
+		Subject:   subject.PublicKey().Marshal(),
+		Caps:      []string{allowlist.CapWriteRefs},
+		IssuedAt:  now.UnixNano(),
+		ExpiresAt: now.Add(time.Minute).UnixNano(),
+	}, issuer)
+	if err == nil {
+		t.Fatal("Sign accepted CapWriteRefs even after AllowedCaps was mutated")
+	}
+}
+
 func TestVerifyRejections(t *testing.T) {
 	issuer, subject, other := testSigner(t), testSigner(t), testSigner(t)
 	now := time.Now()
@@ -139,6 +186,17 @@ func TestVerifyRejections(t *testing.T) {
 	t.Run("garbage", func(t *testing.T) {
 		if _, _, err := Verify([]byte("junk"), subject.PublicKey().Marshal(), now, window); err == nil {
 			t.Fatal("expected decode error")
+		}
+	})
+	t.Run("sign rejects inverted IssuedAt/ExpiresAt", func(t *testing.T) {
+		_, err := Sign(Grant{
+			Subject:   subject.PublicKey().Marshal(),
+			Caps:      []string{allowlist.CapRead},
+			IssuedAt:  now.Add(time.Minute).UnixNano(),
+			ExpiresAt: now.UnixNano(),
+		}, issuer)
+		if err == nil {
+			t.Fatal("Sign accepted grant that expires before it is issued")
 		}
 	})
 }
