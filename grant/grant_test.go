@@ -52,8 +52,8 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 func TestSignDoesNotMutateCaps(t *testing.T) {
 	issuer, subject := testSigner(t), testSigner(t)
 	now := time.Now()
-	// Deliberately unsorted to detect mutation
-	caps := []string{allowlist.CapPushObjects, allowlist.CapRead}
+	// Deliberately unsorted to detect mutation (sort would put push-objects before read)
+	caps := []string{allowlist.CapRead, allowlist.CapPushObjects}
 	capsCopy := make([]string, len(caps))
 	copy(capsCopy, caps)
 
@@ -67,8 +67,8 @@ func TestSignDoesNotMutateCaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Verify the original slice was not mutated
-	if caps[0] != capsCopy[0] || caps[1] != capsCopy[1] {
+	// Verify the original slice was not mutated by Sign
+	if caps[0] != allowlist.CapRead || caps[1] != allowlist.CapPushObjects {
 		t.Fatalf("Sign mutated caller's slice: was %v, now %v", capsCopy, caps)
 	}
 }
