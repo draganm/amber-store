@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -160,4 +161,25 @@ func Decode(b []byte) (Reference, error) {
 func (r Reference) SignaturePayload() ([]byte, error) {
 	r.Signature = nil
 	return r.Encode()
+}
+
+// DecodeVerified decodes raw and verifies its embedded signature; unsigned
+// records are rejected. It is the one-call validation used wherever a record
+// crosses a trust boundary (remote pull, embedded publish).
+func DecodeVerified(raw []byte) (Reference, error) {
+	rec, err := Decode(raw)
+	if err != nil {
+		return Reference{}, err
+	}
+	if len(rec.Signature) == 0 || len(rec.PublicKey) == 0 {
+		return Reference{}, errors.New("reference record is not signed")
+	}
+	payload, err := rec.SignaturePayload()
+	if err != nil {
+		return Reference{}, err
+	}
+	if _, err := sshsign.Verify(payload, rec.Signature, rec.PublicKey); err != nil {
+		return Reference{}, fmt.Errorf("reference signature does not verify: %w", err)
+	}
+	return rec, nil
 }
