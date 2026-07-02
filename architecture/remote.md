@@ -273,7 +273,7 @@ For more on the reference record format and the local reference semantics see
 | Condition                                                         | Status |
 |-------------------------------------------------------------------|--------|
 | Bad/expired timestamp, replayed nonce, bad request signature      | `401`  |
-| Key not in allowlist; ref ownership violation; non-admin DELETE   | `403`  |
+| Key not in allowlist (with no usable grant); key/grant lacks the required capability; invalid, expired or malformed grant; grant issuer not an allowlisted delegate; ref ownership violation; non-admin DELETE | `403`  |
 | Absent object in `objects/get`; absent reference                  | `404`  |
 | Malformed key list; bad pack stream; hash mismatch; unsigned or invalid ref record | `422` |
 | Body over the per-request cap (64 MiB)                            | `413`  |
@@ -306,7 +306,10 @@ the normal request signature. The server accepts it iff the request's signer
 equals the grant subject, the issuer is an allowlisted `delegate`, and the
 expiry (with the request-timestamp clock tolerance) has not passed. Grants
 are stateless: the server stores nothing per subject, and revocation is
-"stop refreshing" — expiry bounds the exposure.
+"stop refreshing" — expiry bounds the exposure. A grant cannot add
+capabilities to a key that is already allowlisted: for an allowlisted key the
+allowlist entry alone governs, and any `Amber-Grant` header on the request is
+ignored.
 
 The `embedded` package gives a single long-running process (e.g. a build
 system's engine or runner) direct library ownership of a store —

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -138,5 +139,62 @@ func TestGrantAuthedClient(t *testing.T) {
 	}
 	if calls.Load() < 3 {
 		t.Fatalf("grant provider consulted %d times, want one per request (>=3)", calls.Load())
+	}
+}
+
+// TestEmptyGrantProviderOmitsHeader proves that a grant provider returning
+// nil results in the Amber-Grant header being left off the request entirely
+// — not sent empty. The client's key is directly allowlisted (no grant
+// needed), so a request that succeeded here purely because the server
+// treated a present-but-empty header as absent would be a false pass; the
+// recording middleware below checks the wire header itself.
+func TestEmptyGrantProviderOmitsHeader(t *testing.T) {
+	dir := t.TempDir()
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	refs, err := refstore.Open(filepath.Join(dir, "refs"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { refs.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
+
+	identity, client := grantTestSigner(t), grantTestSigner(t)
+	allow, err := allowlist.Parse([]byte(
+		"read " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(client.PublicKey())))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := server.New(server.Config{
+		Store: store, Inbox: ib, Refs: refs,
+		Allow:    func() *allowlist.List { return allow },
+		Identity: identity,
+	})
+
+	var gotHeader []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Values(grant.Header)
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	rc, err := remoteclient.New(srv.URL, client, identity.PublicKey().Marshal(),
+		remoteclient.WithGrant(func() []byte { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := rc.ListRefs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotHeader) != 0 {
+		t.Fatalf("Amber-Grant header sent = %v, want none (empty provider must omit it)", gotHeader)
 	}
 }

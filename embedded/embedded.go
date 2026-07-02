@@ -9,10 +9,12 @@
 package embedded
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	"github.com/draganm/amber-store/identity"
 	"github.com/draganm/amber-store/key"
@@ -49,6 +51,17 @@ type Store struct {
 
 	signer ssh.Signer
 	grant  func() []byte
+
+	mu      sync.Mutex
+	clients map[string]cachedClient
+}
+
+// cachedClient is a memoized remoteclient.Client keyed by the resolved
+// remote's canonical name, plus the remote config it was built from — so a
+// registry change (URL or pinned key) invalidates the cache entry.
+type cachedClient struct {
+	rem remotes.Remote
+	rc  *remoteclient.Client
 }
 
 // Open opens (creating as needed) the embedded store at dir.
@@ -79,6 +92,7 @@ func Open(dir string, cfg Config) (*Store, error) {
 	return &Store{
 		Objects: objects, Refs: refs, Remotes: reg, Identity: id,
 		signer: signer, grant: cfg.Grant,
+		clients: map[string]cachedClient{},
 	}, nil
 }
 
@@ -88,17 +102,32 @@ func (s *Store) Close() error {
 }
 
 // RemoteClient builds a signed client for the registered remote name (empty
-// selects the sole remote), carrying the configured grant if any.
+// selects the sole remote), carrying the configured grant if any. Clients are
+// cached one per remote (keyed by its canonical registry name) and rebuilt
+// only when the registry entry (URL or pinned server key) changes underneath
+// it — chatty callers don't churn a fresh http.Transport/connection pool on
+// every call. The grant provider, if any, is still consulted per request by
+// the cached client itself, so refreshing a grant never requires a rebuild.
 func (s *Store) RemoteClient(name string) (*remoteclient.Client, error) {
-	_, rem, err := s.Remotes.Resolve(name)
+	canonical, rem, err := s.Remotes.Resolve(name)
 	if err != nil {
 		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cc, ok := s.clients[canonical]; ok && cc.rem.URL == rem.URL && bytes.Equal(cc.rem.ServerKey, rem.ServerKey) {
+		return cc.rc, nil
 	}
 	var opts []remoteclient.Option
 	if s.grant != nil {
 		opts = append(opts, remoteclient.WithGrant(s.grant))
 	}
-	return remoteclient.New(rem.URL, s.signer, rem.ServerKey, opts...)
+	rc, err := remoteclient.New(rem.URL, s.signer, rem.ServerKey, opts...)
+	if err != nil {
+		return nil, err
+	}
+	s.clients[canonical] = cachedClient{rem: rem, rc: rc}
+	return rc, nil
 }
 
 // Push uploads everything reachable from the local signed ref refName, then
@@ -119,7 +148,7 @@ func (s *Store) Push(ctx context.Context, remote, refName string, opts remotesyn
 	}
 	root, err := key.Parse(rec.Key)
 	if err != nil {
-		return remotesync.PushStats{}, err
+		return remotesync.PushStats{}, fmt.Errorf("local reference %q: %w", refName, err)
 	}
 	stats, err := remotesync.Push(ctx, s.Objects, rc, refName, root, opts)
 	if err != nil {
@@ -159,7 +188,7 @@ func (s *Store) Pull(ctx context.Context, remote, refName string, opts remotesyn
 	}
 	root, err := key.Parse(rec.Key)
 	if err != nil {
-		return key.Key{}, remotesync.PullStats{}, err
+		return key.Key{}, remotesync.PullStats{}, fmt.Errorf("remote reference %q: %w", refName, err)
 	}
 	stats, err := remotesync.Pull(ctx, s.Objects, rc, root, opts)
 	if err != nil {

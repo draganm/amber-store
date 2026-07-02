@@ -248,6 +248,49 @@ func TestGrantCannotPushRefs(t *testing.T) {
 	}
 }
 
+// TestRemoteClientCaching: RemoteClient returns the same *remoteclient.Client
+// for repeated calls against an unchanged remote, and a fresh client once the
+// registry entry (here, the pinned server key) changes underneath it.
+func TestRemoteClientCaching(t *testing.T) {
+	st, err := embedded.Open(t.TempDir(), embedded.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	key1 := embSigner(t).PublicKey().Marshal()
+	if err := st.Remotes.Add("central", remotes.Remote{URL: "http://example.invalid", ServerKey: key1}); err != nil {
+		t.Fatal(err)
+	}
+
+	c1, err := st.RemoteClient("central")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := st.RemoteClient("central")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 != c2 {
+		t.Fatalf("RemoteClient rebuilt the client for an unchanged remote")
+	}
+
+	key2 := embSigner(t).PublicKey().Marshal()
+	if err := st.Remotes.Remove("central"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Remotes.Add("central", remotes.Remote{URL: "http://example.invalid", ServerKey: key2}); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := st.RemoteClient("central")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3 == c1 {
+		t.Fatalf("RemoteClient reused a stale client after the remote's server key changed")
+	}
+}
+
 // TestPublishRefDanglingIs404: publishing a ref whose objects were never
 // pushed must fail with the server's completeness 404.
 func TestPublishRefDanglingIs404(t *testing.T) {
