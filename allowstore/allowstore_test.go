@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/draganm/amber-store/allowlist"
 	"github.com/draganm/amber-store/allowstore"
 	"golang.org/x/crypto/ssh"
 )
@@ -22,6 +23,12 @@ func testKey(t *testing.T) (ssh.PublicKey, string) {
 		t.Fatal(err)
 	}
 	return sp, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp)))
+}
+
+func testKeyLine(t *testing.T) string {
+	t.Helper()
+	_, line := testKey(t)
+	return line
 }
 
 func open(t *testing.T, dir string) *allowstore.Store {
@@ -185,5 +192,81 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	if e, ok := s2.Current().Lookup(admin.Marshal()); !ok || !e.Admin {
 		t.Fatalf("admin key after reopen: ok=%v admin=%v, want allowed admin", ok, e.Admin)
+	}
+}
+
+func TestAddWithCapOptions(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "allowed-keys"))
+
+	line := testKeyLine(t)
+	if err := s.Add("read,push-objects "+line, false); err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := s.Current().Lookup(pub.Marshal())
+	if !ok {
+		t.Fatal("key not in the snapshot")
+	}
+	if !e.Allows(allowlist.CapPushObjects) || !e.Allows(allowlist.CapRead) {
+		t.Fatalf("caps not applied: %+v", e)
+	}
+	if e.Allows(allowlist.CapWriteRefs) {
+		t.Fatalf("write-refs must not be granted: %+v", e)
+	}
+
+	keys := s.List()
+	if len(keys) != 1 {
+		t.Fatalf("got %d keys", len(keys))
+	}
+	if !strings.Contains(keys[0].Line, "read,push-objects") {
+		t.Fatalf("Line does not render the options: %q", keys[0].Line)
+	}
+	if len(keys[0].Caps) != 2 {
+		t.Fatalf("Key.Caps = %v", keys[0].Caps)
+	}
+}
+
+func TestAddUnknownCapOptionErrors(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "allowed-keys"))
+	if err := s.Add("reed "+testKeyLine(t), false); err == nil {
+		t.Fatal("expected an error for an unknown option")
+	}
+}
+
+func TestLegacyRecordStaysFullAccess(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "allowed-keys")
+	s, err := allowstore.Open(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := testKeyLine(t)
+	if err := s.Add(line, false); err != nil { // no options, no caps field
+		t.Fatal(err)
+	}
+	adminLine := testKeyLine(t)
+	if err := s.Add(adminLine, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Reopen: records round-trip through the DB like pre-caps records
+	// (Caps omitted from JSON when empty).
+	s, err = allowstore.Open(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	pub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(line))
+	e, ok := s.Current().Lookup(pub.Marshal())
+	if !ok || e != allowlist.FullAccess() {
+		t.Fatalf("legacy record: got %+v ok=%v, want FullAccess", e, ok)
+	}
+	apub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(adminLine))
+	ae, ok := s.Current().Lookup(apub.Marshal())
+	if !ok || !ae.Allows(allowlist.CapAdmin) || !ae.Allows(allowlist.CapRead) {
+		t.Fatalf("admin record: got %+v ok=%v", ae, ok)
 	}
 }

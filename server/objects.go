@@ -7,12 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draganm/amber-store/allowlist"
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
-	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/httpsig"
-	"github.com/draganm/amber-store/keylist"
+	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/keylist"
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/ssh"
 )
@@ -77,10 +78,16 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 		h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
 		return
 	}
-	if _, ok := h.allow().Lookup(pub.Marshal()); !ok {
+	ent, err := h.authorize(pub, r, now)
+	if err != nil {
 		h.inbox.Discard(tmp)
-		h.log.Warn("key not allowed", "key", ssh.FingerprintSHA256(pub))
-		h.signError(w, nonce, http.StatusForbidden, "public key is not in the server allowlist")
+		h.log.Warn("key not authorized", "key", ssh.FingerprintSHA256(pub), "error", err)
+		h.signError(w, nonce, http.StatusForbidden, err.Error())
+		return
+	}
+	if !ent.Allows(allowlist.CapPushObjects) {
+		h.inbox.Discard(tmp)
+		h.signError(w, nonce, http.StatusForbidden, "key lacks the "+allowlist.CapPushObjects+" capability")
 		return
 	}
 	if _, err := h.inbox.Commit(tmp, bodyHash, root); err != nil {

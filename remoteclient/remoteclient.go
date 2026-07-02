@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draganm/amber-store/grant"
 	"github.com/draganm/amber-store/httpsig"
 	"golang.org/x/crypto/ssh"
 )
@@ -35,6 +37,16 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("server responded %d: %s", e.Code, strings.TrimSpace(e.Msg))
 }
 
+// Option configures a Client.
+type Option func(*Client)
+
+// WithGrant attaches a delegated capability grant (package grant) to every
+// request: provider is consulted per request — so a caller can swap in a
+// refreshed grant at any time — and may return nil to send none.
+func WithGrant(provider func() []byte) Option {
+	return func(c *Client) { c.grant = provider }
+}
+
 // Client talks to one remote server with one client identity and one pinned
 // server key. Safe for concurrent use.
 type Client struct {
@@ -42,6 +54,7 @@ type Client struct {
 	base          string
 	signer        ssh.Signer
 	serverPubWire []byte
+	grant         func() []byte
 }
 
 // newTransport returns the transport every Client uses: the default
@@ -72,7 +85,7 @@ func newTransport() *http.Transport {
 // New validates the base URL (http or https) and returns a Client. The
 // pinned server key is the SSH wire-format public key confirmed at
 // `remote add`.
-func New(baseURL string, signer ssh.Signer, serverPubWire []byte) (*Client, error) {
+func New(baseURL string, signer ssh.Signer, serverPubWire []byte, opts ...Option) (*Client, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("remote URL: %w", err)
@@ -83,12 +96,16 @@ func New(baseURL string, signer ssh.Signer, serverPubWire []byte) (*Client, erro
 	if len(serverPubWire) == 0 {
 		return nil, fmt.Errorf("no pinned server key for %s", baseURL)
 	}
-	return &Client{
+	c := &Client{
 		hc:            &http.Client{Transport: newTransport()},
 		base:          strings.TrimRight(baseURL, "/"),
 		signer:        signer,
 		serverPubWire: serverPubWire,
-	}, nil
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
 }
 
 func newNonce() ([]byte, error) {
@@ -97,6 +114,18 @@ func newNonce() ([]byte, error) {
 		return nil, fmt.Errorf("generating nonce: %w", err)
 	}
 	return b, nil
+}
+
+// attachGrant adds the capability-grant header when a provider is configured.
+// The grant rides outside the request signature: the server binds it to the
+// signer key via the grant's subject, so it needs no coverage by httpsig.
+func (c *Client) attachGrant(req *http.Request) {
+	if c.grant == nil {
+		return
+	}
+	if g := c.grant(); len(g) > 0 {
+		req.Header.Set(grant.Header, base64.StdEncoding.EncodeToString(g))
+	}
 }
 
 // signedRequest builds and signs a request; the returned nonce is what the
@@ -116,6 +145,7 @@ func (c *Client) signedRequest(ctx context.Context, method, pathQuery, contentTy
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	c.attachGrant(req)
 	return req, nonce, nil
 }
 
@@ -150,6 +180,7 @@ func (c *Client) doStreaming(ctx context.Context, method, pathQuery, contentType
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	c.attachGrant(req)
 	return c.send(req, nonce)
 }
 

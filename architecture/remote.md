@@ -273,7 +273,7 @@ For more on the reference record format and the local reference semantics see
 | Condition                                                         | Status |
 |-------------------------------------------------------------------|--------|
 | Bad/expired timestamp, replayed nonce, bad request signature      | `401`  |
-| Key not in allowlist; ref ownership violation; non-admin DELETE   | `403`  |
+| Key not in allowlist (with no usable grant); key/grant lacks the required capability; invalid, expired or malformed grant; grant issuer not an allowlisted delegate; ref ownership violation; non-admin DELETE | `403`  |
 | Absent object in `objects/get`; absent reference                  | `404`  |
 | Malformed key list; bad pack stream; hash mismatch; unsigned or invalid ref record | `422` |
 | Body over the per-request cap (64 MiB)                            | `413`  |
@@ -283,3 +283,38 @@ Any `401` or `403`, or a pinned-key verification failure, aborts the whole
 operation immediately with a clear error. `404` on `objects/get` names the
 missing keys. Push and pull operations are idempotent — the recovery story for
 any interruption is simply re-running the command.
+
+## Capabilities and grants
+
+Authorization on the remote server is capability-based. An allowed key's
+authorized_keys-style line may carry options naming exactly what it can do:
+`read` (fetch objects, read/list references), `push-objects` (upload packs),
+`write-refs` (store signed reference records), `delegate` (issue capability
+grants), `admin` (ownership bypass and reference deletion; implies all). A
+line with no options keeps the historical meaning: full non-admin access
+(read + push-objects + write-refs). Route mapping: objects/missing,
+objects/get, objects/reachable and GET /v1/refs require read; POST /v1/objects
+requires push-objects; PUT /v1/refs requires write-refs (plus the existing
+signer-key ownership rule); DELETE /v1/refs requires admin.
+
+A **capability grant** (package `grant`) lets a key that is NOT in the
+allowlist act with `read` and/or `push-objects` — never more. It is a
+canonical-CBOR envelope {payload, SSHSIG, issuer key} whose payload states
+{subject key, caps, issued_at, expires_at}, signed in the `amber-store-grant`
+namespace, and carried base64-encoded in the `Amber-Grant` header alongside
+the normal request signature. The server accepts it iff the request's signer
+equals the grant subject, the issuer is an allowlisted `delegate`, and the
+expiry (with the request-timestamp clock tolerance) has not passed. Grants
+are stateless: the server stores nothing per subject, and revocation is
+"stop refreshing" — expiry bounds the exposure. A grant cannot add
+capabilities to a key that is already allowlisted: for an allowlisted key the
+allowlist entry alone governs, and any `Amber-Grant` header on the request is
+ignored.
+
+The `embedded` package gives a single long-running process (e.g. a build
+system's engine or runner) direct library ownership of a store —
+daemon-layout compatible — plus Push/PushTree/Pull/PullTree/PublishRef/
+ListRemoteRefs against registered remotes, with an optional per-request grant
+provider. PublishRef uploads a pre-signed reference record without requiring
+its objects locally; the server's completeness gate still enforces
+objects-before-ref across the two parties.
