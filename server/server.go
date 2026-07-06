@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/draganm/amber-store/allowlist"
@@ -53,6 +54,10 @@ type handler struct {
 	maxBody  int64
 	inbox    *inbox.Inbox
 	nonces   *nonces.Cache
+
+	// wipeMu serializes the wipe endpoint against every mutating handler:
+	// writers hold it shared, postWipe exclusively.
+	wipeMu sync.RWMutex
 }
 
 // New returns the remote server's http.Handler.
@@ -89,6 +94,7 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("PUT /v1/refs", h.auth(allowlist.CapWriteRefs, h.putRef))
 	mux.HandleFunc("GET /v1/refs", h.auth(allowlist.CapRead, h.getRefs))
 	mux.HandleFunc("DELETE /v1/refs", h.auth(allowlist.CapAdmin, h.deleteRef))
+	mux.HandleFunc("POST /v1/wipe", h.auth(allowlist.CapWipe, h.postWipe))
 	return logRequests(log, mux)
 }
 

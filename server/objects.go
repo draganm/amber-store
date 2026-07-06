@@ -42,6 +42,8 @@ func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedR
 // pack is durably staged — returns 200. Processing into the store happens
 // asynchronously; setting the ref waits for it (refs.go).
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
+	h.wipeMu.RLock()
+	defer h.wipeMu.RUnlock()
 	rootHex := r.URL.Query().Get("root")
 	rootBytes, err := hex.DecodeString(rootHex)
 	if err != nil {
