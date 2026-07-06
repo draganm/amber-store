@@ -631,6 +631,59 @@ func (s *Store) Has(k key.Key) (bool, error) {
 	return false, nil
 }
 
+// Wipe deletes every object: the active segment and all sealed segments are
+// closed and their files removed, leaving an empty, still-open store (the
+// store-wipe operation). Readers are drained via the write lock before
+// segments are detached; in-flight Verify walks are waited out before
+// unmapping, exactly like Close. nextID stays monotonic so segment names
+// never repeat within a session.
+func (s *Store) Wipe() error {
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	active := s.active
+	sealed := s.sealed
+	s.active = nil
+	s.sealed = nil
+	// A sticky write-path failure (setFailed after a bad fsync) poisons the
+	// data the fsync may have torn — data the wipe is about to destroy. The
+	// reset clears it: the reopened-empty store must accept writes again.
+	s.failed = nil
+	// From here readers see an empty store; a Verify that started after this
+	// unlock walks an empty snapshot. Pre-existing scrubs still hold the old
+	// mmaps, so wait before unmapping (see Close).
+	s.mu.Unlock()
+	s.scrubs.Wait()
+
+	var firstErr error
+	if active != nil {
+		if err := active.f.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := os.Remove(active.path); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, seg := range sealed {
+		if err := seg.close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := os.Remove(seg.path); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.cfg.sync {
+		if err := s.dirF.Sync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // Close fsyncs and closes the active segment (without sealing it), unmaps all
 // sealed segments, and releases the directory lock.
 func (s *Store) Close() error {

@@ -160,6 +160,16 @@ func (c *Client) do(ctx context.Context, method, pathQuery, contentType string, 
 	return c.send(req, nonce)
 }
 
+// Wipe asks the server to destroy every object and reference (POST /v1/wipe,
+// the factory-reset endpoint). The signing key must carry the wipe capability
+// on the server's allowlist — a grant can never convey it.
+func (c *Client) Wipe(ctx context.Context) error {
+	if _, _, err := c.do(ctx, http.MethodPost, "/v1/wipe", "", nil); err != nil {
+		return fmt.Errorf("wiping remote %s: %w", c.base, err)
+	}
+	return nil
+}
+
 // doStreaming sends a signed request whose body is streamed from body (never
 // held whole), so the caller must pass the body's precomputed blake3 as
 // bodyHash — the signature header is set before the body is read. body is taken

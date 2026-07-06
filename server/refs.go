@@ -34,6 +34,8 @@ func refName(r *http.Request) (string, error) {
 // transport key is an admin; and the pointed-to content must be complete —
 // every object reachable from the key exists (push objects before the ref).
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
+	h.wipeMu.RLock()
+	defer h.wipeMu.RUnlock()
 	name, err := refName(r)
 	if err != nil {
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
@@ -188,6 +190,8 @@ func (h *handler) listRefs(w http.ResponseWriter, a *authedRequest) {
 // transport keys (spec §4) — enforced by the route's admin capability
 // requirement (h.auth(allowlist.CapAdmin, ...)), not here.
 func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
+	h.wipeMu.RLock()
+	defer h.wipeMu.RUnlock()
 	name, err := refName(r)
 	if err != nil {
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())

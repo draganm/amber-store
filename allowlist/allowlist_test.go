@@ -109,6 +109,7 @@ func TestParseCaps(t *testing.T) {
 		{name: "runner set", caps: []string{"read", "push-objects"}, want: allowlist.Entry{Read: true, PushObjects: true}},
 		{name: "delegate", caps: []string{"delegate"}, want: allowlist.Entry{Delegate: true}},
 		{name: "admin", caps: []string{"admin"}, want: allowlist.Entry{Admin: true}},
+		{name: "wipe", caps: []string{"wipe"}, want: allowlist.Entry{Wipe: true}},
 		{name: "unknown", caps: []string{"reed"}, wantErr: true},
 		{name: "empty", caps: nil, want: allowlist.Entry{}},
 	} {
@@ -150,6 +151,27 @@ func TestEntryAllows(t *testing.T) {
 	}
 	if (allowlist.Entry{}).Allows("bogus") {
 		t.Fatal("unknown capability must never be allowed")
+	}
+}
+
+func TestWipeCapability(t *testing.T) {
+	if allowlist.FullAccess().Allows(allowlist.CapWipe) {
+		t.Fatal("legacy FullAccess must not allow wipe")
+	}
+	wipe := allowlist.Entry{Wipe: true}
+	if !wipe.Allows(allowlist.CapWipe) {
+		t.Fatal("wipe entry must allow wipe")
+	}
+	if wipe.Allows(allowlist.CapRead) || wipe.Allows(allowlist.CapWriteRefs) {
+		t.Fatal("wipe must not imply read or write-refs")
+	}
+	if !(allowlist.Entry{Admin: true}).Allows(allowlist.CapWipe) {
+		t.Fatal("admin must imply wipe")
+	}
+	got := allowlist.Entry{Read: true, Wipe: true}.Caps()
+	want := []string{allowlist.CapRead, allowlist.CapWipe}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Caps() = %v, want %v", got, want)
 	}
 }
 

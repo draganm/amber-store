@@ -29,6 +29,7 @@ type Entry struct {
 	PushObjects bool // upload packs
 	WriteRefs   bool // store signed reference records
 	Delegate    bool // issue capability grants (package grant)
+	Wipe        bool // destroy every object and reference (the store-wipe endpoint)
 	Admin       bool // ownership bypass and reference deletion; implies all
 }
 
@@ -39,6 +40,7 @@ const (
 	CapPushObjects = "push-objects"
 	CapWriteRefs   = "write-refs"
 	CapDelegate    = "delegate"
+	CapWipe        = "wipe"
 	CapAdmin       = "admin"
 )
 
@@ -60,6 +62,8 @@ func ParseCaps(names []string) (Entry, error) {
 			e.WriteRefs = true
 		case CapDelegate:
 			e.Delegate = true
+		case CapWipe:
+			e.Wipe = true
 		case CapAdmin:
 			e.Admin = true
 		default:
@@ -85,6 +89,8 @@ func (e Entry) Allows(cap string) bool {
 		return e.WriteRefs
 	case CapDelegate:
 		return e.Delegate
+	case CapWipe:
+		return e.Wipe
 	}
 	return false
 }
@@ -107,6 +113,9 @@ func (e Entry) Caps() []string {
 	}
 	if e.Delegate {
 		out = append(out, CapDelegate)
+	}
+	if e.Wipe {
+		out = append(out, CapWipe)
 	}
 	return out
 }

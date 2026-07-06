@@ -200,6 +200,17 @@ func (s *Store) Pull(ctx context.Context, remote, refName string, opts remotesyn
 	return root, stats, nil
 }
 
+// RemoteWipe factory-resets the named remote: every object and reference on
+// the server is destroyed (its allowlist and identity survive). The store's
+// transport key must carry the wipe capability on the server's allowlist.
+func (s *Store) RemoteWipe(ctx context.Context, remote string) error {
+	rc, err := s.RemoteClient(remote)
+	if err != nil {
+		return err
+	}
+	return rc.Wipe(ctx)
+}
+
 // PullTree completes the local store under a root the caller already knows,
 // without touching refs.
 func (s *Store) PullTree(ctx context.Context, remote string, root key.Key, opts remotesync.Opts) (remotesync.PullStats, error) {

@@ -153,3 +153,33 @@ func TestConcurrentDeleteReportsOnce(t *testing.T) {
 		t.Errorf("exactly 1 Delete should succeed, got %d", nilCount)
 	}
 }
+
+func TestWipe(t *testing.T) {
+	s := open(t, t.TempDir())
+	for _, n := range []string{"a", "b", "c"} {
+		if err := s.Put(n, []byte("v-"+n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Wipe(); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := s.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("All after Wipe: %d records, want 0", len(recs))
+	}
+	if _, err := s.Get("a"); err != refstore.ErrNotFound {
+		t.Fatalf("Get after Wipe: %v, want ErrNotFound", err)
+	}
+	// The store stays usable.
+	if err := s.Put("d", []byte("v-d")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("d")
+	if err != nil || string(got) != "v-d" {
+		t.Fatalf("Put/Get after Wipe: %q %v", got, err)
+	}
+}

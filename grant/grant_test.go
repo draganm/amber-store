@@ -96,6 +96,36 @@ func TestMutatingAllowedCapsDoesNotWeakenValidation(t *testing.T) {
 	}
 }
 
+func TestGrantCannotCarryWipe(t *testing.T) {
+	issuer, subject := testSigner(t), testSigner(t)
+	now := time.Now()
+	g := Grant{
+		Subject:   subject.PublicKey().Marshal(),
+		Caps:      []string{allowlist.CapWipe},
+		IssuedAt:  now.UnixNano(),
+		ExpiresAt: now.Add(time.Minute).UnixNano(),
+	}
+	if _, err := Sign(g, issuer); err == nil {
+		t.Fatal("Sign accepted a wipe grant; wipe must be allowlist-only")
+	}
+	// Even a grant blob signed around validateCaps (hostile issuer) must fail Verify.
+	payload, err := encMode.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sshsign.SignNamespace(issuer, payload, Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := encMode.Marshal(envelope{Payload: payload, Signature: sig, IssuerKey: issuer.PublicKey().Marshal()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Verify(raw, subject.PublicKey().Marshal(), now, 5*time.Minute); err == nil {
+		t.Fatal("Verify accepted a wipe grant; wipe must be allowlist-only")
+	}
+}
+
 func TestVerifyRejections(t *testing.T) {
 	issuer, subject, other := testSigner(t), testSigner(t), testSigner(t)
 	now := time.Now()

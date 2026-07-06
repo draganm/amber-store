@@ -316,3 +316,66 @@ func TestPublishRefDanglingIs404(t *testing.T) {
 		t.Fatalf("err = %v, want StatusError 404", err)
 	}
 }
+
+// TestRemoteWipe: an engine store whose key carries the wipe capability
+// factory-resets central through the facade; a key without it is refused.
+func TestRemoteWipe(t *testing.T) {
+	engineKey := embSigner(t)
+	url, central := startCentral(t,
+		"read,push-objects,write-refs,delegate,wipe "+strings.TrimSpace(string(ssh.MarshalAuthorizedKey(engineKey.PublicKey()))))
+	ctx := context.Background()
+	centralWire := central.PublicKey().Marshal()
+
+	engine, err := embedded.Open(t.TempDir(), embedded.Config{Signer: engineKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	if err := engine.Remotes.Add("central", remotes.Remote{URL: url, ServerKey: centralWire}); err != nil {
+		t.Fatal(err)
+	}
+
+	root := buildTree(t, engine, "artifact")
+	if _, err := engine.PushTree(ctx, "central", root, remotesync.Opts{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.PublishRef(ctx, "central", signRecord(t, engineKey, "build-output:wipe-me", root)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := engine.RemoteWipe(ctx, "central"); err != nil {
+		t.Fatal(err)
+	}
+	infos, err := engine.ListRemoteRefs(ctx, "central")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("refs survived the remote wipe: %+v", infos)
+	}
+	// Central keeps serving: push+publish works again after the wipe.
+	if _, err := engine.PushTree(ctx, "central", root, remotesync.Opts{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.PublishRef(ctx, "central", signRecord(t, engineKey, "build-output:again", root)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRemoteWipeWithoutCapability: a delegate-but-not-wipe key is refused.
+func TestRemoteWipeWithoutCapability(t *testing.T) {
+	engineKey := embSigner(t)
+	url, central := startCentral(t,
+		"read,push-objects,write-refs,delegate "+strings.TrimSpace(string(ssh.MarshalAuthorizedKey(engineKey.PublicKey()))))
+	engine, err := embedded.Open(t.TempDir(), embedded.Config{Signer: engineKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	if err := engine.Remotes.Add("central", remotes.Remote{URL: url, ServerKey: central.PublicKey().Marshal()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.RemoteWipe(context.Background(), "central"); err == nil {
+		t.Fatal("RemoteWipe succeeded without the wipe capability")
+	}
+}
