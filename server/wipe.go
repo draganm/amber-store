@@ -8,10 +8,13 @@ import (
 // behind the wipe capability (allowlist-only; grants cannot carry it). The
 // allowlist, server identity and nonce cache are untouched, so the caller
 // keeps serving afterwards. wipeMu is held exclusively for the duration:
-// mutating handlers (putRef, deleteRef, postObjects) hold it shared, so no
-// write is in flight while the stores empty — a racing push can never land a
-// reference whose objects just vanished, and the inbox is quiescent (pushes
-// complete before the ingest returns).
+// mutating handlers (putRef, deleteRef, postObjects' inbox commit) hold it
+// shared, so no ref write races the reset — a reference can never point at
+// objects the wipe just removed. Objects are weaker: inbox workers ingest
+// committed packs asynchronously, so a pack accepted shortly before the wipe
+// may land its objects afterwards. Those stragglers are unreferenced,
+// content-addressed garbage — invisible and harmless, never wrong — and the
+// JOBS engine quiesces its own pushers before calling this anyway.
 func (h *handler) postWipe(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	h.wipeMu.Lock()
 	defer h.wipeMu.Unlock()

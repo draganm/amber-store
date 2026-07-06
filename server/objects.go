@@ -42,8 +42,6 @@ func (h *handler) postMissing(w http.ResponseWriter, r *http.Request, a *authedR
 // pack is durably staged — returns 200. Processing into the store happens
 // asynchronously; setting the ref waits for it (refs.go).
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
-	h.wipeMu.RLock()
-	defer h.wipeMu.RUnlock()
 	rootHex := r.URL.Query().Get("root")
 	rootBytes, err := hex.DecodeString(rootHex)
 	if err != nil {
@@ -92,6 +90,12 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 		h.signError(w, nonce, http.StatusForbidden, "key lacks the "+allowlist.CapPushObjects+" capability")
 		return
 	}
+	// The wipe gate is taken only now, AFTER authentication and authorization:
+	// staging above touches only the inbox tmp dir (which a wipe never reads),
+	// and acquiring it pre-auth would let an anonymous slow POST hold the
+	// shared lock and stall a legitimate wipe.
+	h.wipeMu.RLock()
+	defer h.wipeMu.RUnlock()
 	if _, err := h.inbox.Commit(tmp, bodyHash, root); err != nil {
 		h.inbox.Discard(tmp)
 		h.log.Error("inbox commit failed", "error", err)

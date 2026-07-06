@@ -794,3 +794,28 @@ func TestWipeWithConcurrentReaders(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func TestWipeClearsPoisonedWritePath(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	objs := testObjects(t, 3)
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Poison the write path the way a failed fsync would.
+	s.setFailed(errors.New("simulated fsync failure"))
+	if err := s.Put(objs[0].Key, objs[0].Data); err == nil {
+		t.Fatal("poisoned store accepted a write")
+	}
+	// The wipe destroys the data the poison was protecting; writes must work.
+	if err := s.Wipe(); err != nil {
+		t.Fatal(err)
+	}
+	more := testObjects(t, 2)
+	for _, o := range more {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatalf("Put after Wipe on previously-poisoned store: %v", err)
+		}
+	}
+}

@@ -649,6 +649,10 @@ func (s *Store) Wipe() error {
 	sealed := s.sealed
 	s.active = nil
 	s.sealed = nil
+	// A sticky write-path failure (setFailed after a bad fsync) poisons the
+	// data the fsync may have torn — data the wipe is about to destroy. The
+	// reset clears it: the reopened-empty store must accept writes again.
+	s.failed = nil
 	// From here readers see an empty store; a Verify that started after this
 	// unlock walks an empty snapshot. Pre-existing scrubs still hold the old
 	// mmaps, so wait before unmapping (see Close).
