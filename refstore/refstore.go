@@ -110,6 +110,34 @@ func (s *Store) All() ([]Record, error) {
 	return recs, nil
 }
 
+// Wipe deletes every record (the store-wipe operation). Iterate-and-delete
+// rather than a range tombstone: names are arbitrary bytes so no literal
+// upper bound covers the whole keyspace, and ref counts are small.
+func (s *Store) Wipe() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	it, err := s.db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return err
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	for it.First(); it.Valid(); it.Next() {
+		if err := b.Delete(slices.Clone(it.Key()), nil); err != nil {
+			it.Close()
+			return err
+		}
+	}
+	if err := it.Error(); err != nil {
+		it.Close()
+		return err
+	}
+	if err := it.Close(); err != nil {
+		return err
+	}
+	return b.Commit(s.writeOpts)
+}
+
 // Close closes the DB.
 func (s *Store) Close() error {
 	return s.db.Close()
