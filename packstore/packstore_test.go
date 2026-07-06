@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -692,4 +693,104 @@ func TestWriteBatchRotates(t *testing.T) {
 			t.Fatalf("Get(%s): %v", o.Key, err)
 		}
 	}
+}
+
+func TestWipe(t *testing.T) {
+	dir := t.TempDir()
+	// Small segments so the store holds sealed segments AND an active one.
+	s := openStore(t, dir, WithSegmentSize(1024))
+	objs := testObjects(t, 40)
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Wipe(); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range objs {
+		if _, err := s.Get(o.Key); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get(%s) after Wipe: %v, want ErrNotFound", o.Key, err)
+		}
+		if has, err := s.Has(o.Key); err != nil || has {
+			t.Fatalf("Has(%s) after Wipe: %v, %v", o.Key, has, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".seg") || strings.HasSuffix(e.Name(), ".seg.active") {
+			t.Fatalf("segment file %s survived Wipe", e.Name())
+		}
+	}
+	// The store stays usable: writes and reads work after the wipe.
+	more := testObjects(t, 5)
+	for _, o := range more {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, o := range more {
+		data, err := s.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after post-Wipe Put: %v", o.Key, err)
+		}
+	}
+	// And it survives a reopen.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openStore(t, dir, WithSegmentSize(1024))
+	for _, o := range more {
+		if data, err := s2.Get(o.Key); err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
+		}
+	}
+}
+
+func TestWipeWithConcurrentReaders(t *testing.T) {
+	s := openStore(t, t.TempDir(), WithSegmentSize(1024))
+	objs := testObjects(t, 40)
+	for _, o := range objs {
+		if err := s.Put(o.Key, o.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, o := range objs {
+					data, err := s.Get(o.Key)
+					switch {
+					case err == nil:
+						if !bytes.Equal(data, o.Data) {
+							t.Error("reader saw corrupt data")
+							return
+						}
+					case errors.Is(err, ErrNotFound):
+						// wiped under us; fine
+					default:
+						t.Errorf("reader: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+	if err := s.Wipe(); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
 }
