@@ -12,6 +12,24 @@
 # musl loader (hostmusl) + libgcc_s + libstdc++ (x64 only); the output binary is
 # a static CGO-free executable with an empty runtime closure.
 
+# Recipe-declared fetchers (JOBS 2026-07-10 design): plugins/fetchers are
+# pinned here; plugin artifacts bundle their companion fetcher pins.
+GOPLUGIN = fetcher(
+    name   = "goplugin",
+    url    = "https://github.com/jobs-build/plugin-go/archive/609b0656b29417aadad3cfebefbd824aaf11f5fb.tar.gz",
+    sha256 = "dfd5dfe4171359cc0b30473ed023e28b198e3fdc659940a841629573a1f0a923",
+)
+NODEPLUGIN = fetcher(
+    name   = "nodeplugin",
+    url    = "https://github.com/jobs-build/plugin-node/archive/68f3b3b21a911d553fa657de847c6e3bee854b43.tar.gz",
+    sha256 = "d5f5c76c0f1fca6c3c43672164020b60adc88a41559442befd8cb8eb109d8de5",
+)
+ALPINEAPK = fetcher(
+    name   = "alpineapk",
+    url    = "https://github.com/jobs-build/fetcher-alpineapk/archive/0a6a773a1247b7cab16f4dbb86facc0173a823d8.tar.gz",
+    sha256 = "b457e2ce7b357b240e7c160a0e65a46630067c2580b6872876829d6f07c4d12c",
+)
+
 GO_SHA = {
     "amd64": "1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f",
     "arm64": "ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768",
@@ -30,8 +48,8 @@ MUSLARCH = {"linux/amd64": "x86_64", "linux/arm64": "aarch64"}
 
 def plugins():
     return {
-        "go":   imp(fetcher = "goplugin",   params = {}),
-        "node": imp(fetcher = "nodeplugin", params = {}),
+        "go":   imp(fetcher = GOPLUGIN,   params = {}),
+        "node": imp(fetcher = NODEPLUGIN, params = {}),
     }
 
 def build():
@@ -57,7 +75,7 @@ def build():
     # libstdc++ is a build-only dep for the x64 musl Node only.
     libstdcxx_stage = ""
     if march == "x86_64":
-        inputs["libstdcxx"] = imp(fetcher = "alpineapk", params = {
+        inputs["libstdcxx"] = imp(fetcher = ALPINEAPK, params = {
             "branch": "v3.22", "repo": "main", "arch": march,
             "name": "libstdc++", "version": LIBSTDCXX[0], "sha256": LIBSTDCXX[1],
         })
