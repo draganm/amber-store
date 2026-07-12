@@ -34,7 +34,7 @@ func startServe(t *testing.T, adminPassword string) (baseURL string) {
 	done := make(chan error, 1)
 	go func() {
 		done <- newApp().RunContext(ctx, []string{
-			"amber-store", "serve", "--store", t.TempDir(),
+			"amber-store", "serve", "--debug-listen", "", "--store", t.TempDir(),
 			"--identity", identity,
 			"--listen", addr, "--sync=false",
 		})
