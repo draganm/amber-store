@@ -71,7 +71,7 @@ func daemonCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:        "log-format",
-				Value:       "text",
+				Value:       "json",
 				Usage:       "log format: text or json",
 				Destination: &cfg.logFormat,
 			},
