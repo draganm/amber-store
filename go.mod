@@ -13,6 +13,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/hiddeco/sshsig v0.2.0
 	github.com/klauspost/compress v1.17.11
+	github.com/prometheus/client_golang v1.16.0
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.53.0
@@ -65,7 +66,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.10.1 // indirect

@@ -62,7 +62,7 @@ func TestServeAutoIdentity(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- newApp().RunContext(ctx, []string{
-			"amber-store", "serve", "--store", storeDir,
+			"amber-store", "serve", "--debug-listen", "", "--store", storeDir,
 			"--listen", addr, "--sync=false",
 		})
 	}()
@@ -118,7 +118,7 @@ func TestServeRaisesHTTP2UploadWindows(t *testing.T) {
 func TestServeRejectsTLSHalfConfig(t *testing.T) {
 	identity := writeIdentityFixture(t)
 	err := newApp().Run([]string{
-		"amber-store", "serve", "--store", t.TempDir(),
+		"amber-store", "serve", "--debug-listen", "", "--store", t.TempDir(),
 		"--identity", identity,
 		"--tls-cert", "/nonexistent/cert.pem",
 	})
@@ -141,7 +141,7 @@ func TestServeRejectsEncryptedIdentityFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = newApp().Run([]string{
-		"amber-store", "serve", "--store", t.TempDir(),
+		"amber-store", "serve", "--debug-listen", "", "--store", t.TempDir(),
 		"--identity", encPath,
 	})
 	if err == nil || !strings.Contains(err.Error(), "agent") {

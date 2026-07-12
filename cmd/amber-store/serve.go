@@ -28,6 +28,7 @@ import (
 type serveConfig struct {
 	store         string
 	listen        string
+	debugListen   string
 	identity      string
 	tlsCert       string
 	tlsKey        string
@@ -56,6 +57,13 @@ func serveCommand() *cli.Command {
 				Value:       ":8590",
 				Usage:       "TCP listen address",
 				Destination: &cfg.listen,
+			},
+			&cli.StringFlag{
+				Name:        "debug-listen",
+				Value:       ":8591",
+				Usage:       "pprof + Prometheus metrics HTTP listen address (empty = disabled)",
+				EnvVars:     []string{"AMBER_DEBUG_LISTEN"},
+				Destination: &cfg.debugListen,
 			},
 			&cli.StringFlag{
 				Name:        "identity",
@@ -229,10 +237,25 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		logger.Info("admin UI enabled", "path", "/admin/")
 	}
 
-	srv := newHTTPServer(handler, logger)
-
 	ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The debug listener (pprof + Prometheus) rides its own port, on by
+	// default; the HTTP middleware instruments the whole outer handler
+	// (admin mux included) labeled by matched ServeMux pattern.
+	reg := newDebugRegistry()
+	if cfg.debugListen != "" {
+		handler = metricsMiddleware(reg, handler)
+	}
+	debugAddr, err := startDebugServer(ctx, cfg.debugListen, reg, logger)
+	if err != nil {
+		return fmt.Errorf("debug listener: %w", err)
+	}
+	if debugAddr != nil {
+		logger.Info("debug listener", "addr", debugAddr.String())
+	}
+
+	srv := newHTTPServer(handler, logger)
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
