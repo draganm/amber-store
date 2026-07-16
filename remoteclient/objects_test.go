@@ -68,7 +68,7 @@ func TestFetchObjectsThroughTrailerStrippingProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := c.FetchObjects(context.Background(), []key.Key{objs[0].Key, objs[1].Key})
+	got, err := c.FetchObjects(context.Background(), []key.Key{objs[0].Key, objs[1].Key}, nil)
 	if err != nil {
 		t.Fatalf("fetch through trailer-stripping proxy: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPushPackAndMissing(t *testing.T) {
 	if len(missing) != 2 {
 		t.Fatalf("missing before push = %d, want 2", len(missing))
 	}
-	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs, nil); err != nil {
 		t.Fatal(err)
 	}
 	// PushPack acks before the pack is processed; drain the inbox so the
@@ -138,7 +138,7 @@ func TestPushPackRawAndMissing(t *testing.T) {
 		}
 		recs[i] = rec
 	}
-	if err := c.PushPackRaw(ctx, "main", objs[0].Key, recs); err != nil {
+	if err := c.PushPackRaw(ctx, "main", objs[0].Key, recs, nil); err != nil {
 		t.Fatal(err)
 	}
 	h.inbox.WaitFor(objs[0].Key)
@@ -150,7 +150,7 @@ func TestPushPackRawAndMissing(t *testing.T) {
 		t.Fatalf("missing after raw push = %d, want 0", len(missing))
 	}
 	// The raw-pushed objects must come back with their original payloads.
-	got, err := c.FetchObjects(ctx, keys)
+	got, err := c.FetchObjects(ctx, keys, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestPushPackRawStreamsBody(t *testing.T) {
 		recs[i] = rec
 	}
 	// The unsigned 200 fails response verification; we only care about the request.
-	_ = c.PushPackRaw(context.Background(), "main", objs[0].Key, recs)
+	_ = c.PushPackRaw(context.Background(), "main", objs[0].Key, recs, nil)
 	if gotContentLength != -1 {
 		t.Fatalf("request Content-Length = %d, want -1 (chunked/streamed, not buffered)", gotContentLength)
 	}
@@ -204,12 +204,12 @@ func TestFetchObjects(t *testing.T) {
 	c := h.rc(t)
 	ctx := context.Background()
 	objs := blobs(t, "fo one", "fo two")
-	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Drain the staged pack so the objects exist before fetching them.
 	h.inbox.WaitFor(objs[0].Key)
-	got, err := c.FetchObjects(ctx, []key.Key{objs[0].Key, objs[1].Key})
+	got, err := c.FetchObjects(ctx, []key.Key{objs[0].Key, objs[1].Key}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestFetchObjectsAbsentIsStatusError(t *testing.T) {
 	h := newHarness(t)
 	c := h.rc(t)
 	absent := blobs(t, "absent")[0]
-	_, err := c.FetchObjects(context.Background(), []key.Key{absent.Key})
+	_, err := c.FetchObjects(context.Background(), []key.Key{absent.Key}, nil)
 	var se *remoteclient.StatusError
 	if !errors.As(err, &se) || se.Code != 404 {
 		t.Fatalf("err = %v, want StatusError 404", err)
@@ -241,7 +241,7 @@ func TestFetchObjectsWrongPinFails(t *testing.T) {
 	c := h.rc(t)
 	ctx := context.Background()
 	objs := blobs(t, "pin check")
-	if err := c.PushPack(ctx, "main", objs[0].Key, objs); err != nil {
+	if err := c.PushPack(ctx, "main", objs[0].Key, objs, nil); err != nil {
 		t.Fatal(err)
 	}
 	h.inbox.WaitFor(objs[0].Key)
@@ -249,7 +249,7 @@ func TestFetchObjectsWrongPinFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wrong.FetchObjects(ctx, []key.Key{objs[0].Key}); err == nil {
+	if _, err := wrong.FetchObjects(ctx, []key.Key{objs[0].Key}, nil); err == nil {
 		t.Fatal("fetch with wrong pinned key succeeded")
 	}
 }

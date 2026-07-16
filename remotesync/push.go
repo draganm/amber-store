@@ -32,6 +32,14 @@ type Opts struct {
 	// reachable keys; for Pull, done counts fetched objects and total is 0
 	// (unknown up front).
 	Progress func(done, total int)
+	// OnBytes, when non-nil, is called with wire-transfer byte increments as
+	// they happen, possibly concurrently from several workers. Unlike
+	// Progress it ticks DURING a batch — Progress goes silent for the whole
+	// duration of a large batch on a slow link, so a liveness watchdog fed
+	// only by Progress cannot tell a slow-but-moving transfer from a wedged
+	// one. n is an increment, not a cumulative count. Keep it cheap: it is
+	// called once per network read/write.
+	OnBytes func(n int)
 }
 
 func (o Opts) batchBytes() uint64 {
@@ -166,7 +174,7 @@ func Push(ctx context.Context, store *packstore.Store, rc *remoteclient.Client, 
 	for range opts.jobs() {
 		g.Go(func() error {
 			for pack := range ready {
-				if err := rc.PushPackRaw(gctx, name, root, pack.recs); err != nil {
+				if err := rc.PushPackRaw(gctx, name, root, pack.recs, opts.OnBytes); err != nil {
 					return err
 				}
 				settle(pack.count, pack.count, pack.bytes)

@@ -80,7 +80,7 @@ func fetchAll(ctx context.Context, store *packstore.Store, rc *remoteclient.Clie
 	g.SetLimit(opts.jobs())
 	for _, batch := range Batches(keys, opts.batchBytes(), PullSizer()) {
 		g.Go(func() error {
-			objs, err := rc.FetchObjects(gctx, batch)
+			objs, err := rc.FetchObjects(gctx, batch, opts.OnBytes)
 			if err != nil {
 				return err
 			}

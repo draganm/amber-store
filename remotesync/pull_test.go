@@ -3,7 +3,10 @@ package remotesync_test
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/remotesync"
@@ -99,4 +102,74 @@ func TestPullAbsentRootFails(t *testing.T) {
 	if _, err := remotesync.Pull(context.Background(), local, h.rc(t), absent.Key, remotesync.Opts{}); err == nil {
 		t.Fatal("pull of an absent root succeeded")
 	}
+}
+
+// TestPullOnBytesTicksWithinOneBatch is the issue the byte-level signal
+// exists for: a batch that is moving bytes but has not COMPLETED yet must
+// still produce progress. The server drips the objects/get response in small
+// flushed chunks; the whole tree fits one batch, so object-level Progress can
+// fire only once — OnBytes must tick several times before that.
+func TestPullOnBytesTicksWithinOneBatch(t *testing.T) {
+	h := newHarnessMW(t, dripResponses)
+	root := buildTree(t, h.store)
+	local := newLocalStore(t)
+
+	var mu sync.Mutex
+	var ticks, bytes int
+	_, err := remotesync.Pull(context.Background(), local, h.rc(t), root, remotesync.Opts{
+		OnBytes: func(n int) {
+			mu.Lock()
+			ticks++
+			bytes += n
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ticks < 2 {
+		t.Fatalf("OnBytes ticked %d times, want >= 2 (sub-batch granularity)", ticks)
+	}
+	if bytes <= 0 {
+		t.Fatalf("OnBytes reported %d bytes, want > 0", bytes)
+	}
+}
+
+// dripResponses wraps the handler so every response body is written in small
+// flushed chunks with a delay — a slow link in miniature.
+func dripResponses(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&drippingWriter{w: w}, r)
+	})
+}
+
+type drippingWriter struct {
+	w http.ResponseWriter
+}
+
+func (d *drippingWriter) Header() http.Header    { return d.w.Header() }
+func (d *drippingWriter) WriteHeader(status int) { d.w.WriteHeader(status) }
+func (d *drippingWriter) Flush() {
+	if f, ok := d.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (d *drippingWriter) Write(p []byte) (int, error) {
+	const chunk = 64
+	written := 0
+	for len(p) > 0 {
+		n := min(chunk, len(p))
+		m, err := d.w.Write(p[:n])
+		written += m
+		if err != nil {
+			return written, err
+		}
+		d.Flush()
+		time.Sleep(2 * time.Millisecond)
+		p = p[n:]
+	}
+	return written, nil
 }

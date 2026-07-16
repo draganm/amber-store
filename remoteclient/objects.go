@@ -25,12 +25,31 @@ func (c *Client) Missing(ctx context.Context, keys []key.Key) ([]key.Key, error)
 	return keylist.Parse(body)
 }
 
+// countingReader reports every successful read to onBytes — the byte-level
+// liveness signal FetchObjects/postPack surface to callers whose stall
+// watchdogs must tell a slow-but-moving transfer from a wedged one (an
+// object/batch-completion callback alone goes silent for the whole duration
+// of a large batch on a slow link). A nil onBytes counts nothing.
+type countingReader struct {
+	r       io.Reader
+	onBytes func(n int)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 && c.onBytes != nil {
+		c.onBytes(n)
+	}
+	return n, err
+}
+
 // PushPack uploads objs as one amberpack to the remote, tagged with the (ref,
 // root) the objects belong to. The server stages the pack durably and acks
 // before processing it; this returns once the pack is accepted, not once it is
-// stored. Completeness is enforced when the reference is set.
-func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []fstree.Object) error {
-	return c.postPack(ctx, ref, root, func(w io.Writer) error {
+// stored. Completeness is enforced when the reference is set. onBytes, when
+// non-nil, receives upload byte increments as the transport consumes the body.
+func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []fstree.Object, onBytes func(n int)) error {
+	return c.postPack(ctx, ref, root, onBytes, func(w io.Writer) error {
 		pw := amberpack.NewWriter(w)
 		for _, o := range objs {
 			if err := pw.Add(o); err != nil {
@@ -46,8 +65,10 @@ func (c *Client) PushPack(ctx context.Context, ref string, root key.Key, objs []
 // decoding and re-encoding each object. It is the zero-copy push path: records
 // read straight from a local packstore are wire-format-identical, so they travel
 // untouched. The server validates each record's framing and CRC on receipt.
-func (c *Client) PushPackRaw(ctx context.Context, ref string, root key.Key, records [][]byte) error {
-	return c.postPack(ctx, ref, root, func(w io.Writer) error {
+// onBytes, when non-nil, receives upload byte increments as the transport
+// consumes the body.
+func (c *Client) PushPackRaw(ctx context.Context, ref string, root key.Key, records [][]byte, onBytes func(n int)) error {
+	return c.postPack(ctx, ref, root, onBytes, func(w io.Writer) error {
 		pw := amberpack.NewWriter(w)
 		for _, rec := range records {
 			if err := pw.AddRecord(rec); err != nil {
@@ -65,7 +86,9 @@ func (c *Client) PushPackRaw(ctx context.Context, ref string, root key.Key, reco
 // then into a pipe feeding the request body. For PushPackRaw both passes are
 // cheap copies of records that already live in memory; this avoids the extra
 // full-pack buffer the upload would otherwise allocate per in-flight pack.
-func (c *Client) postPack(ctx context.Context, ref string, root key.Key, writeBody func(io.Writer) error) error {
+// onBytes (nil ok) is fed the bytes the transport reads off the pipe — upload
+// progress at network-read granularity.
+func (c *Client) postPack(ctx context.Context, ref string, root key.Key, onBytes func(n int), writeBody func(io.Writer) error) error {
 	h := blake3.New()
 	if err := writeBody(h); err != nil {
 		return err
@@ -81,7 +104,11 @@ func (c *Client) postPack(ctx context.Context, ref string, root key.Key, writeBo
 	q := url.Values{}
 	q.Set("ref", ref)
 	q.Set("root", root.String())
-	_, _, err := c.doStreaming(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", h.Sum(nil), pr)
+	body := struct {
+		io.Reader
+		io.Closer
+	}{&countingReader{r: pr, onBytes: onBytes}, pr}
+	_, _, err := c.doStreaming(ctx, http.MethodPost, "/v1/objects?"+q.Encode(), "application/octet-stream", h.Sum(nil), body)
 	return err
 }
 
@@ -104,7 +131,9 @@ func (c *Client) ReachableKeys(ctx context.Context, root key.Key) ([]key.Key, er
 // response (bounded by the pull batch size), splits off the signature, verifies
 // it over the exact pack bytes against the pinned key, then parses the pack.
 // Error responses (non-200) are header-signed like every other endpoint.
-func (c *Client) FetchObjects(ctx context.Context, keys []key.Key) ([]fstree.Object, error) {
+// onBytes, when non-nil, receives download byte increments as the response
+// body arrives.
+func (c *Client) FetchObjects(ctx context.Context, keys []key.Key, onBytes func(n int)) ([]fstree.Object, error) {
 	req, nonce, err := c.signedRequest(ctx, http.MethodPost, "/v1/objects/get", "application/octet-stream", keylist.Flatten(keys))
 	if err != nil {
 		return nil, err
@@ -114,7 +143,7 @@ func (c *Client) FetchObjects(ctx context.Context, keys []key.Key) ([]fstree.Obj
 		return nil, fmt.Errorf("contacting remote %s: %w", c.base, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	body, err := io.ReadAll(&countingReader{r: io.LimitReader(resp.Body, maxResponse), onBytes: onBytes})
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
