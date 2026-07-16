@@ -128,7 +128,7 @@ func TestGrantAuthedClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rc.PushPackRaw(ctx, "", blob.Key, [][]byte{rec}); err != nil {
+	if err := rc.PushPackRaw(ctx, "", blob.Key, [][]byte{rec}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Ref write must stay forbidden even with the grant.

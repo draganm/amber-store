@@ -346,3 +346,31 @@ func TestPushSurfacesNegotiationFailure(t *testing.T) {
 		t.Fatalf("push reported the unwind (%v) instead of the negotiation failure", err)
 	}
 }
+
+// TestPushOnBytesReportsUploadBytes wires Opts.OnBytes through the upload
+// path: pushing a tree must produce byte-level ticks summing to a non-zero
+// upload volume.
+func TestPushOnBytesReportsUploadBytes(t *testing.T) {
+	h := newHarness(t)
+	local := newLocalStore(t)
+	root := buildTree(t, local)
+
+	var mu sync.Mutex
+	var ticks, bytes int
+	_, err := remotesync.Push(context.Background(), local, h.rc(t), "r1", root, remotesync.Opts{
+		OnBytes: func(n int) {
+			mu.Lock()
+			ticks++
+			bytes += n
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ticks < 1 || bytes <= 0 {
+		t.Fatalf("OnBytes: %d ticks / %d bytes, want >= 1 tick and > 0 bytes", ticks, bytes)
+	}
+}
