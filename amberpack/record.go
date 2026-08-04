@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/draganm/amber-store/key"
+	"github.com/klauspost/compress"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -70,7 +71,7 @@ func EncodeRecord(k key.Key, data []byte) ([]byte, error) {
 	}
 	payload := data
 	flags := byte(0)
-	if comp := zstdEnc.EncodeAll(data, make([]byte, 0, len(data))); len(comp) < len(data) {
+	if comp, ok := tryCompress(data); ok {
 		payload = comp
 		flags = flagZstd
 	}
@@ -84,6 +85,32 @@ func EncodeRecord(k key.Key, data []byte) ([]byte, error) {
 	// CRC over the whole record; the crc field itself is still zero here.
 	binary.BigEndian.PutUint32(rec[42:46], crc32.Checksum(rec, castagnoli))
 	return rec, nil
+}
+
+const (
+	probeSize  = 1 << 10  // bytes of a payload the estimate looks at
+	probeMin   = 64 << 10 // below this, encoding costs less than checking
+	probeFloor = 0.05     // Estimate under this: ciphertext, skip the encode
+)
+
+// tryCompress compresses data unless a cheap entropy estimate says it won't shrink.
+// Encrypted and already-compressed payloads never shrink, so compressing them in full
+// and discarding the result is pure loss on every write.
+//
+// compress.Estimate is a byte histogram plus an order-1 prediction: no encoder, no
+// allocation. It has to be that cheap -- probing by zstd-compressing the sample instead
+// made compressible writes up to 80% slower.
+//
+// The encoder still decides, so nothing is ever stored larger than it arrived.
+func tryCompress(data []byte) ([]byte, bool) {
+	if len(data) >= probeMin && compress.Estimate(data[:probeSize]) < probeFloor {
+		return nil, false
+	}
+	comp := zstdEnc.EncodeAll(data, make([]byte, 0, len(data)))
+	if len(comp) >= len(data) {
+		return nil, false
+	}
+	return comp, true
 }
 
 // payloadFits reports whether a payload of n bytes fits the format's u32 length

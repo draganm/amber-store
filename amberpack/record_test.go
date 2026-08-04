@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"math"
 	"math/rand/v2"
 	"testing"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/klauspost/compress"
 )
 
 // incompressible returns n deterministic pseudo-random bytes (zstd cannot shrink them).
@@ -227,5 +230,108 @@ func TestDecodePayloadRawDoesNotAlias(t *testing.T) {
 	out[0] = 99
 	if stored[0] != 1 {
 		t.Fatal("DecodePayload raw path must copy, not alias")
+	}
+}
+
+// The estimate only decides whether to ATTEMPT compression: same stored result either
+// way, and it must not stop compressible data from compressing.
+func TestCompressionEstimate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		data     []byte
+		wantZstd bool
+	}{
+		{"large compressible", compressible(probeMin), true},
+		{"large incompressible", incompressible(probeMin), false},
+		// Under probeMin nothing is estimated; the encoder alone decides, as before.
+		{"small compressible", compressible(probeMin - 1), true},
+		{"small incompressible", incompressible(probeMin - 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := mkObj(t, tc.data)
+			rec, err := EncodeRecord(o.Key, o.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := ParseRecord(rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.Flags == flagZstd; got != tc.wantZstd {
+				t.Errorf("compressed = %v, want %v (flags %#x)", got, tc.wantZstd, r.Flags)
+			}
+			got, err := DecodePayload(r.Flags, r.Ulen, rec[RecHeaderSize:RecHeaderSize+int(r.Slen)])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, o.Bytes) {
+				t.Fatal("payload mismatch")
+			}
+			if r.Slen > r.Ulen {
+				t.Errorf("record grew: slen=%d ulen=%d", r.Slen, r.Ulen)
+			}
+		})
+	}
+}
+
+// A payload with a ciphertext-like head and a compressible bulk gets stored raw: the
+// estimate only reads the head. A missed opportunity, not a bug -- but it must still
+// round-trip and must not grow.
+func TestCompressionEstimateMissesMixedPayload(t *testing.T) {
+	data := append(incompressible(probeSize), compressible(256<<10)...)
+	o := mkObj(t, data)
+	rec, err := EncodeRecord(o.Key, o.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ParseRecord(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodePayload(r.Flags, r.Ulen, rec[RecHeaderSize:RecHeaderSize+int(r.Slen)])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, o.Bytes) {
+		t.Fatal("payload mismatch")
+	}
+	if r.Slen > r.Ulen {
+		t.Errorf("record grew: slen=%d ulen=%d", r.Slen, r.Ulen)
+	}
+}
+
+// probeFloor sits in the gap between ciphertext (~0.03) and structured data (~0.83). If
+// a compress.Estimate change closes that gap, fail here rather than silently turning
+// compression off (floor too high) or back on for everything (too low).
+func TestCompressionEstimateThresholdHasHeadroom(t *testing.T) {
+	cipher := compress.Estimate(incompressible(probeSize))
+	structured := compress.Estimate(compressible(probeSize))
+	if cipher >= probeFloor {
+		t.Errorf("ciphertext estimates %.4f, floor is %.2f: nothing will be skipped", cipher, probeFloor)
+	}
+	if structured <= probeFloor {
+		t.Errorf("structured data estimates %.4f, floor is %.2f: it would be stored raw", structured, probeFloor)
+	}
+}
+
+func BenchmarkEncodeRecord(b *testing.B) {
+	for _, n := range []int{8 << 10, 64 << 10, 1 << 20} {
+		for _, tc := range []struct {
+			kind string
+			data []byte
+		}{{"incompressible", incompressible(n)}, {"compressible", compressible(n)}} {
+			o, err := fstree.EncodeBlob(tc.data)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Run(fmt.Sprintf("%s/%dKiB", tc.kind, n>>10), func(b *testing.B) {
+				b.SetBytes(int64(len(tc.data)))
+				for i := 0; i < b.N; i++ {
+					if _, err := EncodeRecord(o.Key, o.Bytes); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }
