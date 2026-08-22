@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,8 +67,7 @@ func main() {
 		}
 		var err error
 		if cfg.Peers, err = nixcache.ParsePeers(peers); err != nil {
-			fmt.Fprintf(os.Stderr, "nix-cached: %v\n", err)
-			os.Exit(1)
+			fatalf(2, "%v", err)
 		}
 		sw, err := nixcache.NewSwarm(context.Background(), nixcache.SwarmOpts{
 			KeyPath: filepath.Join(cfg.Dir, "p2p.key"),
@@ -75,8 +75,7 @@ func main() {
 			Relay:   relay.ModeDisabled(),
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "nix-cached: %v\n", err)
-			os.Exit(1)
+			fatalf(1, "%v", err)
 		}
 		defer sw.Close()
 		cfg.Swarm = sw
@@ -86,15 +85,16 @@ func main() {
 
 	node, err := nixcache.OpenNode(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "nix-cached: %v\n", err)
-		os.Exit(1)
+		fatalf(1, "%v", err)
 	}
 	defer node.Close()
 
 	l, err := net.Listen("tcp", *listen)
+	if err != nil && !strings.Contains(*listen, ":") {
+		err = fmt.Errorf("invalid --listen %q: want host:port, e.g. 127.0.0.1:8321", *listen)
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "nix-cached: %v\n", err)
-		os.Exit(1)
+		fatalf(1, "%v", err)
 	}
 	fmt.Printf("nix-cached: serving on http://%s\n", l.Addr())
 

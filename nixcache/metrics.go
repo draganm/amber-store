@@ -58,6 +58,8 @@ nix_cached_store_bytes %d
 # TYPE nix_cached_swarm_peers gauge
 nix_cached_swarm_peers{path="direct"} %d
 nix_cached_swarm_peers{path="relay"} %d
+# TYPE nix_cached_known_peers gauge
+nix_cached_known_peers %d
 `,
 		m.upstreamIngests.Load(), m.swarmIngests.Load(),
 		m.upstreamNarBytes.Load(), m.swarmNarBytes.Load(),
@@ -68,7 +70,8 @@ nix_cached_swarm_peers{path="relay"} %d
 		m.narinfoNotFound.Load(), m.narinfoBackoff.Load(),
 		m.narinfoError.Load(),
 		m.narBytesServed.Load(),
-		n.catalog.Len(), n.indexedPaths(), n.store.SizeBytes(), direct, relayed)
+		n.catalog.Len(), n.indexedPaths(), n.store.SizeBytes(), direct, relayed,
+		len(n.peerIDs()))
 }
 
 func (n *Node) indexedPaths() int {

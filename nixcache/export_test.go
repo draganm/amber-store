@@ -7,6 +7,8 @@ import (
 
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/keylist"
+	ikey "github.com/tmc/go-iroh/key"
+	"github.com/tmc/go-iroh/netaddr"
 )
 
 // SetMidMark installs a hook running between GC's mark and sweep.
@@ -70,3 +72,12 @@ func LookupPath(n *Node, hashpart string) (PathInfo, error) {
 
 // SetMidIngest installs a hook between object commit and publication.
 func SetMidIngest(n *Node, f func() error) { n.midIngest = f }
+
+// ConnectLoop runs the static-peer connection maintenance loop.
+func ConnectLoop(n *Node, ctx context.Context) { n.connectLoop(ctx) }
+
+// AddPeer feeds a discovered peer to the node.
+func AddPeer(n *Node, a netaddr.EndpointAddr) bool { return n.addPeer(a) }
+
+// KnownPeers lists the node's peer set.
+func KnownPeers(n *Node) []ikey.EndpointID { return n.peerIDs() }

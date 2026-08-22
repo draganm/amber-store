@@ -218,6 +218,9 @@ func (n *Node) Handler() http.Handler { return n.server }
 // Run serves the endpoint on l and keeps the catalog synced until ctx ends.
 func (n *Node) Run(ctx context.Context, l net.Listener) error {
 	go n.syncLoop(ctx)
+	if n.cfg.Swarm != nil && len(n.cfg.Peers) > 0 {
+		go n.connectLoop(ctx)
+	}
 	srv := &http.Server{Handler: n.server}
 	go func() {
 		<-ctx.Done()
