@@ -421,6 +421,24 @@ func (g *sealedSegment) getRecord(k key.Key) ([]byte, bool, error) {
 	return rec, true, nil
 }
 
+// viewRecord calls fn with k's record as a slice of the segment's mmap; fn
+// must not retain it.
+func (g *sealedSegment) viewRecord(k key.Key, fn func([]byte) error) (bool, error) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return false, nil
+	}
+	off, slen, ok := g.fv.lookup(k)
+	if !ok {
+		return false, nil
+	}
+	bodyLen := uint64(g.fv.bodyLen)
+	if off < uint64(len(magicHeader)) || off > bodyLen ||
+		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
+		return false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
+	}
+	return true, fn(g.mm[off : off+amberpack.RecHeaderSize+uint64(slen)])
+}
+
 // storedSize returns k's stored (post-compression) payload length and whether
 // it was found, from the index alone — no payload read.
 func (g *sealedSegment) storedSize(k key.Key) (uint32, bool) {

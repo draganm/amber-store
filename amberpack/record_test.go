@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/key"
+	"github.com/klauspost/compress/zstd"
 )
 
 // incompressible returns n deterministic pseudo-random bytes (zstd cannot shrink them).
@@ -257,5 +258,32 @@ func TestDecodePayloadRawDoesNotAlias(t *testing.T) {
 	out[0] = 99
 	if stored[0] != 1 {
 		t.Fatal("DecodePayload raw path must copy, not alias")
+	}
+}
+
+// Stored frames are spliced verbatim into streams libzstd decodes with its
+// default 128 MiB window limit, so wider frames must never enter a store.
+func TestDecodePayloadRejectsWideWindow(t *testing.T) {
+	enc, err := zstd.NewWriter(nil, zstd.WithSingleSegment(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("window "), 1000)
+	frame := enc.EncodeAll(data, nil)
+	var h zstd.Header
+	if err := h.Decode(frame); err != nil || h.SingleSegment {
+		t.Fatalf("need a frame with a window descriptor: %v, %+v", err, h)
+	}
+	// Window_Descriptor follows the 4-byte magic and the descriptor byte:
+	// exponent<<3, window = 1 << (10+exponent).
+	for _, tc := range []struct {
+		exponent byte
+		ok       bool
+	}{{17, true}, {18, false}} {
+		frame[5] = tc.exponent << 3
+		_, err := DecodePayload(FlagZstd, uint32(len(data)), frame)
+		if (err == nil) != tc.ok {
+			t.Fatalf("window 1<<%d: err = %v", 10+tc.exponent, err)
+		}
 	}
 }
