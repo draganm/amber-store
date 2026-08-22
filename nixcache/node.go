@@ -8,10 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +72,9 @@ type Node struct {
 	midMark   func()       // test hook, runs between GC's mark and sweep
 	midIngest func() error // test hook, runs between object commit and index publication
 
+	pinMu sync.Mutex
+	pins  map[string]bool // explicit pins, persisted
+
 	peerMu    sync.Mutex
 	peerRoots map[ikey.EndpointID]key.Key  // last synced index root per peer
 	peerSet   map[ikey.EndpointID]struct{} // static peers plus discovered ones
@@ -102,11 +108,15 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	pins, err := loadPins(filepath.Join(cfg.Dir, "pins"))
+	if err != nil {
+		return nil, err
+	}
 	store, err := packstore.Open(filepath.Join(cfg.Dir, "store"))
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root,
+	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root, pins: pins,
 		peerRoots: map[ikey.EndpointID]key.Key{}, peerSet: map[ikey.EndpointID]struct{}{},
 		catalogCur: map[string]*Catalog{}, swarmStats: remotesync.NewStats()}
 	if cfg.BudgetBytes > 0 {
@@ -114,6 +124,9 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 		if err := n.seedEvict(); err != nil {
 			store.Close()
 			return nil, err
+		}
+		for hp := range pins {
+			n.evict.Pin(hp)
 		}
 	}
 	n.server = &Server{
@@ -172,17 +185,41 @@ func (n *Node) touch(hashpart string) {
 	}
 }
 
-// Pin excludes an indexed path from eviction.
-func (n *Node) Pin(hashpart string) {
-	if n.evict != nil {
-		n.evict.Pin(hashpart)
+// Pin keeps a path: never evicted, never aged out. Persisted.
+func (n *Node) Pin(hashpart string) error { return n.setPinned(hashpart, true) }
+
+// Unpin returns a path to the normal eviction and aging lifecycle.
+func (n *Node) Unpin(hashpart string) error { return n.setPinned(hashpart, false) }
+
+func (n *Node) setPinned(hashpart string, v bool) error {
+	if !validHashPart(hashpart) {
+		return fmt.Errorf("nixcache: malformed hashpart %q", hashpart)
 	}
+	n.pinMu.Lock()
+	if v {
+		n.pins[hashpart] = true
+	} else {
+		delete(n.pins, hashpart)
+	}
+	err := savePins(n.path("pins"), n.pins)
+	n.pinMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if n.evict != nil {
+		if v {
+			n.evict.Pin(hashpart)
+		} else {
+			n.evict.Unpin(hashpart)
+		}
+	}
+	return nil
 }
 
-func (n *Node) Unpin(hashpart string) {
-	if n.evict != nil {
-		n.evict.Unpin(hashpart)
-	}
+func (n *Node) pinned(hashpart string) bool {
+	n.pinMu.Lock()
+	defer n.pinMu.Unlock()
+	return n.pins[hashpart]
 }
 
 func (n *Node) Close() error { return n.store.Close() }
@@ -208,6 +245,27 @@ func (n *Node) AdminHandler() http.Handler {
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		n.writeMetrics(w)
+	})
+	mux.HandleFunc("POST /-/pin/{hashpart}", func(w http.ResponseWriter, r *http.Request) {
+		if err := n.Pin(r.PathValue("hashpart")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	})
+	mux.HandleFunc("DELETE /-/pin/{hashpart}", func(w http.ResponseWriter, r *http.Request) {
+		if err := n.Unpin(r.PathValue("hashpart")); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	})
+	mux.HandleFunc("GET /-/liveness", func(w http.ResponseWriter, r *http.Request) {
+		report, err := n.Liveness()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, s := range report {
+			fmt.Fprintf(w, "segment %d sealed=%t live_keys=%d dead_keys=%d live_bytes=%d dead_bytes=%d\n",
+				s.ID, s.Sealed, s.LiveKeys, s.DeadKeys, s.LiveBytes, s.DeadBytes)
+		}
 	})
 	return mux
 }
@@ -441,7 +499,7 @@ func (n *Node) agePass(now time.Time) error {
 			return err
 		}
 		hp := string(e.Name)
-		cur := n.currentHas(hp)
+		cur := n.currentHas(hp) || n.pinned(hp)
 		if n.evict != nil && n.cfg.Seed {
 			if cur {
 				n.evict.Pin(hp)
@@ -574,6 +632,34 @@ func (b *objectBuffer) seq() func(func(packstore.Object, error) bool) {
 			}
 		}
 	}
+}
+
+// loadPins reads the persisted explicit-pin set. A missing file is empty.
+func loadPins(path string) (map[string]bool, error) {
+	pins := map[string]bool{}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return pins, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, hp := range strings.Fields(string(b)) {
+		if !validHashPart(hp) {
+			return nil, fmt.Errorf("nixcache: pins file: malformed hashpart %q", hp)
+		}
+		pins[hp] = true
+	}
+	return pins, nil
+}
+
+func savePins(path string, pins map[string]bool) error {
+	out := slices.Sorted(maps.Keys(pins))
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func loadRoot(path string) (key.Key, error) {
