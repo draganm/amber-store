@@ -14,6 +14,7 @@ require (
 	github.com/hiddeco/sshsig v0.2.0
 	github.com/klauspost/compress v1.17.11
 	github.com/prometheus/client_golang v1.16.0
+	github.com/ulikunitz/xz v0.5.16
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.53.0
