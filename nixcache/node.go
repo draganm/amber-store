@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/draganm/amber-store/fstree"
@@ -26,7 +27,7 @@ type NodeConfig struct {
 	TrustedKeys []string // "name:base64" narinfo signing keys
 	CatalogURLs []string // store-paths list URLs, synced periodically
 	SyncEvery   time.Duration
-	BudgetBytes int64 // stop ingesting above this store size; 0: unlimited
+	BudgetBytes int64 // eviction target for the NarSize sum. 0: unlimited
 	Client      *http.Client
 }
 
@@ -41,6 +42,16 @@ type Node struct {
 
 	mu   sync.Mutex // serializes index updates
 	root key.Key
+
+	// quiesce protocol of specs/gc.qnt: ingests hold it shared from object
+	// commit through index publication, GC's mark..sweep holds it exclusively
+	gcMu sync.RWMutex
+
+	midMark func() // test hook, runs between GC's mark and sweep
+
+	evict          *evictPolicy // nil without a budget
+	evictedSinceGC atomic.Int64
+	gcAuto         atomic.Bool
 }
 
 // OpenNode opens the store and state under cfg.Dir.
@@ -66,13 +77,59 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root}
+	if cfg.BudgetBytes > 0 {
+		n.evict = newEvictPolicy(cfg.BudgetBytes)
+		if err := n.seedEvict(); err != nil {
+			store.Close()
+			return nil, err
+		}
+	}
 	n.server = &Server{
 		Store:   store,
 		Index:   n.indexRoot,
 		Catalog: catalog.Contains,
 		Fetch:   n.fetch,
+		Touch:   n.touch,
 	}
 	return n, nil
+}
+
+// seedEvict rebuilds the policy from the persisted index. Queue positions
+// and hit counters are process state and start over.
+func (n *Node) seedEvict() error {
+	if n.root == (key.Key{}) {
+		return nil
+	}
+	for e, err := range indexEntries(n.root, n.store.Get) {
+		if err != nil {
+			return err
+		}
+		pi, err := DecodeRecord(e.LinkTarget)
+		if err != nil {
+			return err
+		}
+		n.evict.seed(string(e.Name), pi.NarSize)
+	}
+	return nil
+}
+
+func (n *Node) touch(hashpart string) {
+	if n.evict != nil {
+		n.evict.Touch(hashpart)
+	}
+}
+
+// Pin excludes an indexed path from eviction.
+func (n *Node) Pin(hashpart string) {
+	if n.evict != nil {
+		n.evict.Pin(hashpart)
+	}
+}
+
+func (n *Node) Unpin(hashpart string) {
+	if n.evict != nil {
+		n.evict.Unpin(hashpart)
+	}
 }
 
 func (n *Node) Close() error { return n.store.Close() }
@@ -105,9 +162,6 @@ func (n *Node) indexRoot() key.Key {
 // fetch ingests one catalogued path: fetch+verify into a memory buffer, then
 // commit the objects and index the path. A failed gate writes nothing.
 func (n *Node) fetch(ctx context.Context, hashpart string) (PathInfo, error) {
-	if err := n.checkBudget(); err != nil {
-		return PathInfo{}, err
-	}
 	buf := newObjectBuffer()
 	f := &Fetcher{
 		BaseURL: n.cfg.Upstream,
@@ -120,17 +174,49 @@ func (n *Node) fetch(ctx context.Context, hashpart string) (PathInfo, error) {
 	if err != nil {
 		return PathInfo{}, err
 	}
+	n.gcMu.RLock()
+	defer n.gcMu.RUnlock()
 	if err := n.store.WriteBatch(buf.seq()); err != nil {
 		return PathInfo{}, err
 	}
-	return pi, n.index(pi)
+	if err := n.publish([]PathInfo{pi}, nil); err != nil {
+		return PathInfo{}, err
+	}
+	return pi, n.enforceBudget(hashpart, pi.NarSize)
 }
 
-func (n *Node) index(pi PathInfo) error {
+// enforceBudget admits the new path and unindexes victims over budget.
+// Their objects stay until GC. Runs under the shared gcMu like any writer.
+func (n *Node) enforceBudget(hashpart string, narSize uint64) error {
+	if n.evict == nil {
+		return nil
+	}
+	n.evict.Admit(hashpart, narSize)
+	victims, bytes := n.evict.Evict()
+	if len(victims) == 0 {
+		return nil
+	}
+	if err := n.publish(nil, victims); err != nil {
+		return err
+	}
+	if n.evictedSinceGC.Add(bytes) >= n.cfg.BudgetBytes/4 &&
+		n.gcAuto.CompareAndSwap(false, true) {
+		n.evictedSinceGC.Store(0)
+		go func() {
+			defer n.gcAuto.Store(false)
+			n.GC(0.5)
+		}()
+	}
+	return nil
+}
+
+// publish merges upserts and deletes into the index and swaps the root,
+// objects first, so a crash leaves the previous consistent index.
+func (n *Node) publish(upserts []PathInfo, deletes []string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	buf := newObjectBuffer()
-	root, err := Merge(n.root, []PathInfo{pi}, nil, n.store.Get, buf.emit)
+	root, err := Merge(n.root, upserts, deletes, n.store.Get, buf.emit)
 	if err != nil {
 		return err
 	}
@@ -141,26 +227,6 @@ func (n *Node) index(pi PathInfo) error {
 		return err
 	}
 	n.root = root
-	return nil
-}
-
-func (n *Node) checkBudget() error {
-	if n.cfg.BudgetBytes <= 0 {
-		return nil
-	}
-	var size int64
-	entries, err := os.ReadDir(n.path("store"))
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if fi, err := e.Info(); err == nil {
-			size += fi.Size()
-		}
-	}
-	if size > n.cfg.BudgetBytes {
-		return fmt.Errorf("nixcache: store size %d exceeds budget %d", size, n.cfg.BudgetBytes)
-	}
 	return nil
 }
 

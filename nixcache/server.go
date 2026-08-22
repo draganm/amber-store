@@ -33,6 +33,9 @@ type Server struct {
 	// request, so it must be cheap when nothing is missing. Nil: serve
 	// only trees whose root is present.
 	Ensure func(ctx context.Context, root key.Key) error
+	// Touch reports a narinfo served from the index (a cache hit). Nil: no
+	// accounting.
+	Touch func(hashpart string)
 
 	sf flights
 }
@@ -60,6 +63,9 @@ func (s *Server) narinfo(w http.ResponseWriter, r *http.Request, hp string) {
 		return
 	}
 	pi, err := Lookup(s.Index(), hp, s.Store.Get)
+	if err == nil && s.Touch != nil {
+		s.Touch(hp)
+	}
 	if errors.Is(err, fstree.ErrNotFound) {
 		pi, err = s.fetch(r.Context(), hp)
 	}

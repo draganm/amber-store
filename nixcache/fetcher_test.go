@@ -18,68 +18,91 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// upstream is a fake binary cache serving one signed path.
+// upstream is a fake binary cache serving signed paths. Path hashPart(7)
+// always exists (and is what tamper mangles), addPath serves more.
 type upstream struct {
 	srv     *httptest.Server
 	pub     ed25519.PublicKey
+	priv    ed25519.PrivateKey
 	narinfo []byte
 	nar     []byte // compressed
 	narURL  string
+	docs    map[string][]byte // "/<hp>.narinfo" -> doc
+	nars    map[string][]byte // "/nar/..." -> compressed NAR
 }
 
-func newUpstream(t *testing.T, compression string, tamper func(nar, doc []byte) ([]byte, []byte)) *upstream {
+// signPath builds a signed narinfo and compressed NAR for path idx.
+func (u *upstream) signPath(t *testing.T, idx int, content []byte, compression string) (doc, comp []byte, narURL string) {
 	t.Helper()
 	st := newRecStore()
-	root := buildTree(t, st, []byte("upstream content"))
+	root := buildTree(t, st, content)
 	var nar bytes.Buffer
 	if err := narexport.Export(&nar, root, st.Get); err != nil {
 		t.Fatal(err)
 	}
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	name := hashPart(idx) + "-upstream-1.0"
 	n := nixcache.Narinfo{
-		StorePath:  "/nix/store/" + hashPart(7) + "-upstream-1.0",
+		StorePath:  "/nix/store/" + name,
 		NarHash:    sha256.Sum256(nar.Bytes()),
 		NarSize:    uint64(nar.Len()),
-		References: []string{hashPart(7) + "-upstream-1.0"},
+		References: []string{name},
 	}
-	sig := "test-1:" + base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(n.Fingerprint())))
+	sig := "test-1:" + base64.StdEncoding.EncodeToString(ed25519.Sign(u.priv, []byte(n.Fingerprint())))
 
-	var comp bytes.Buffer
+	var buf bytes.Buffer
 	switch compression {
 	case "zstd":
-		zw, _ := zstd.NewWriter(&comp)
+		zw, _ := zstd.NewWriter(&buf)
 		zw.Write(nar.Bytes())
 		zw.Close()
 	case "xz":
-		xw, err := xz.NewWriter(&comp)
+		xw, err := xz.NewWriter(&buf)
 		if err != nil {
 			t.Fatal(err)
 		}
 		xw.Write(nar.Bytes())
 		xw.Close()
 	default:
-		comp.Write(nar.Bytes())
+		buf.Write(nar.Bytes())
 	}
 
-	u := &upstream{pub: pub, narURL: "nar/abc123.nar." + compression}
-	doc := fmt.Sprintf("StorePath: %s\nURL: %s\nCompression: %s\nNarHash: sha256:%s\nNarSize: %d\nReferences: %s\nSig: %s\n",
-		n.StorePath, u.narURL, compression, nixcache.EncodeNixBase32(n.NarHash[:]), n.NarSize,
+	narURL = fmt.Sprintf("nar/%03d.nar.%s", idx, compression)
+	doc = fmt.Appendf(nil, "StorePath: %s\nURL: %s\nCompression: %s\nNarHash: sha256:%s\nNarSize: %d\nReferences: %s\nSig: %s\n",
+		n.StorePath, narURL, compression, nixcache.EncodeNixBase32(n.NarHash[:]), n.NarSize,
 		n.References[0], sig)
-	u.nar, u.narinfo = comp.Bytes(), []byte(doc)
+	return doc, buf.Bytes(), narURL
+}
+
+// addPath serves path idx with the given content.
+func (u *upstream) addPath(t *testing.T, idx int, content []byte) {
+	doc, nar, narURL := u.signPath(t, idx, content, "zstd")
+	u.docs["/"+hashPart(idx)+".narinfo"] = doc
+	u.nars["/"+narURL] = nar
+}
+
+func newUpstream(t *testing.T, compression string, tamper func(nar, doc []byte) ([]byte, []byte)) *upstream {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &upstream{pub: pub, priv: priv, docs: map[string][]byte{}, nars: map[string][]byte{}}
+	doc, nar, narURL := u.signPath(t, 7, []byte("upstream content"), compression)
+	u.narinfo, u.nar, u.narURL = doc, nar, narURL
 	if tamper != nil {
 		u.nar, u.narinfo = tamper(u.nar, u.narinfo)
 	}
 
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/" + hashPart(7) + ".narinfo":
+		switch {
+		case r.URL.Path == "/"+hashPart(7)+".narinfo":
 			w.Write(u.narinfo)
-		case "/" + u.narURL:
+		case r.URL.Path == "/"+u.narURL:
 			w.Write(u.nar)
+		case u.docs[r.URL.Path] != nil:
+			w.Write(u.docs[r.URL.Path])
+		case u.nars[r.URL.Path] != nil:
+			w.Write(u.nars[r.URL.Path])
 		default:
 			http.NotFound(w, r)
 		}

@@ -1,12 +1,11 @@
 package nixcache_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -110,30 +109,69 @@ func TestNodeUncataloguedMiss(t *testing.T) {
 	}
 }
 
-func TestNodeBudget(t *testing.T) {
+func TestNodeEviction(t *testing.T) {
 	u := newUpstream(t, "zstd", nil)
+	for i := 1; i <= 3; i++ {
+		content := bytes.Repeat([]byte{byte(i)}, 4<<10)
+		u.addPath(t, i, content)
+	}
 	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "/nix/store/"+hashPart(7)+"-upstream-1.0\n")
+		for i := 1; i <= 3; i++ {
+			io.WriteString(w, "/nix/store/"+hashPart(i)+"-upstream-1.0\n")
+		}
 	}))
 	defer catalog.Close()
+
 	var dir string
 	node, srv := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
-		c.BudgetBytes = 1
+		c.BudgetBytes = 10 << 10 // fits two ~4KiB NARs, not three
 		dir = c.Dir
 	})
 	node.SyncCatalog(t.Context())
-	// Grow the store past the budget.
-	if err := os.WriteFile(filepath.Join(dir, "store", "filler"), make([]byte, 2), 0o644); err != nil {
-		t.Fatal(err)
+
+	get := func(srvURL string, i int) int {
+		resp, err := http.Get(srvURL + "/" + hashPart(i) + ".narinfo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
 	}
-	resp, err := http.Get(srv.URL + "/" + hashPart(7) + ".narinfo")
+	for i := 1; i <= 3; i++ {
+		if st := get(srv.URL, i); st != 200 {
+			t.Fatalf("ingest %d: status %d", i, st)
+		}
+	}
+
+	// Path 1 (oldest, never hit again) was evicted: with upstream gone it
+	// cannot be served, while 2 and 3 come from the local index.
+	u.srv.Close()
+	if st := get(srv.URL, 1); st != 502 {
+		t.Fatalf("evicted path: status %d, want 502", st)
+	}
+	for i := 2; i <= 3; i++ {
+		if st := get(srv.URL, i); st != 200 {
+			t.Fatalf("kept path %d: status %d", i, st)
+		}
+	}
+	srv.Close()
+	node.Close()
+
+	// Reopen: the policy reseeds from the index, kept paths still serve.
+	n2, err := nixcache.OpenNode(nixcache.NodeConfig{
+		Dir: dir, Upstream: "http://unreachable.invalid", BudgetBytes: 10 << 10,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != 502 {
-		t.Fatalf("status %d", resp.StatusCode)
+	defer n2.Close()
+	srv2 := httptest.NewServer(n2.Handler())
+	defer srv2.Close()
+	for i := 2; i <= 3; i++ {
+		if st := get(srv2.URL, i); st != 200 {
+			t.Fatalf("after reopen, path %d: status %d", i, st)
+		}
 	}
 }
 
