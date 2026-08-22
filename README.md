@@ -148,6 +148,7 @@ Three layers, local to remote
 | [`architecture/fuse.md`](architecture/fuse.md) | The `fuse` mount (Linux only): reconstructing files at open into RAM and serving reads through kernel passthrough. |
 | [`architecture/references.md`](architecture/references.md) | Named pointers to keys: record layout, name rules, storage, routes. |
 | [`architecture/remote.md`](architecture/remote.md) | The remote server (`amber-store serve`): identity, signed HTTP protocol, wire routes, sync algorithms. |
+| [`architecture/generational-gc.md`](architecture/generational-gc.md) | Generational garbage collection: packstores as generations, the age invariant and ordered uploads, copy-forward sweeps, promotion by directory rename, leases and the ref barrier. |
 
 ## Usage
 
