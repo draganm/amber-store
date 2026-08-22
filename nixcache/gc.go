@@ -1,6 +1,7 @@
 package nixcache
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/draganm/amber-store/fstree"
@@ -20,10 +21,19 @@ func (n *Node) Liveness() ([]packstore.SegmentLiveness, error) {
 	return n.store.Liveness(live.Contains)
 }
 
+// ErrGCRunning is returned by GC while another cycle is in progress.
+var ErrGCRunning = errors.New("nixcache: gc cycle already running")
+
 // GC marks from the published index and compacts segments past
 // minDeadRatio. Writers stall only for the snapshot and the sweep
 // (specs/gc.qnt). The mark runs concurrently with ingests.
+// Cycles never overlap: the store has one write barrier, so a second
+// BeginBarrier mid-mark would lose the keys the first cycle captured.
 func (n *Node) GC(minDeadRatio float64) (packstore.CompactStats, error) {
+	if !n.cycleMu.TryLock() {
+		return packstore.CompactStats{}, ErrGCRunning
+	}
+	defer n.cycleMu.Unlock()
 	n.gcMu.Lock()
 	n.store.BeginBarrier()
 	root := n.indexRoot()

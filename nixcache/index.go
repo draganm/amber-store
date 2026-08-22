@@ -35,6 +35,7 @@ type PathInfo struct {
 	Deriver             string
 	Sigs                []string
 	IngestedAt          int64
+	AgedAt              int64 // when the path left the catalog; 0: still listed
 	UpstreamCompression string
 }
 
@@ -51,6 +52,7 @@ type record struct {
 	Sigs        []string `cbor:"6,keyasint,omitempty"`
 	IngestedAt  int64    `cbor:"7,keyasint"`
 	Compression string   `cbor:"8,keyasint,omitempty"`
+	AgedAt      int64    `cbor:"9,keyasint,omitempty"`
 }
 
 var encMode cbor.EncMode
@@ -106,6 +108,7 @@ func EncodeRecord(p PathInfo) ([]byte, error) {
 		Deriver:     p.Deriver,
 		Sigs:        p.Sigs,
 		IngestedAt:  p.IngestedAt,
+		AgedAt:      p.AgedAt,
 		Compression: p.UpstreamCompression,
 	})
 }
@@ -131,6 +134,7 @@ func DecodeRecord(b []byte) (PathInfo, error) {
 		Deriver:             r.Deriver,
 		Sigs:                r.Sigs,
 		IngestedAt:          r.IngestedAt,
+		AgedAt:              r.AgedAt,
 		UpstreamCompression: r.Compression,
 	}
 	copy(p.NarHash[:], r.NarHash)

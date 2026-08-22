@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -38,6 +39,7 @@ type NodeConfig struct {
 	// Seed ingests every catalogued path eagerly, so the node holds the
 	// closure before anyone asks: the seeder role.
 	Seed        bool
+	CatalogTTL  time.Duration // drop paths this long after leaving the catalog; 0: keep forever
 	SyncEvery   time.Duration
 	BudgetBytes int64 // eviction target for the NarSize sum. 0: unlimited
 	Client      *http.Client
@@ -57,7 +59,8 @@ type Node struct {
 
 	// quiesce protocol of specs/gc.qnt: ingests hold it shared from object
 	// commit through index publication, GC's mark..sweep holds it exclusively
-	gcMu sync.RWMutex
+	gcMu    sync.RWMutex
+	cycleMu sync.Mutex // held for a whole GC cycle
 
 	midMark func() // test hook, runs between GC's mark and sweep
 
@@ -65,9 +68,11 @@ type Node struct {
 	peerRoots map[ikey.EndpointID]key.Key  // last synced index root per peer
 	peerSet   map[ikey.EndpointID]struct{} // static peers plus discovered ones
 
-	catalogTags sync.Map          // catalog URL -> ETag of the last ingested list
-	swarmStats  *remotesync.Stats // per-peer speed estimates, all pulls
-	seedRetry   bool              // sync-loop state: last seed pass had failures
+	catalogTags sync.Map // catalog URL -> ETag of the last ingested list
+	catalogMu   sync.RWMutex
+	catalogCur  map[string]*Catalog // last fetched list per URL
+	swarmStats  *remotesync.Stats   // per-peer speed estimates, all pulls
+	seedRetry   bool                // sync-loop state: last seed pass had failures
 
 	evict          *evictPolicy // nil without a budget
 	evictedSinceGC atomic.Int64
@@ -98,7 +103,7 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 	}
 	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root,
 		peerRoots: map[ikey.EndpointID]key.Key{}, peerSet: map[ikey.EndpointID]struct{}{},
-		swarmStats: remotesync.NewStats()}
+		catalogCur: map[string]*Catalog{}, swarmStats: remotesync.NewStats()}
 	if cfg.BudgetBytes > 0 {
 		n.evict = newEvictPolicy(cfg.BudgetBytes)
 		if err := n.seedEvict(); err != nil {
@@ -178,6 +183,26 @@ func (n *Node) Close() error { return n.store.Close() }
 
 func (n *Node) path(name string) string { return filepath.Join(n.cfg.Dir, name) }
 
+// AdminHandler serves privileged endpoints. Only expose it on a
+// local Unix socket.
+func (n *Node) AdminHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /-/gc", func(w http.ResponseWriter, r *http.Request) {
+		stats, err := n.GC(0.5)
+		if errors.Is(err, ErrGCRunning) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "segments compacted: %d\nrecords copied: %d\nbytes copied: %d\nbytes freed: %d\n",
+			stats.SegmentsCompacted, stats.RecordsCopied, stats.BytesCopied, stats.BytesFreed)
+	})
+	return mux
+}
+
 // Handler returns the substituter endpoint.
 func (n *Node) Handler() http.Handler { return n.server }
 
@@ -244,7 +269,19 @@ func (n *Node) enforceBudget(hashpart string, narSize uint64) error {
 	if n.evict == nil {
 		return nil
 	}
+	if n.cfg.Seed && n.currentHas(hashpart) {
+		n.evict.Pin(hashpart)
+	}
 	n.evict.Admit(hashpart, narSize)
+	return n.evictOverBudget()
+}
+
+// evictOverBudget unindexes the policy's victims. A quarter budget of
+// evictions triggers a background GC.
+func (n *Node) evictOverBudget() error {
+	if n.evict == nil {
+		return nil
+	}
 	victims, bytes := n.evict.Evict()
 	if len(victims) == 0 {
 		return nil
@@ -257,7 +294,9 @@ func (n *Node) enforceBudget(hashpart string, narSize uint64) error {
 		n.evictedSinceGC.Store(0)
 		go func() {
 			defer n.gcAuto.Store(false)
-			n.GC(0.5)
+			if _, err := n.GC(0.5); err != nil && !errors.Is(err, ErrGCRunning) {
+				slog.Warn("auto gc", "error", err)
+			}
 		}()
 	}
 	return nil
@@ -304,10 +343,80 @@ func (n *Node) syncLoop(ctx context.Context) {
 // only when it changed or the previous pass left failures to retry.
 func (n *Node) syncOnce(ctx context.Context) {
 	changed := n.SyncCatalog(ctx)
+	if err := n.agePass(time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "nixcache: age pass: %v\n", err)
+	}
 	n.SyncPeers(ctx)
 	if n.cfg.Seed && (changed || n.seedRetry) {
 		n.seedRetry = n.SeedPass(ctx) > 0
 	}
+}
+
+// currentHas reports whether hp is in any of the last fetched
+// catalog lists.
+func (n *Node) currentHas(hp string) bool {
+	n.catalogMu.RLock()
+	defer n.catalogMu.RUnlock()
+	for _, c := range n.catalogCur {
+		if c.Contains(hp) {
+			return true
+		}
+	}
+	return false
+}
+
+// agePass stamps paths missing from the current catalogs, clears the
+// stamp on return, and deletes past CatalogTTL. Skipped unless every
+// catalog URL has been fetched, so download failures age nothing.
+func (n *Node) agePass(now time.Time) error {
+	n.catalogMu.RLock()
+	full := len(n.catalogCur) == len(n.cfg.CatalogURLs)
+	n.catalogMu.RUnlock()
+	if n.cfg.CatalogTTL <= 0 || !full {
+		return nil
+	}
+	root := n.indexRoot()
+	if root == (key.Key{}) {
+		return nil
+	}
+	var upserts []PathInfo
+	var deletes []string
+	for e, err := range indexEntries(root, n.store.Get) {
+		if err != nil {
+			return err
+		}
+		pi, err := DecodeRecord(e.LinkTarget)
+		if err != nil {
+			return err
+		}
+		hp := string(e.Name)
+		cur := n.currentHas(hp)
+		if n.evict != nil && n.cfg.Seed {
+			if cur {
+				n.evict.Pin(hp)
+			} else {
+				n.evict.Unpin(hp)
+			}
+		}
+		switch {
+		case cur && pi.AgedAt != 0:
+			pi.AgedAt = 0
+			upserts = append(upserts, pi)
+		case !cur && pi.AgedAt == 0:
+			pi.AgedAt = now.Unix()
+			upserts = append(upserts, pi)
+		case !cur && now.Unix()-pi.AgedAt >= int64(n.cfg.CatalogTTL.Seconds()):
+			deletes = append(deletes, hp)
+		}
+	}
+	n.gcMu.RLock()
+	defer n.gcMu.RUnlock()
+	if len(upserts) > 0 || len(deletes) > 0 {
+		if err := n.publish(upserts, deletes); err != nil {
+			return err
+		}
+	}
+	return n.evictOverBudget()
 }
 
 // servable gates narinfo misses: the catalog covers upstream, and a synced
@@ -363,9 +472,14 @@ func (n *Node) addCatalogURL(ctx context.Context, url string) (bool, error) {
 		return false, err
 	}
 	defer body.Close()
-	if _, err := n.catalog.AddList(body); err != nil {
+	cur := &Catalog{}
+	if _, err := cur.AddList(body); err != nil {
 		return false, err
 	}
+	n.catalog.Merge(cur)
+	n.catalogMu.Lock()
+	n.catalogCur[url] = cur
+	n.catalogMu.Unlock()
 	if tag := resp.Header.Get("Etag"); tag != "" {
 		n.catalogTags.Store(url, tag)
 	}

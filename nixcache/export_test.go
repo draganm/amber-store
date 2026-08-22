@@ -3,6 +3,7 @@ package nixcache
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/keylist"
@@ -57,4 +58,12 @@ func DecodeRequestRoundTrip(b []byte) ([]byte, error) {
 		return nil, err
 	}
 	return r.encode(), nil
+}
+
+// AgePass runs one catalog-aging pass at the given time.
+func AgePass(n *Node, now time.Time) { n.agePass(now) }
+
+// LookupPath reads hashpart's record from the current index.
+func LookupPath(n *Node, hashpart string) (PathInfo, error) {
+	return Lookup(n.indexRoot(), hashpart, n.store.Get)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -43,6 +44,7 @@ func main() {
 	flag.Var(&trusted, "trusted-key", "trusted narinfo signing key name:base64 (repeatable)")
 	flag.Var(&catalogs, "catalog-url", "store-paths list URL (repeatable)")
 	flag.DurationVar(&cfg.SyncEvery, "sync-every", 5*time.Minute, "catalog and peer sync interval")
+	flag.DurationVar(&cfg.CatalogTTL, "catalog-ttl", 0, "drop paths this long after they leave the catalog (0: keep forever)")
 	flag.Int64Var(&cfg.BudgetBytes, "budget-bytes", 0, "refuse ingest above this store size (0: unlimited)")
 	flag.Int64Var(&cfg.PeerByteRate, "peer-byte-rate", 0, "peer-serving bandwidth cap, bytes/second (0: unlimited)")
 	flag.BoolVar(&cfg.Seed, "seed", false, "eagerly ingest every catalogued path")
@@ -94,6 +96,18 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("nix-cached: serving on http://%s\n", l.Addr())
+
+	sock := filepath.Join(cfg.Dir, "admin.sock")
+	os.Remove(sock)
+	al, err := net.Listen("unix", sock)
+	if err != nil {
+		fatalf(1, "%v", err)
+	}
+	if err := os.Chmod(sock, 0o660); err != nil {
+		fatalf(1, "%v", err)
+	}
+	defer al.Close()
+	go http.Serve(al, node.AdminHandler())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

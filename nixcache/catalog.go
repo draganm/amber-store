@@ -67,6 +67,16 @@ func (c *Catalog) AddList(r io.Reader) (int, error) {
 	return grew, nil
 }
 
+// Merge adds o's entries to c.
+func (c *Catalog) Merge(o *Catalog) {
+	o.mu.RLock()
+	set := bytes.Clone(o.set)
+	o.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.set = mergeSets(c.set, set)
+}
+
 // Contains reports whether hp is catalogued.
 func (c *Catalog) Contains(hp string) bool {
 	if len(hp) != hashPartLen {

@@ -1,6 +1,8 @@
 package nixcache_test
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -207,5 +209,70 @@ func TestNodeGCBarrier(t *testing.T) {
 	defer ps.Close()
 	if has, err := ps.Has(orphan.Key); err != nil || has {
 		t.Fatalf("orphan survived (has=%v, err=%v)", has, err)
+	}
+}
+
+// TestGCAdminEndpoint: GC runs on the admin handler and is absent
+// from the public substituter.
+func TestGCAdminEndpoint(t *testing.T) {
+	u := newUpstream(t, "zstd", nil)
+	n, srv, _ := newNode(t, u, nil)
+	admin := httptest.NewServer(n.AdminHandler())
+	t.Cleanup(admin.Close)
+
+	resp, err := http.Post(admin.URL+"/-/gc", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Contains(body, []byte("bytes freed:")) {
+		t.Fatalf("admin gc: %d %s", resp.StatusCode, body)
+	}
+	if st, _ := getBody(t, admin.URL+"/-/gc"); st != 405 {
+		t.Fatalf("GET on admin gc: %d", st)
+	}
+	resp, err = http.Post(srv.URL+"/-/gc", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == 200 {
+		t.Fatal("gc reachable on the substituter")
+	}
+}
+
+// A second cycle during the first's mark would reset the shared write
+// barrier; it must fail fast instead.
+func TestNodeGCRejectsOverlappingCycle(t *testing.T) {
+	u := newUpstream(t, "zstd", nil)
+	n, _, _ := newNode(t, u, nil)
+	admin := httptest.NewServer(n.AdminHandler())
+	t.Cleanup(admin.Close)
+
+	var overlapping error
+	var adminStatus int
+	nixcache.SetMidMark(n, func() {
+		_, overlapping = n.GC(0)
+		resp, err := http.Post(admin.URL+"/-/gc", "", nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		resp.Body.Close()
+		adminStatus = resp.StatusCode
+	})
+	if _, err := n.GC(0); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(overlapping, nixcache.ErrGCRunning) {
+		t.Fatalf("overlapping GC error = %v, want ErrGCRunning", overlapping)
+	}
+	if adminStatus != http.StatusConflict {
+		t.Fatalf("admin gc during a cycle: %d, want 409", adminStatus)
+	}
+	nixcache.SetMidMark(n, nil)
+	if _, err := n.GC(0); err != nil {
+		t.Fatal(err)
 	}
 }

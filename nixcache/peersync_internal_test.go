@@ -35,6 +35,7 @@ func TestPeerRecord(t *testing.T) {
 	} {
 		pi := ni.pathInfo(key.Key{})
 		pi.Sigs = []string{sig, "evil:AAAA"}
+		pi.AgedAt = 1
 		if tc.mod != nil {
 			tc.mod(&pi)
 		}
@@ -42,7 +43,7 @@ func TestPeerRecord(t *testing.T) {
 		if ok != tc.ok {
 			t.Fatalf("%s: ok=%v, want %v", tc.name, ok, tc.ok)
 		}
-		if ok && len(got.Sigs) != 1 {
+		if ok && (len(got.Sigs) != 1 || got.AgedAt != 0) {
 			t.Fatalf("%s: unsigned fields kept: %+v", tc.name, got)
 		}
 	}

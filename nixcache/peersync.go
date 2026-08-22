@@ -22,7 +22,11 @@ func (n *Node) SyncPeers(ctx context.Context) {
 	for _, id := range n.peerIDs() {
 		src := &PeerSource{Swarm: n.cfg.Swarm, ID: id}
 		root, err := src.indexRoot(ctx)
-		if err != nil || root == (key.Key{}) {
+		if err != nil {
+			slog.Warn("peer index sync", "peer", id, "err", err)
+			continue
+		}
+		if root == (key.Key{}) {
 			continue
 		}
 		n.peerMu.Lock()
@@ -121,6 +125,7 @@ func (n *Node) peerRecord(pi PathInfo, hashpart string) (PathInfo, bool) {
 		return PathInfo{}, false
 	}
 	pi.Sigs = sigs
+	pi.AgedAt = 0
 	return pi, true
 }
 
