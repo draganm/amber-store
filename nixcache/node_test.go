@@ -6,19 +6,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/draganm/amber-store/nixcache"
 	"github.com/klauspost/compress/zstd"
+	"github.com/tmc/go-iroh/netaddr"
+	"github.com/tmc/go-iroh/relay"
 )
 
-func newNode(t *testing.T, u *upstream, mod func(*nixcache.NodeConfig)) (*nixcache.Node, *httptest.Server) {
+func newNode(t *testing.T, u *upstream, mod func(*nixcache.NodeConfig)) (*nixcache.Node, *httptest.Server, *nixcache.Swarm) {
 	t.Helper()
 	cfg := nixcache.NodeConfig{
 		Dir:         t.TempDir(),
 		Upstream:    u.srv.URL,
 		TrustedKeys: []string{"test-1:" + b64(u.pub)},
+		Swarm:       testSwarm(t),
 	}
 	if mod != nil {
 		mod(&cfg)
@@ -30,7 +34,29 @@ func newNode(t *testing.T, u *upstream, mod func(*nixcache.NodeConfig)) (*nixcac
 	t.Cleanup(func() { n.Close() })
 	srv := httptest.NewServer(n.Handler())
 	t.Cleanup(srv.Close)
-	return n, srv
+	return n, srv, cfg.Swarm
+}
+
+func testSwarm(t testing.TB) *nixcache.Swarm {
+	t.Helper()
+	sw, err := nixcache.NewSwarm(t.Context(), nixcache.SwarmOpts{
+		KeyPath: t.TempDir() + "/p2p.key",
+		Bind:    netip.MustParseAddrPort("127.0.0.1:0"),
+		Relay:   relay.ModeDisabled(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sw.Close() })
+	return sw
+}
+
+func swarmPeers(sws ...*nixcache.Swarm) []netaddr.EndpointAddr {
+	out := make([]netaddr.EndpointAddr, len(sws))
+	for i, sw := range sws {
+		out[i] = sw.Addr()
+	}
+	return out
 }
 
 func b64(pub []byte) string {
@@ -44,7 +70,7 @@ func TestNodeEndToEnd(t *testing.T) {
 	}))
 	defer catalog.Close()
 
-	node, srv := newNode(t, u, func(c *nixcache.NodeConfig) {
+	node, srv, _ := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
 	})
 	node.SyncCatalog(t.Context())
@@ -98,7 +124,7 @@ func TestNodeEndToEnd(t *testing.T) {
 
 func TestNodeUncataloguedMiss(t *testing.T) {
 	u := newUpstream(t, "zstd", nil)
-	_, srv := newNode(t, u, nil)
+	_, srv, _ := newNode(t, u, nil)
 	resp, err := http.Get(srv.URL + "/" + hashPart(7) + ".narinfo")
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +149,7 @@ func TestNodeEviction(t *testing.T) {
 	defer catalog.Close()
 
 	var dir string
-	node, srv := newNode(t, u, func(c *nixcache.NodeConfig) {
+	node, srv, _ := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
 		c.BudgetBytes = 10 << 10 // fits two ~4KiB NARs, not three
 		dir = c.Dir
@@ -183,7 +209,7 @@ func TestNodePersistence(t *testing.T) {
 	}))
 	defer catalog.Close()
 
-	n1, srv1 := newNode(t, u, func(c *nixcache.NodeConfig) {
+	n1, srv1, _ := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
 		dir = c.Dir
 	})

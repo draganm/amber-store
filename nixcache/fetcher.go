@@ -33,10 +33,11 @@ type Fetcher struct {
 	Client *http.Client
 }
 
-// FetchPath fetches, verifies, and ingests one store path: narinfo signature
-// against Trusted, then the NAR, then the round-trip gate — the imported tree
-// re-exported must hash to the signed NarHash. Nothing is returned (and so
-// nothing indexed or pinned) unless every check passes.
+type trustedKeys = map[string]ed25519.PublicKey
+
+// FetchPath fetches and verifies one store path: narinfo signature, then
+// the round-trip gate — the imported tree re-exported must hash to the
+// signed NarHash. Nothing is returned unless every check passes.
 func (f *Fetcher) FetchPath(ctx context.Context, hashpart string) (PathInfo, error) {
 	n, err := f.fetchNarinfo(ctx, hashpart)
 	if err != nil {
@@ -76,6 +77,12 @@ func (f *Fetcher) fetchNarinfo(ctx context.Context, hashpart string) (Narinfo, e
 	if err != nil {
 		return Narinfo{}, err
 	}
+	return parseVerifiedNarinfo(doc, hashpart, f.Trusted)
+}
+
+// parseVerifiedNarinfo parses a narinfo document and requires that it
+// answers the queried hashpart and carries at least one trusted signature.
+func parseVerifiedNarinfo(doc []byte, hashpart string, trusted trustedKeys) (Narinfo, error) {
 	n, err := ParseNarinfo(doc)
 	if err != nil {
 		return Narinfo{}, err
@@ -84,7 +91,7 @@ func (f *Fetcher) fetchNarinfo(ctx context.Context, hashpart string) (Narinfo, e
 		return Narinfo{}, fmt.Errorf("nixcache: narinfo for %s answers query %s", n.StorePath, hashpart)
 	}
 	for _, sig := range n.Sigs {
-		if n.VerifySig(sig, f.Trusted) {
+		if n.VerifySig(sig, trusted) {
 			return n, nil
 		}
 	}

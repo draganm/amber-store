@@ -27,7 +27,7 @@ func TestStockNixSubstitutes(t *testing.T) {
 		io.WriteString(w, "/nix/store/"+hashPart(7)+"-upstream-1.0\n")
 	}))
 	defer catalog.Close()
-	node, srv := newNode(t, u, func(c *nixcache.NodeConfig) {
+	node, srv, _ := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
 	})
 	node.SyncCatalog(t.Context())

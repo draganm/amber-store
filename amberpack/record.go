@@ -164,6 +164,15 @@ func AppendPayload(dst []byte, flags byte, ulen uint32, stored []byte) ([]byte, 
 	if flags&flagZstd == 0 {
 		return append(dst, stored...), nil
 	}
+	// The decoder is capped at dst's spare capacity (DecodeAllCapLimit), so
+	// give it exactly ulen: enough for a well-formed record, and the bound
+	// that stops a bomb at what the header admits to.
+	if cap(dst)-len(dst) < int(ulen) {
+		grown := make([]byte, len(dst), len(dst)+int(ulen))
+		copy(grown, dst)
+		dst = grown
+	}
+	dst = dst[: len(dst) : len(dst)+int(ulen)]
 	out, err := zstdDec.DecodeAll(stored, dst)
 	if err != nil {
 		return nil, fmt.Errorf("%w: zstd: %v", ErrCorrupt, err)

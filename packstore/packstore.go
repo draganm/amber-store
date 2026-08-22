@@ -603,34 +603,14 @@ func (s *Store) GetRecord(k key.Key) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
-// ViewRecord calls fn with k's record, borrowing the sealed segment's
-// mmap. fn must not retain the slice and should not block, since the
-// read lock is held for the call.
+// ViewRecord calls fn with a copy of k's record, outside the store lock:
+// fn typically writes to a network peer and may stall.
 func (s *Store) ViewRecord(k key.Key, fn func([]byte) error) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.closed {
-		return ErrClosed
+	rec, err := s.GetRecord(k)
+	if err != nil {
+		return err
 	}
-	if s.active != nil {
-		if loc, ok := s.active.index[k]; ok {
-			rec := make([]byte, amberpack.RecHeaderSize+int(loc.slen))
-			if _, err := s.active.f.ReadAt(rec, loc.off); err != nil {
-				return err
-			}
-			return fn(rec)
-		}
-	}
-	for i := len(s.sealed) - 1; i >= 0; i-- {
-		found, err := s.sealed[i].viewRecord(k, fn)
-		if err != nil {
-			return err
-		}
-		if found {
-			return nil
-		}
-	}
-	return ErrNotFound
+	return fn(rec)
 }
 
 // StoredSize returns the stored payload length under k from the index

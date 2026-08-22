@@ -3,12 +3,17 @@ package remotesync_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/remotesync"
 )
 
@@ -172,4 +177,90 @@ func (d *drippingWriter) Write(p []byte) (int, error) {
 		p = p[n:]
 	}
 	return written, nil
+}
+
+// slowTreeSource serves a real tree from memory, counting fetches per key
+// and delaying each batch so concurrent pulls overlap.
+type slowTreeSource struct {
+	keys []key.Key
+	objs map[key.Key][]byte
+
+	mu      sync.Mutex
+	fetched map[key.Key]int
+}
+
+func (s *slowTreeSource) ReachableKeys(ctx context.Context, root key.Key) ([]key.Key, error) {
+	return s.keys, nil
+}
+
+func (s *slowTreeSource) FetchObjects(ctx context.Context, keys []key.Key, onBytes func(int)) ([]fstree.Object, error) {
+	time.Sleep(50 * time.Millisecond)
+	s.mu.Lock()
+	var objs []fstree.Object
+	for _, k := range keys {
+		s.fetched[k]++
+		objs = append(objs, fstree.Object{Key: k, Bytes: s.objs[k]})
+	}
+	s.mu.Unlock()
+	return objs, nil
+}
+
+// TestConcurrentPullsShareFetches: two pulls of the same tree into one
+// store fetch every chunk exactly once between them; the in-flight
+// registry makes the second pull wait for the first instead of
+// re-downloading.
+func TestConcurrentPullsShareFetches(t *testing.T) {
+	seed, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Close()
+	root := buildTree(t, seed)
+	src := &slowTreeSource{objs: map[key.Key][]byte{}, fetched: map[key.Key]int{}}
+	keys, err := fstree.ReachableKeys(root, seed.Get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		b, err := seed.Get(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.keys = append(src.keys, k)
+		src.objs[k] = b
+	}
+
+	local := newLocalStore(t)
+	var eg errgroup.Group
+	for range 2 {
+		eg.Go(func() error {
+			_, err := remotesync.Pull(context.Background(), local, src, root, remotesync.Opts{})
+			return err
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	for k, n := range src.fetched {
+		if n != 1 {
+			t.Fatalf("key %s fetched %d times", k, n)
+		}
+	}
+	if got, err := fstree.ReachableKeys(root, local.Get); err != nil || len(got) != len(keys) {
+		t.Fatalf("local tree incomplete: %v, %d keys", err, len(got))
+	}
+}
+
+func TestPullMaxBytes(t *testing.T) {
+	h := newHarness(t)
+	root := buildTree(t, h.store)
+	local := newLocalStore(t)
+
+	_, err := remotesync.Pull(context.Background(), local, h.rc(t), root, remotesync.Opts{MaxBytes: 1, BatchBytes: 1})
+	if !errors.Is(err, remotesync.ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if _, err := remotesync.Pull(context.Background(), local, h.rc(t), root, remotesync.Opts{MaxBytes: 1 << 20}); err != nil {
+		t.Fatalf("generous cap: %v", err)
+	}
 }

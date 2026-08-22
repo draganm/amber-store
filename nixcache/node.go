@@ -18,6 +18,9 @@ import (
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/remotesync"
+	ikey "github.com/tmc/go-iroh/key"
+	"github.com/tmc/go-iroh/netaddr"
 )
 
 // NodeConfig configures a local-only cache node.
@@ -26,6 +29,15 @@ type NodeConfig struct {
 	Upstream    string   // upstream cache base URL
 	TrustedKeys []string // "name:base64" narinfo signing keys
 	CatalogURLs []string // store-paths list URLs, synced periodically
+	// Swarm joins the swarm. Nil disables peering. Peers are probed before
+	// upstream.
+	Swarm           *Swarm
+	Peers           []netaddr.EndpointAddr
+	PeerConcurrency int   // cap on in-flight peer-serving requests; 0: 4, seeders 64
+	PeerByteRate    int64 // peer-serving bandwidth cap, bytes/second; 0: unlimited
+	// Seed ingests every catalogued path eagerly, so the node holds the
+	// closure before anyone asks: the seeder role.
+	Seed        bool
 	SyncEvery   time.Duration
 	BudgetBytes int64 // eviction target for the NarSize sum. 0: unlimited
 	Client      *http.Client
@@ -48,6 +60,14 @@ type Node struct {
 	gcMu sync.RWMutex
 
 	midMark func() // test hook, runs between GC's mark and sweep
+
+	peerMu    sync.Mutex
+	peerRoots map[ikey.EndpointID]key.Key  // last synced index root per peer
+	peerSet   map[ikey.EndpointID]struct{} // static peers plus discovered ones
+
+	catalogTags sync.Map          // catalog URL -> ETag of the last ingested list
+	swarmStats  *remotesync.Stats // per-peer speed estimates, all pulls
+	seedRetry   bool              // sync-loop state: last seed pass had failures
 
 	evict          *evictPolicy // nil without a budget
 	evictedSinceGC atomic.Int64
@@ -76,7 +96,9 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root}
+	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root,
+		peerRoots: map[ikey.EndpointID]key.Key{}, peerSet: map[ikey.EndpointID]struct{}{},
+		swarmStats: remotesync.NewStats()}
 	if cfg.BudgetBytes > 0 {
 		n.evict = newEvictPolicy(cfg.BudgetBytes)
 		if err := n.seedEvict(); err != nil {
@@ -87,11 +109,31 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 	n.server = &Server{
 		Store:   store,
 		Index:   n.indexRoot,
-		Catalog: catalog.Contains,
+		Catalog: n.servable,
 		Fetch:   n.fetch,
 		Touch:   n.touch,
+
+		PeerConcurrency: peerConcurrency(cfg),
+		PeerByteRate:    cfg.PeerByteRate,
+	}
+	if cfg.Swarm != nil {
+		n.server.Attach(cfg.Swarm)
+		n.server.Ensure = n.ensure
+		for _, a := range cfg.Peers {
+			n.addPeer(a)
+		}
 	}
 	return n, nil
+}
+
+// peerConcurrency lets seeders serve a crowd: 64 streams saturate a
+// seeder's uplink where 4 bottleneck the swarm. A leaf's uplink binds
+// before its slot count, so the abuse-bounding 4 stays.
+func peerConcurrency(cfg NodeConfig) int {
+	if cfg.PeerConcurrency == 0 && cfg.Seed {
+		return 64
+	}
+	return cfg.PeerConcurrency
 }
 
 // seedEvict rebuilds the policy from the persisted index. Queue positions
@@ -159,9 +201,20 @@ func (n *Node) indexRoot() key.Key {
 	return n.root
 }
 
-// fetch ingests one catalogued path: fetch+verify into a memory buffer, then
-// commit the objects and index the path. A failed gate writes nothing.
+// fetch ingests one catalogued path, probing peers (chunk-level pull)
+// before upstream (whole NAR, nix's protocol leaves no choice).
 func (n *Node) fetch(ctx context.Context, hashpart string) (PathInfo, error) {
+	if n.cfg.Swarm != nil {
+		if pi, err := n.fetchFromPeers(ctx, hashpart); err == nil {
+			return pi, nil
+		}
+	}
+	return n.fetchOrigin(ctx, hashpart)
+}
+
+// fetchOrigin fetches upstream, verifying into a memory buffer first, then
+// committing the objects and indexing the path. A failed gate writes nothing.
+func (n *Node) fetchOrigin(ctx context.Context, hashpart string) (PathInfo, error) {
 	buf := newObjectBuffer()
 	f := &Fetcher{
 		BaseURL: n.cfg.Upstream,
@@ -231,7 +284,7 @@ func (n *Node) publish(upserts []PathInfo, deletes []string) error {
 }
 
 func (n *Node) syncLoop(ctx context.Context) {
-	n.SyncCatalog(ctx)
+	n.syncOnce(ctx)
 	if n.cfg.SyncEvery <= 0 {
 		return
 	}
@@ -242,37 +295,64 @@ func (n *Node) syncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			n.SyncCatalog(ctx)
+			n.syncOnce(ctx)
 		}
 	}
 }
 
-// SyncCatalog fetches all configured catalog URLs once and persists.
-func (n *Node) SyncCatalog(ctx context.Context) {
+// syncOnce refreshes catalog and peer indexes. A seeder walks the catalog
+// only when it changed or the previous pass left failures to retry.
+func (n *Node) syncOnce(ctx context.Context) {
+	changed := n.SyncCatalog(ctx)
+	n.SyncPeers(ctx)
+	if n.cfg.Seed && (changed || n.seedRetry) {
+		n.seedRetry = n.SeedPass(ctx) > 0
+	}
+}
+
+// servable gates narinfo misses: the catalog covers upstream, and a synced
+// peer index covers paths our catalog has not caught up with.
+func (n *Node) servable(hashpart string) bool {
+	return n.catalog.Contains(hashpart) || n.peersHave(hashpart)
+}
+
+// SyncCatalog fetches all configured catalog URLs once, persists, and
+// reports whether any list was re-ingested (vs answered 304).
+func (n *Node) SyncCatalog(ctx context.Context) bool {
+	changed := false
 	for _, url := range n.cfg.CatalogURLs {
-		if err := n.addCatalogURL(ctx, url); err != nil {
+		ingested, err := n.addCatalogURL(ctx, url)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "nixcache: catalog sync %s: %v\n", url, err)
 		}
+		changed = changed || ingested
 	}
-	if len(n.cfg.CatalogURLs) > 0 {
+	if changed {
 		if err := n.catalog.Save(n.path("catalog")); err != nil {
 			fmt.Fprintf(os.Stderr, "nixcache: catalog save: %v\n", err)
 		}
 	}
+	return changed
 }
 
-func (n *Node) addCatalogURL(ctx context.Context, url string) error {
+func (n *Node) addCatalogURL(ctx context.Context, url string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if tag, ok := n.catalogTags.Load(url); ok {
+		req.Header.Set("If-None-Match", tag.(string))
 	}
 	resp, err := cmp.Or(n.cfg.Client, http.DefaultClient).Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified {
+		return false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return errors.New(resp.Status)
+		return false, errors.New(resp.Status)
 	}
 	compression := "none"
 	if filepath.Ext(url) == ".xz" {
@@ -280,11 +360,16 @@ func (n *Node) addCatalogURL(ctx context.Context, url string) error {
 	}
 	body, err := decompress(compression, resp.Body)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer body.Close()
-	_, err = n.catalog.AddList(body)
-	return err
+	if _, err := n.catalog.AddList(body); err != nil {
+		return false, err
+	}
+	if tag := resp.Header.Get("Etag"); tag != "" {
+		n.catalogTags.Store(url, tag)
+	}
+	return true, nil
 }
 
 // objectBuffer holds a fetch's objects until the ingest gate passes.

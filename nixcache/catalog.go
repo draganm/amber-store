@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"sort"
@@ -108,6 +109,20 @@ func (c *Catalog) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// All iterates a snapshot of the catalogued hashparts.
+func (c *Catalog) All() iter.Seq[string] {
+	c.mu.RLock()
+	set := bytes.Clone(c.set)
+	c.mu.RUnlock()
+	return func(yield func(string) bool) {
+		for i := 0; i+hashPartLen <= len(set); i += hashPartLen {
+			if !yield(string(set[i : i+hashPartLen])) {
+				return
+			}
+		}
+	}
 }
 
 func (c *Catalog) entry(i int) string {

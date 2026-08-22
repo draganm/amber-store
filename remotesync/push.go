@@ -40,6 +40,9 @@ type Opts struct {
 	// one. n is an increment, not a cumulative count. Keep it cheap: it is
 	// called once per network read/write.
 	OnBytes func(n int)
+	// MaxBytes, when > 0, fails a Pull with ErrTooLarge once more than
+	// this many payload bytes have been fetched. Push ignores it.
+	MaxBytes int64
 }
 
 func (o Opts) batchBytes() uint64 {

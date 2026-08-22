@@ -37,8 +37,8 @@ func (s *Store) endWrite(t *writeToken) {
 	s.writesMu.Unlock()
 }
 
-// OldestInflightWrite returns the start time of the oldest Put, WriteBatch
-// or WriteParallel still in progress. The GC horizon never passes it.
+// OldestInflightWrite returns the start time of the oldest Put, WriteBatch,
+// WriteParallel or WriteRecords still in progress. The GC horizon never passes it.
 func (s *Store) OldestInflightWrite() (time.Time, bool) {
 	s.writesMu.Lock()
 	defer s.writesMu.Unlock()

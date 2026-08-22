@@ -1,8 +1,11 @@
 package remotesync
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -62,5 +65,40 @@ func TestLocalMissingClassifiesPartialTree(t *testing.T) {
 	}
 	if m, err := localMissing(leaf.Key, store); err != nil || len(m) != 0 {
 		t.Fatalf("complete tree: missing = %v, err = %v, want none", m, err)
+	}
+}
+
+type emptySource struct{ root key.Key }
+
+func (e emptySource) ReachableKeys(context.Context, key.Key) ([]key.Key, error) {
+	return []key.Key{e.root}, nil
+}
+
+func (emptySource) FetchObjects(context.Context, []key.Key, func(int)) ([]fstree.Object, error) {
+	return nil, nil
+}
+
+func (emptySource) StreamRecords(context.Context, []key.Key, func(int), func(amberpack.RawRecord) error) error {
+	return nil
+}
+
+// A source that answers OK but delivers nothing must fail the pull, not
+// be asked again forever.
+func TestPullFailsOnSourceDeliveringNothing(t *testing.T) {
+	store, err := packstore.Open(t.TempDir(), packstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	obj, err := fstree.EncodeBlob([]byte("never delivered"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for _, src := range []Source{emptySource{obj.Key}, struct{ Source }{emptySource{obj.Key}}} {
+		if _, err := Pull(ctx, store, src, obj.Key, Opts{}); err == nil || ctx.Err() != nil {
+			t.Fatalf("%T: err=%v, ctx=%v", src, err, ctx.Err())
+		}
 	}
 }

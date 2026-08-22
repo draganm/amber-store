@@ -153,51 +153,152 @@ func Lookup(root key.Key, hashpart string, get func(key.Key) ([]byte, error)) (P
 	return DecodeRecord(e.LinkTarget)
 }
 
-// Merge builds a new index from prev (zero key: empty) with upserts applied
-// and hashparts in deletes removed, returning the new root. The result is
-// identical to building the final path set in one batch.
+// Merge builds a new index from prev (zero key: empty) with upserts
+// applied and deletes removed. Untouched leaves are reused by key, so a
+// small change costs O(changed leaves).
 func Merge(prev key.Key, upserts []PathInfo, deletes []string, get func(key.Key) ([]byte, error), emit fstree.Emit) (key.Key, error) {
-	ups, err := upsertEntries(upserts)
+	m, err := newMerger(upserts, deletes, emit)
 	if err != nil {
 		return key.Key{}, err
 	}
-	del := make(map[string]bool, len(deletes))
-	for _, h := range deletes {
-		del[h] = true
-	}
-
-	db := fstree.NewDirBuilder(indexChunker())
-	add := func(e fstree.Entry) error {
-		if del[string(e.Name)] {
-			return nil
-		}
-		return db.AddEntry(emit, e)
-	}
-
-	for old, err := range indexEntries(prev, get) {
+	for leaf, err := range indexLeaves(prev, get) {
 		if err != nil {
 			return key.Key{}, err
 		}
-		for len(ups) > 0 && bytes.Compare(ups[0].Name, old.Name) < 0 {
-			if err := add(ups[0]); err != nil {
-				return key.Key{}, err
-			}
-			ups = ups[1:]
-		}
-		if len(ups) > 0 && bytes.Equal(ups[0].Name, old.Name) {
-			old = ups[0] // upsert replaces existing record
-			ups = ups[1:]
-		}
-		if err := add(old); err != nil {
+		if err := m.mergeLeaf(leaf, get); err != nil {
 			return key.Key{}, err
 		}
 	}
+	return m.finish()
+}
+
+type merger struct {
+	db      *fstree.DirBuilder
+	emit    fstree.Emit
+	ups     []fstree.Entry
+	del     map[string]bool
+	changes [][]byte // pending changed names, sorted
+}
+
+func newMerger(upserts []PathInfo, deletes []string, emit fstree.Emit) (*merger, error) {
+	ups, err := upsertEntries(upserts)
+	if err != nil {
+		return nil, err
+	}
+	del := make(map[string]bool, len(deletes))
+	changes := make([][]byte, 0, len(ups)+len(deletes))
 	for _, e := range ups {
-		if err := add(e); err != nil {
+		changes = append(changes, e.Name)
+	}
+	for _, h := range deletes {
+		del[h] = true
+		changes = append(changes, []byte(h))
+	}
+	slices.SortFunc(changes, bytes.Compare)
+	db := fstree.NewDirBuilder(indexChunker())
+	return &merger{db: db, emit: emit, ups: ups, del: del, changes: changes}, nil
+}
+
+// mergeLeaf reuses leaf verbatim when no pending change falls in its
+// range and the builder sits on a boundary. The final leaf never closed
+// on one, so it is always rebuilt.
+func (m *merger) mergeLeaf(leaf leafRef, get func(key.Key) ([]byte, error)) error {
+	touched := len(m.changes) > 0 && bytes.Compare(m.changes[0], leaf.sep) <= 0
+	if !leaf.last && !touched && m.db.Aligned() {
+		return m.db.AddSealedLeaf(m.emit, leaf.key, leaf.sep)
+	}
+	data, err := get(leaf.key)
+	if err != nil {
+		return err
+	}
+	entries, err := fstree.DecodeDirLeaf(data)
+	if err != nil {
+		return err
+	}
+	for _, old := range entries {
+		if err := m.mergeOld(old); err != nil {
+			return err
+		}
+	}
+	if !leaf.last {
+		for len(m.changes) > 0 && bytes.Compare(m.changes[0], leaf.sep) <= 0 {
+			m.changes = m.changes[1:]
+		}
+	}
+	return nil
+}
+
+func (m *merger) mergeOld(old fstree.Entry) error {
+	for len(m.ups) > 0 && bytes.Compare(m.ups[0].Name, old.Name) < 0 {
+		if err := m.add(m.ups[0]); err != nil {
+			return err
+		}
+		m.ups = m.ups[1:]
+	}
+	if len(m.ups) > 0 && bytes.Equal(m.ups[0].Name, old.Name) {
+		old = m.ups[0] // upsert replaces existing record
+		m.ups = m.ups[1:]
+	}
+	return m.add(old)
+}
+
+func (m *merger) add(e fstree.Entry) error {
+	if m.del[string(e.Name)] {
+		return nil
+	}
+	return m.db.AddEntry(m.emit, e)
+}
+
+func (m *merger) finish() (key.Key, error) {
+	for _, e := range m.ups {
+		if err := m.add(e); err != nil {
 			return key.Key{}, err
 		}
 	}
-	return db.Finish(emit)
+	return m.db.Finish(m.emit)
+}
+
+type leafRef struct {
+	key  key.Key
+	sep  []byte // greatest entry name, nil for the final leaf
+	last bool
+}
+
+// indexLeaves yields prev's DirLeaf chunks in order, undecoded.
+func indexLeaves(prev key.Key, get func(key.Key) ([]byte, error)) iter.Seq2[leafRef, error] {
+	return func(yield func(leafRef, error) bool) {
+		if prev == (key.Key{}) {
+			return
+		}
+		walkLeaves(prev, nil, true, get, yield)
+	}
+}
+
+func walkLeaves(k key.Key, sep []byte, last bool, get func(key.Key) ([]byte, error), yield func(leafRef, error) bool) bool {
+	if k.Type() == key.DirLeaf {
+		if last {
+			sep = nil
+		}
+		return yield(leafRef{key: k, sep: sep, last: last}, nil)
+	}
+	data, err := get(k)
+	if err != nil {
+		return yield(leafRef{}, err)
+	}
+	pairs, err := fstree.DecodeDirNode(data)
+	if err != nil {
+		return yield(leafRef{}, err)
+	}
+	for i, p := range pairs {
+		ck, err := key.Parse(p.ChildKey)
+		if err != nil {
+			return yield(leafRef{}, err)
+		}
+		if !walkLeaves(ck, p.SepName, last && i == len(pairs)-1, get, yield) {
+			return false
+		}
+	}
+	return true
 }
 
 // upsertEntries encodes upserts as index entries, sorted by hashpart.

@@ -373,21 +373,12 @@ func (g *sealedSegment) has(k key.Key) bool {
 }
 
 // get returns k's payload (caller-owned), whether it was found, and any
-// corruption error. The hot path does not CRC-check; that is scrub's job.
+// corruption error. The hot path does not CRC-check. That is scrub's job.
 func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
-	if !g.fv.filter.Contains(filterKey(k)) {
-		return nil, false, nil
+	off, end, ok, err := g.span(k)
+	if err != nil || !ok {
+		return nil, false, err
 	}
-	off, slen, ok := g.fv.lookup(k)
-	if !ok {
-		return nil, false, nil
-	}
-	bodyLen := uint64(g.fv.bodyLen)
-	if off < uint64(len(magicHeader)) || off > bodyLen ||
-		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
-		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
-	}
-	end := off + amberpack.RecHeaderSize + uint64(slen)
 	h := g.mm[off : off+amberpack.RecHeaderSize]
 	flags := h[33]
 	ulen := binary.BigEndian.Uint32(h[34:38])
@@ -398,45 +389,17 @@ func (g *sealedSegment) get(k key.Key) ([]byte, bool, error) {
 	return data, true, nil
 }
 
-// getRecord returns a caller-owned copy of k's full on-disk record (header +
-// stored payload, undecoded), whether it was found, and any corruption error.
-// Like get, the hot path does not CRC-check; the record is validated by the
-// receiving Reader on the push path.
+// getRecord returns a caller-owned copy of k's full on-disk record,
+// undecoded. No CRC check, like get. The receiving Reader validates on
+// the push path.
 func (g *sealedSegment) getRecord(k key.Key) ([]byte, bool, error) {
-	if !g.fv.filter.Contains(filterKey(k)) {
-		return nil, false, nil
+	off, end, ok, err := g.span(k)
+	if err != nil || !ok {
+		return nil, false, err
 	}
-	off, slen, ok := g.fv.lookup(k)
-	if !ok {
-		return nil, false, nil
-	}
-	bodyLen := uint64(g.fv.bodyLen)
-	if off < uint64(len(magicHeader)) || off > bodyLen ||
-		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
-		return nil, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
-	}
-	end := off + amberpack.RecHeaderSize + uint64(slen)
 	rec := make([]byte, end-off)
 	copy(rec, g.mm[off:end])
 	return rec, true, nil
-}
-
-// viewRecord calls fn with k's record as a slice of the segment's mmap; fn
-// must not retain it.
-func (g *sealedSegment) viewRecord(k key.Key, fn func([]byte) error) (bool, error) {
-	if !g.fv.filter.Contains(filterKey(k)) {
-		return false, nil
-	}
-	off, slen, ok := g.fv.lookup(k)
-	if !ok {
-		return false, nil
-	}
-	bodyLen := uint64(g.fv.bodyLen)
-	if off < uint64(len(magicHeader)) || off > bodyLen ||
-		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
-		return false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
-	}
-	return true, fn(g.mm[off : off+amberpack.RecHeaderSize+uint64(slen)])
 }
 
 // storedSize returns k's stored (post-compression) payload length and whether
@@ -447,6 +410,24 @@ func (g *sealedSegment) storedSize(k key.Key) (uint32, bool) {
 	}
 	_, slen, ok := g.fv.lookup(k)
 	return slen, ok
+}
+
+// span returns the [start,end) byte range of k's full record within this
+// segment, bounds-checked against the body.
+func (g *sealedSegment) span(k key.Key) (start, end uint64, ok bool, err error) {
+	if !g.fv.filter.Contains(filterKey(k)) {
+		return 0, 0, false, nil
+	}
+	off, slen, ok := g.fv.lookup(k)
+	if !ok {
+		return 0, 0, false, nil
+	}
+	bodyLen := uint64(g.fv.bodyLen)
+	if off < uint64(len(magicHeader)) || off > bodyLen ||
+		uint64(amberpack.RecHeaderSize)+uint64(slen) > bodyLen-off {
+		return 0, 0, false, fmt.Errorf("%w: %s: index entry out of bounds", ErrCorrupt, g.path)
+	}
+	return off, off + uint64(amberpack.RecHeaderSize) + uint64(slen), true, nil
 }
 
 // locate returns k's record offset within this segment and whether it was

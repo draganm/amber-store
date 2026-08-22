@@ -20,7 +20,7 @@ func TestNodeGC(t *testing.T) {
 	defer catalog.Close()
 
 	var dir string
-	n1, srv1 := newNode(t, u, func(c *nixcache.NodeConfig) {
+	n1, srv1, _ := newNode(t, u, func(c *nixcache.NodeConfig) {
 		c.CatalogURLs = []string{catalog.URL + "/store-paths"}
 		dir = c.Dir
 	})

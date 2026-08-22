@@ -251,8 +251,9 @@ func (s *Store) copyLive(victims []*sealedSegment, live func(key.Key) bool, pace
 	})
 	for range runtime.GOMAXPROCS(0) {
 		pipe.Go(func() error {
+			var scratch []byte
 			for c := range cands {
-				if err := verifyRecord(c.g, c.e, c.rec); err != nil {
+				if err := verifyRecord(c.g, c.e, c.rec, &scratch); err != nil {
 					cancel()
 					return err
 				}
@@ -324,28 +325,11 @@ func (s *Store) removeVictims(victims []*sealedSegment, stats *CompactStats) err
 	return firstErr
 }
 
-// verifyRecord checks rec against its index entry: framing CRC, key match,
-// and the payload rehashed against the key.
-func verifyRecord(g *sealedSegment, e indexEntry, rec []byte) error {
-	if err := checkRecord(e.k, rec); err != nil {
+// verifyRecord checks rec against its index entry, reusing *scratch across
+// calls for the decompressed payload.
+func verifyRecord(g *sealedSegment, e indexEntry, rec []byte, scratch *[]byte) error {
+	if err := checkRecord(e.k, rec, scratch); err != nil {
 		return fmt.Errorf("%w: %s: record at offset %d: %w", ErrCorrupt, g.path, e.off, err)
 	}
 	return nil
-}
-
-// checkRecord is the full record scrub: framing CRC, key match, and the
-// payload rehashed against the key.
-func checkRecord(k key.Key, rec []byte) error {
-	parsed, err := amberpack.ParseRecord(rec)
-	if err != nil {
-		return err
-	}
-	if parsed.Key != k {
-		return fmt.Errorf("record keyed %s, expected %s", parsed.Key, k)
-	}
-	payload, err := amberpack.DecodePayload(parsed.Flags, parsed.Ulen, rec[amberpack.RecHeaderSize:])
-	if err != nil {
-		return err
-	}
-	return verifyObject(Object{Key: k, Data: payload})
 }

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
@@ -17,6 +19,7 @@ import (
 type Store interface {
 	Get(key.Key) ([]byte, error)
 	ViewRecord(key.Key, func([]byte) error) error
+	ViewRecordSpans(keys []key.Key, maxSpan int, fn func([]byte) error) error
 }
 
 // Server is the loopback HTTP binary cache nix substitutes from.
@@ -36,8 +39,19 @@ type Server struct {
 	// Touch reports a narinfo served from the index (a cache hit). Nil: no
 	// accounting.
 	Touch func(hashpart string)
+	// PeerConcurrency caps in-flight /amber requests; over it: 429. <=0: 4.
+	PeerConcurrency int
+	// PeerByteRate caps /amber response bandwidth, bytes/second summed over
+	// requests. <=0: unlimited.
+	PeerByteRate int64
+	// PeerWriteTimeout aborts a response the peer stops reading for this
+	// long. <=0: 30s.
+	PeerWriteTimeout time.Duration
 
-	sf flights
+	sf       flights
+	peerOnce sync.Once
+	peerSem  chan struct{}
+	peerRate *byteLimiter
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +141,13 @@ func (s *Server) nar(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	bw.Flush()
 }
+
+// maxPeerKeys matches the puller's batch bound (remotesync.maxBatchKeys),
+// so any larger request is not a legitimate client.
+const maxPeerKeys = 8192
+
+// maxServeSpan bounds one coalesced write and its copy buffer.
+const maxServeSpan = 1 << 20
 
 func validHashPart(hp string) bool {
 	if len(hp) != hashPartLen {

@@ -1,6 +1,8 @@
 package fstree
 
 import (
+	"errors"
+
 	"github.com/draganm/amber-store/chunkers"
 	"github.com/draganm/amber-store/key"
 )
@@ -36,6 +38,19 @@ func (db *DirBuilder) AddEntry(emit Emit, e Entry) error {
 		return db.closeLeaf(emit)
 	}
 	return nil
+}
+
+// Aligned reports whether the builder sits at a leaf boundary.
+func (db *DirBuilder) Aligned() bool { return db.runLen == 0 }
+
+// AddSealedLeaf promotes an already-stored DirLeaf by key, with sep its
+// greatest entry name. Valid only when Aligned, since boundaries depend
+// only on entries since the last one. A final leaf is never reusable.
+func (db *DirBuilder) AddSealedLeaf(emit Emit, k key.Key, sep []byte) error {
+	if !db.Aligned() {
+		return errors.New("fstree: AddSealedLeaf mid-run")
+	}
+	return db.idx.AddChild(emit, k, sep)
 }
 
 func (db *DirBuilder) closeLeaf(emit Emit) error {

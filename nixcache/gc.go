@@ -13,7 +13,7 @@ import (
 func (n *Node) Liveness() ([]packstore.SegmentLiveness, error) {
 	n.gcMu.Lock()
 	defer n.gcMu.Unlock()
-	live, err := n.markLive(n.indexRoot())
+	live, err := n.markLive(n.indexRoot(), n.snapshotPeerRoots())
 	if err != nil {
 		return nil, err
 	}
@@ -27,9 +27,10 @@ func (n *Node) GC(minDeadRatio float64) (packstore.CompactStats, error) {
 	n.gcMu.Lock()
 	n.store.BeginBarrier()
 	root := n.indexRoot()
+	peerRoots := n.snapshotPeerRoots()
 	n.gcMu.Unlock()
 
-	live, err := n.markLive(root)
+	live, err := n.markLive(root, peerRoots)
 	if n.midMark != nil {
 		n.midMark()
 	}
@@ -43,12 +44,18 @@ func (n *Node) GC(minDeadRatio float64) (packstore.CompactStats, error) {
 	return n.store.Compact(live.Contains, packstore.CompactOpts{MinDeadRatio: minDeadRatio})
 }
 
-// markLive walks the index tree at root and every indexed path's object
-// tree. root must be a snapshot taken under gcMu. The walk may run
-// concurrently with ingests: it only touches objects reachable from the
-// snapshot, which no writer mutates.
-func (n *Node) markLive(root key.Key) (*packstore.MarkSet, error) {
+// markLive walks the index tree at root, every indexed path's object
+// tree, and each synced peer index (structure only: peer records point at
+// trees we may not hold). The roots must be snapshots taken under gcMu.
+// The walk may run concurrently with ingests: it only touches objects
+// reachable from the snapshots, which no writer mutates.
+func (n *Node) markLive(root key.Key, peerRoots []key.Key) (*packstore.MarkSet, error) {
 	live := n.store.NewMarkSet()
+	for _, pr := range peerRoots {
+		if err := n.markFrom(live, pr); err != nil {
+			return nil, err
+		}
+	}
 	if root == (key.Key{}) {
 		return live, nil
 	}

@@ -55,6 +55,15 @@ func (m *recStore) Get(k key.Key) ([]byte, error) {
 	return b, nil
 }
 
+func (m *recStore) ViewRecordSpans(keys []key.Key, _ int, fn func([]byte) error) error {
+	for _, k := range keys {
+		if err := m.ViewRecord(k, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *recStore) ViewRecord(k key.Key, fn func([]byte) error) error {
 	m.mu.Lock()
 	rec, ok := m.recs[k]
