@@ -67,3 +67,6 @@ func AgePass(n *Node, now time.Time) { n.agePass(now) }
 func LookupPath(n *Node, hashpart string) (PathInfo, error) {
 	return Lookup(n.indexRoot(), hashpart, n.store.Get)
 }
+
+// SetMidIngest installs a hook between object commit and publication.
+func SetMidIngest(n *Node, f func() error) { n.midIngest = f }

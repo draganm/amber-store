@@ -62,7 +62,8 @@ type Node struct {
 	gcMu    sync.RWMutex
 	cycleMu sync.Mutex // held for a whole GC cycle
 
-	midMark func() // test hook, runs between GC's mark and sweep
+	midMark   func()       // test hook, runs between GC's mark and sweep
+	midIngest func() error // test hook, runs between object commit and index publication
 
 	peerMu    sync.Mutex
 	peerRoots map[ikey.EndpointID]key.Key  // last synced index root per peer
@@ -256,6 +257,11 @@ func (n *Node) fetchOrigin(ctx context.Context, hashpart string) (PathInfo, erro
 	defer n.gcMu.RUnlock()
 	if err := n.store.WriteBatch(buf.seq()); err != nil {
 		return PathInfo{}, err
+	}
+	if n.midIngest != nil {
+		if err := n.midIngest(); err != nil {
+			return PathInfo{}, err
+		}
 	}
 	if err := n.publish([]PathInfo{pi}, nil); err != nil {
 		return PathInfo{}, err
