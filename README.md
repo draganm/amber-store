@@ -11,6 +11,13 @@ content.
 > FUSE filesystem through it.
 > The design is specified in [`architecture/`](architecture/).
 
+## nix-cached
+
+Built on this store: [`nix-cached`](docs/nix-cached.md), a peer-to-peer
+pull-through cache for cache.nixos.org. Machines share downloaded store
+paths with each other — over the LAN, the internet, and through NATs —
+while preserving upstream signatures.
+
 ## What it is
 
 Amber-Store models a POSIX-style filesystem as an immutable, deduplicated

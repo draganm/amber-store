@@ -6,8 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/netip"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,23 +45,43 @@ func main() {
 	flag.StringVar(&cfg.Upstream, "upstream", "https://cache.nixos.org", "upstream cache URL")
 	flag.Var(&trusted, "trusted-key", "trusted narinfo signing key name:base64 (repeatable)")
 	flag.Var(&catalogs, "catalog-url", "store-paths list URL (repeatable)")
-	flag.DurationVar(&cfg.SyncEvery, "sync-every", 5*time.Minute, "catalog and peer sync interval")
-	flag.DurationVar(&cfg.StallTimeout, "stall-timeout", time.Minute, "abort upstream transfers with no bytes for this long")
-	flag.DurationVar(&cfg.CatalogTTL, "catalog-ttl", 0, "drop paths this long after they leave the catalog (0: keep forever)")
-	flag.Int64Var(&cfg.BudgetBytes, "budget-bytes", 0, "refuse ingest above this store size (0: unlimited)")
+	cfg.SyncEvery = 5 * time.Minute
+	cfg.StallTimeout = time.Minute
+	flag.Var(durFlag{&cfg.SyncEvery}, "sync-every", "catalog and peer sync interval (default 5m)")
+	flag.Var(durFlag{&cfg.StallTimeout}, "stall-timeout", "abort upstream transfers with no bytes for this long (default 1m)")
+	flag.Var(durFlag{&cfg.CatalogTTL}, "catalog-ttl", "drop paths this long after they leave the catalog (0: keep forever)")
+	flag.Int64Var(&cfg.BudgetBytes, "budget-bytes", 0, "total NAR-size budget, evicts to fit (0: unlimited)")
 	flag.Int64Var(&cfg.PeerByteRate, "peer-byte-rate", 0, "peer-serving bandwidth cap, bytes/second (0: unlimited)")
 	flag.BoolVar(&cfg.Seed, "seed", false, "eagerly ingest every catalogued path")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage of nix-cached:")
+		var b strings.Builder
+		flag.CommandLine.SetOutput(&b)
+		flag.PrintDefaults()
+		flag.CommandLine.SetOutput(os.Stderr)
+		fmt.Fprint(os.Stderr, strings.ReplaceAll("\n"+b.String(), "\n  -", "\n  --")[1:])
+	}
 	flag.Parse()
 
 	if cfg.Dir == "" {
-		fmt.Fprintln(os.Stderr, "nix-cached: -dir is required")
-		os.Exit(2)
+		fatalf(2, "--dir is required")
 	}
 	if len(trusted) == 0 {
 		trusted = []string{"cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="}
 	}
 	cfg.TrustedKeys, cfg.CatalogURLs = trusted, catalogs
-
+	cfg.Upstream = strings.TrimRight(cfg.Upstream, "/")
+	for _, u := range append([]string{cfg.Upstream}, catalogs...) {
+		if p, err := url.Parse(u); err != nil || p.Scheme != "http" && p.Scheme != "https" {
+			fatalf(2, "%q is not an http(s) URL", u)
+		}
+	}
+	if cfg.SyncEvery <= 0 {
+		fatalf(2, "--sync-every must be positive")
+	}
+	if cfg.Seed && len(catalogs) == 0 {
+		fatalf(2, "--seed needs at least one --catalog-url")
+	}
 	if len(peers) > 0 || *p2pPort != 0 {
 		if *p2pPort == 0 {
 			*p2pPort = nixcache.DefaultP2PPort
