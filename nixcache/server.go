@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,8 +40,10 @@ type Server struct {
 	Ensure func(ctx context.Context, root key.Key) error
 	// Touch reports a narinfo served from the index (a cache hit). Nil: no
 	// accounting.
-	Touch func(hashpart string)
-	// PeerConcurrency caps in-flight /amber requests; over it: 429. <=0: 4.
+	Touch   func(hashpart string)
+	metrics *metrics // nil: no accounting
+
+	// PeerConcurrency caps in-flight /amber requests. Over it: 429. <=0: 4.
 	PeerConcurrency int
 	// PeerByteRate caps /amber response bandwidth, bytes/second summed over
 	// requests. <=0: unlimited.
@@ -73,30 +77,73 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) narinfo(w http.ResponseWriter, r *http.Request, hp string) {
 	if !validHashPart(hp) {
+		s.m().narinfoNotFound.Add(1)
 		http.NotFound(w, r)
 		return
 	}
 	pi, err := Lookup(s.Index(), hp, s.Store.Get)
-	if err == nil && s.Touch != nil {
+	hit := err == nil
+	if hit && s.Touch != nil {
 		s.Touch(hp)
 	}
 	if errors.Is(err, fstree.ErrNotFound) {
 		pi, err = s.fetch(r.Context(), hp)
 	}
+	var be *BackoffError
 	switch {
+	case err == nil && hit:
+		s.m().narinfoHit.Add(1)
 	case err == nil:
+		s.m().narinfoFetched.Add(1)
 	case errors.Is(err, errUncatalogued):
+		s.m().narinfoNotFound.Add(1)
 		http.NotFound(w, r)
 		return
+	case errors.As(err, &be):
+		s.m().narinfoBackoff.Add(1)
+		serveFetchError(w, err)
+		return
 	default:
-		http.Error(w, "fetch failed", http.StatusBadGateway)
+		s.m().narinfoError.Add(1)
+		serveFetchError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/x-nix-narinfo")
 	w.Write(FormatNarinfo(pi))
 }
 
+var nopMetrics metrics
+
+// m returns the metrics sink, a discarded one when none is attached.
+func (s *Server) m() *metrics {
+	if s.metrics == nil {
+		return &nopMetrics
+	}
+	return s.metrics
+}
+
+type countingWriter struct {
+	w io.Writer
+	n uint64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += uint64(n)
+	return n, err
+}
+
 var errUncatalogued = errors.New("nixcache: path not in catalog")
+
+func serveFetchError(w http.ResponseWriter, err error) {
+	var be *BackoffError
+	if errors.As(err, &be) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(be.Until).Seconds())+1))
+		http.Error(w, "upstream backoff", http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, "fetch failed: "+err.Error(), http.StatusBadGateway)
+}
 
 func (s *Server) fetch(ctx context.Context, hp string) (PathInfo, error) {
 	if s.Fetch == nil || s.Catalog == nil || !s.Catalog(hp) {
@@ -121,7 +168,7 @@ func (s *Server) nar(w http.ResponseWriter, r *http.Request, path string) {
 			return struct{}{}, s.Ensure(ctx, root)
 		})
 		if err != nil {
-			http.Error(w, "tree fetch failed", http.StatusBadGateway)
+			serveFetchError(w, err)
 			return
 		}
 	default:
@@ -134,12 +181,15 @@ func (s *Server) nar(w http.ResponseWriter, r *http.Request, path string) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	bw := bufio.NewWriterSize(w, 256<<10)
-	if err := narzstd.Write(bw, root, s.Store.Get, s.Store.ViewRecord); err != nil {
-		// Headers are sent; closing without a final chunk aborts the client.
+	cw := &countingWriter{w: w}
+	bw := bufio.NewWriterSize(cw, 256<<10)
+	err = narzstd.Write(bw, root, s.Store.Get, s.Store.ViewRecord)
+	bw.Flush()
+	s.m().narBytesServed.Add(cw.n)
+	if err != nil {
+		// Headers are sent. Closing without a final chunk aborts the client.
 		panic(http.ErrAbortHandler)
 	}
-	bw.Flush()
 }
 
 // maxPeerKeys matches the puller's batch bound (remotesync.maxBatchKeys),

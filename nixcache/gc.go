@@ -3,6 +3,8 @@ package nixcache
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
@@ -51,14 +53,22 @@ func (n *Node) GC(minDeadRatio float64) (packstore.CompactStats, error) {
 
 	n.gcMu.Lock()
 	defer n.gcMu.Unlock()
-	return n.store.Compact(live.Contains, packstore.CompactOpts{MinDeadRatio: minDeadRatio})
+	start := time.Now()
+	stats, err := n.store.Compact(live.Contains, packstore.CompactOpts{MinDeadRatio: minDeadRatio})
+	if err == nil {
+		n.metrics.gcRuns.Add(1)
+		n.metrics.gcFreedBytes.Add(stats.BytesFreed)
+	}
+	if err == nil && stats.SegmentsCompacted > 0 {
+		slog.Info("gc", "segments", stats.SegmentsCompacted, "freed", stats.BytesFreed,
+			"copied", stats.BytesCopied, "dur", time.Since(start).Round(time.Millisecond))
+	}
+	return stats, err
 }
 
-// markLive walks the index tree at root, every indexed path's object
-// tree, and each synced peer index (structure only: peer records point at
-// trees we may not hold). The roots must be snapshots taken under gcMu.
-// The walk may run concurrently with ingests: it only touches objects
-// reachable from the snapshots, which no writer mutates.
+// markLive walks the index at root, every indexed tree, and each synced
+// peer index (structure only). The roots must be snapshots taken under
+// gcMu. The walk touches only snapshot-reachable objects.
 func (n *Node) markLive(root key.Key, peerRoots []key.Key) (*packstore.MarkSet, error) {
 	live := n.store.NewMarkSet()
 	for _, pr := range peerRoots {

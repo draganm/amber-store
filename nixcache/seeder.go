@@ -2,10 +2,11 @@ package nixcache
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"iter"
-	"os"
+	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -42,11 +43,12 @@ func (n *Node) seedSet() iter.Seq[string] {
 	}
 }
 
-// SeedPass ingests every catalogued path the index does not hold yet, so
-// the node carries the closure before anyone asks for it. Peers answer
+// SeedPass ingests every catalogued path not yet held. Peers answer
 // before upstream, so a second seeder pulls the delta from the first.
-// Returns the number of failed paths so the caller can retry.
+// Returns the number of failures so the caller can retry.
 func (n *Node) SeedPass(ctx context.Context) int {
+	start := time.Now()
+	var scheduled int
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(seedJobs)
 	var failed atomic.Int64
@@ -54,17 +56,26 @@ func (n *Node) SeedPass(ctx context.Context) int {
 		if _, err := Lookup(n.indexRoot(), hp, n.store.Get); err == nil {
 			continue
 		}
+		scheduled++
 		g.Go(func() error {
 			if _, err := n.fetch(ctx, hp); err != nil && ctx.Err() == nil {
 				failed.Add(1)
-				fmt.Fprintf(os.Stderr, "nixcache: seed %s: %v\n", hp, err)
+				var be *BackoffError
+				if errors.As(err, &be) {
+					return err
+				}
+				slog.Warn("seed fetch", "hashpart", hp, "err", err)
 			}
 			return nil
 		})
 	}
-	g.Wait()
-	if f := failed.Load(); f > 0 {
-		fmt.Fprintf(os.Stderr, "nixcache: seed pass: %d paths failed\n", f)
+	if err := g.Wait(); err != nil {
+		slog.Warn("seed pass aborted", "err", err)
+	}
+	n.metrics.seedFailures.Add(uint64(failed.Load()))
+	if scheduled > 0 {
+		slog.Info("seed pass", "fetched", scheduled-int(failed.Load()),
+			"failed", failed.Load(), "dur", time.Since(start).Round(time.Second))
 	}
 	return int(failed.Load())
 }

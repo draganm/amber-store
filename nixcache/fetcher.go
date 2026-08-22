@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/draganm/amber-store/fstree"
@@ -31,6 +32,8 @@ type Fetcher struct {
 	// Get reads emitted objects back for the round-trip gate.
 	Get    func(key.Key) ([]byte, error)
 	Client *http.Client
+	// StallTimeout aborts a transfer with no body bytes for this long.
+	StallTimeout time.Duration
 }
 
 type trustedKeys = map[string]ed25519.PublicKey
@@ -125,6 +128,20 @@ func (f *Fetcher) fetchNar(ctx context.Context, n Narinfo) (key.Key, error) {
 }
 
 func (f *Fetcher) get(ctx context.Context, path string) (io.ReadCloser, error) {
+	if f.StallTimeout <= 0 {
+		return f.doGet(ctx, path)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	body, err := f.doGet(ctx, path)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	t := time.AfterFunc(f.StallTimeout, cancel)
+	return &stallBody{body: body, timer: t, d: f.StallTimeout, stop: cancel}, nil
+}
+
+func (f *Fetcher) doGet(ctx context.Context, path string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.BaseURL+"/"+path, nil)
 	if err != nil {
 		return nil, err
@@ -135,9 +152,57 @@ func (f *Fetcher) get(ctx context.Context, path string) (io.ReadCloser, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			if until, ok := parseRetryAfter(resp.Header.Get("Retry-After")); ok {
+				return nil, &BackoffError{Until: until}
+			}
+		}
 		return nil, fmt.Errorf("nixcache: GET %s: %s", path, resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// BackoffError reports an upstream Retry-After deadline.
+type BackoffError struct{ Until time.Time }
+
+func (e *BackoffError) Error() string {
+	return fmt.Sprintf("nixcache: upstream backoff until %s", e.Until.Format(time.RFC3339))
+}
+
+const maxRetryAfter = 15 * time.Minute
+
+func parseRetryAfter(h string) (time.Time, bool) {
+	if h == "" {
+		return time.Time{}, false
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(h); err == nil {
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(h); err == nil {
+		d = time.Until(t)
+	} else {
+		return time.Time{}, false
+	}
+	return time.Now().Add(min(max(d, 0), maxRetryAfter)), true
+}
+
+// stallBody cancels the request when a Read makes no progress for d.
+type stallBody struct {
+	body  io.ReadCloser
+	timer *time.Timer
+	d     time.Duration
+	stop  func()
+}
+
+func (b *stallBody) Read(p []byte) (int, error) {
+	n, err := b.body.Read(p)
+	b.timer.Reset(b.d)
+	return n, err
+}
+
+func (b *stallBody) Close() error {
+	b.stop()
+	return b.body.Close()
 }
 
 func decompress(compression string, r io.Reader) (io.ReadCloser, error) {

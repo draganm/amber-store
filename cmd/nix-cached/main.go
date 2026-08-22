@@ -44,6 +44,7 @@ func main() {
 	flag.Var(&trusted, "trusted-key", "trusted narinfo signing key name:base64 (repeatable)")
 	flag.Var(&catalogs, "catalog-url", "store-paths list URL (repeatable)")
 	flag.DurationVar(&cfg.SyncEvery, "sync-every", 5*time.Minute, "catalog and peer sync interval")
+	flag.DurationVar(&cfg.StallTimeout, "stall-timeout", time.Minute, "abort upstream transfers with no bytes for this long")
 	flag.DurationVar(&cfg.CatalogTTL, "catalog-ttl", 0, "drop paths this long after they leave the catalog (0: keep forever)")
 	flag.Int64Var(&cfg.BudgetBytes, "budget-bytes", 0, "refuse ingest above this store size (0: unlimited)")
 	flag.Int64Var(&cfg.PeerByteRate, "peer-byte-rate", 0, "peer-serving bandwidth cap, bytes/second (0: unlimited)")

@@ -38,11 +38,12 @@ type NodeConfig struct {
 	PeerByteRate    int64 // peer-serving bandwidth cap, bytes/second; 0: unlimited
 	// Seed ingests every catalogued path eagerly, so the node holds the
 	// closure before anyone asks: the seeder role.
-	Seed        bool
-	CatalogTTL  time.Duration // drop paths this long after leaving the catalog; 0: keep forever
-	SyncEvery   time.Duration
-	BudgetBytes int64 // eviction target for the NarSize sum. 0: unlimited
-	Client      *http.Client
+	Seed         bool
+	CatalogTTL   time.Duration // drop paths this long after leaving the catalog; 0: keep forever
+	SyncEvery    time.Duration
+	StallTimeout time.Duration // abort upstream transfers with no bytes for this long
+	BudgetBytes  int64         // eviction target for the NarSize sum. 0: unlimited
+	Client       *http.Client
 }
 
 // Node owns a dedicated store and serves the substituter endpoint from it,
@@ -61,6 +62,9 @@ type Node struct {
 	// commit through index publication, GC's mark..sweep holds it exclusively
 	gcMu    sync.RWMutex
 	cycleMu sync.Mutex // held for a whole GC cycle
+
+	metrics      metrics
+	backoffUntil atomic.Int64 // unix nanos; upstream fetches wait this out
 
 	midMark   func()       // test hook, runs between GC's mark and sweep
 	midIngest func() error // test hook, runs between object commit and index publication
@@ -113,6 +117,7 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 		}
 	}
 	n.server = &Server{
+		metrics: &n.metrics,
 		Store:   store,
 		Index:   n.indexRoot,
 		Catalog: n.servable,
@@ -201,6 +206,9 @@ func (n *Node) AdminHandler() http.Handler {
 		fmt.Fprintf(w, "segments compacted: %d\nrecords copied: %d\nbytes copied: %d\nbytes freed: %d\n",
 			stats.SegmentsCompacted, stats.RecordsCopied, stats.BytesCopied, stats.BytesFreed)
 	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		n.writeMetrics(w)
+	})
 	return mux
 }
 
@@ -230,17 +238,40 @@ func (n *Node) indexRoot() key.Key {
 // fetch ingests one catalogued path, probing peers (chunk-level pull)
 // before upstream (whole NAR, nix's protocol leaves no choice).
 func (n *Node) fetch(ctx context.Context, hashpart string) (PathInfo, error) {
+	start := time.Now()
 	if n.cfg.Swarm != nil {
 		if pi, err := n.fetchFromPeers(ctx, hashpart); err == nil {
+			n.logIngest(pi, "swarm", start)
 			return pi, nil
 		}
 	}
-	return n.fetchOrigin(ctx, hashpart)
+	pi, err := n.fetchOrigin(ctx, hashpart)
+	if err == nil {
+		n.logIngest(pi, "upstream", start)
+	} else if !errors.As(err, new(*BackoffError)) {
+		slog.Warn("fetch failed", "hashpart", hashpart, "err", err)
+	}
+	return pi, err
+}
+
+func (n *Node) logIngest(pi PathInfo, source string, start time.Time) {
+	if source == "swarm" {
+		n.metrics.swarmIngests.Add(1)
+		n.metrics.swarmNarBytes.Add(pi.NarSize)
+	} else {
+		n.metrics.upstreamIngests.Add(1)
+		n.metrics.upstreamNarBytes.Add(pi.NarSize)
+	}
+	slog.Info("ingested", "path", pi.StorePath, "source", source,
+		"narsize", pi.NarSize, "dur", time.Since(start).Round(time.Millisecond))
 }
 
 // fetchOrigin fetches upstream, verifying into a memory buffer first, then
 // committing the objects and indexing the path. A failed gate writes nothing.
 func (n *Node) fetchOrigin(ctx context.Context, hashpart string) (PathInfo, error) {
+	if until := time.Unix(0, n.backoffUntil.Load()); time.Now().Before(until) {
+		return PathInfo{}, &BackoffError{Until: until}
+	}
 	buf := newObjectBuffer()
 	f := &Fetcher{
 		BaseURL: n.cfg.Upstream,
@@ -248,9 +279,17 @@ func (n *Node) fetchOrigin(ctx context.Context, hashpart string) (PathInfo, erro
 		Emit:    buf.emit,
 		Get:     buf.get,
 		Client:  n.cfg.Client,
+
+		StallTimeout: n.cfg.StallTimeout,
 	}
 	pi, err := f.FetchPath(ctx, hashpart)
 	if err != nil {
+		var be *BackoffError
+		if errors.As(err, &be) {
+			n.backoffUntil.Store(be.Until.UnixNano())
+			n.metrics.backoffs.Add(1)
+			slog.Warn("upstream backoff", "until", be.Until)
+		}
 		return PathInfo{}, err
 	}
 	n.gcMu.RLock()
@@ -292,6 +331,9 @@ func (n *Node) evictOverBudget() error {
 	if len(victims) == 0 {
 		return nil
 	}
+	n.metrics.evictedPaths.Add(uint64(len(victims)))
+	n.metrics.evictedNarBytes.Add(uint64(bytes))
+	slog.Info("evicted", "paths", len(victims), "bytes", bytes)
 	if err := n.publish(nil, victims); err != nil {
 		return err
 	}
@@ -350,7 +392,7 @@ func (n *Node) syncLoop(ctx context.Context) {
 func (n *Node) syncOnce(ctx context.Context) {
 	changed := n.SyncCatalog(ctx)
 	if err := n.agePass(time.Now()); err != nil {
-		fmt.Fprintf(os.Stderr, "nixcache: age pass: %v\n", err)
+		slog.Error("age pass", "err", err)
 	}
 	n.SyncPeers(ctx)
 	if n.cfg.Seed && (changed || n.seedRetry) {
@@ -438,13 +480,16 @@ func (n *Node) SyncCatalog(ctx context.Context) bool {
 	for _, url := range n.cfg.CatalogURLs {
 		ingested, err := n.addCatalogURL(ctx, url)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "nixcache: catalog sync %s: %v\n", url, err)
+			slog.Warn("catalog sync", "url", url, "err", err)
+		}
+		if ingested {
+			slog.Info("catalog updated", "url", url, "paths", n.catalog.Len())
 		}
 		changed = changed || ingested
 	}
 	if changed {
 		if err := n.catalog.Save(n.path("catalog")); err != nil {
-			fmt.Fprintf(os.Stderr, "nixcache: catalog save: %v\n", err)
+			slog.Error("catalog save", "err", err)
 		}
 	}
 	return changed

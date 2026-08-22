@@ -692,6 +692,22 @@ func (s *Store) SortByLocation(keys []key.Key) {
 }
 
 // Has reports whether an object is stored under k.
+// SizeBytes reports the summed size of all segment files.
+func (s *Store) SizeBytes() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total uint64
+	for _, g := range s.sealed {
+		total += uint64(len(g.mm))
+	}
+	if s.active != nil {
+		if fi, err := s.active.f.Stat(); err == nil {
+			total += uint64(fi.Size())
+		}
+	}
+	return total
+}
+
 func (s *Store) Has(k key.Key) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

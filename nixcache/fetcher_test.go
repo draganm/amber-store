@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/narexport"
 	"github.com/draganm/amber-store/nixcache"
 	"github.com/klauspost/compress/zstd"
@@ -174,5 +177,40 @@ func TestFetchPathUpstream404(t *testing.T) {
 	st := newRecStore()
 	if _, err := u.fetcher(st).FetchPath(context.Background(), hashPart(8)); err == nil {
 		t.Fatal("missing upstream path accepted")
+	}
+}
+
+// TestFetchStalledBody: a stalled NAR body fails instead of hanging.
+func TestFetchStalledBody(t *testing.T) {
+	u := newUpstream(t, "none", nil)
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".narinfo") {
+			u.srv.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer stalled.Close()
+
+	f := &nixcache.Fetcher{
+		BaseURL:      stalled.URL,
+		Trusted:      map[string]ed25519.PublicKey{"test-1": u.pub},
+		Emit:         func(o fstree.Object) error { return nil },
+		StallTimeout: 100 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.FetchPath(t.Context(), hashPart(7))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("stalled fetch returned nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled fetch did not abort")
 	}
 }
