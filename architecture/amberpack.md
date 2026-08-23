@@ -51,7 +51,7 @@ mismatch. The CRC guards framing and bytes; it is *not* a substitute for the
 payload hash check (below).
 
 Both length fields are `uint32`, so a single object's payload is capped at 4 GiB
-— far above the chunker's output, which is on the order of a few hundred KiB.
+— far above the chunker's output, which is at most 1 MiB by default.
 
 ### Two checks, two layers
 

@@ -47,7 +47,7 @@ var ErrMalformed = errors.New("amberpack: malformed pack stream")
 
 // maxWirePayload bounds a single record's stored payload so a hostile or corrupt
 // stream cannot trigger an unbounded allocation. It is far above any real CAS
-// object (the chunker MaxSize is on the order of a few hundred KiB).
+// object (the default chunker MaxSize is 1 MiB).
 const maxWirePayload = 256 << 20 // 256 MiB
 
 // Writer serializes fstree.Objects into the wire pack format. It is not safe for
