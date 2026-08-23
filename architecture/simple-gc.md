@@ -4,9 +4,9 @@ Live is what a reference reaches; the rest is garbage. The packstore stays
 exactly as it is. For every root a reference names we keep its **closure** —
 the sorted tails of every key reachable from it — on disk; the union of all
 closures lives in RAM. A cycle walks every pack's index against that union to
-learn how much of the pack is still live, ranks packs by live ratio and
-**reaps** the worst: live records are copied into the active segment, then the
-pack is deleted.
+measure how much of each pack is garbage; every pack that is more than half
+garbage is **reaped**: its live records are copied into the active segment,
+then the pack is deleted.
 
 A **tail** is `key[24:32]` as a big-endian u64 — the last 8 bytes of a key,
 always inside the uniformly distributed hash, and already what the packstore's
@@ -95,9 +95,9 @@ and no pack crossed the horizon. One goroutine, cycles never overlap.
 ```
 snapshot   union pointer; horizon
 score      per pack, in parallel: walk its footer index; entry live iff its
-           tail is in the union; live = Σ (46 + slen); ratio = live / body
-select     eligible (sealed before the horizon) ∧ ratio ≤ reap ratio,
-           lowest ratio first
+           tail is in the union; garbage = 1 − Σ (46 + slen) / body
+select     every eligible pack (sealed before the horizon) with
+           garbage > --gc-garbage, most garbage first
 reap       per victim: live records, file order, raw → active segment
 delete     removal lock (exclusive): re-test the victim's index against the
            current union, copy what is live and not yet elsewhere; drop the
@@ -108,10 +108,12 @@ delete     removal lock (exclusive): re-test the victim's index against the
 the footer index alone — no pack body is read, no merge is performed. Cost:
 one probe per stored record, packs in parallel; seconds on a multi-TB store.
 
-**Selection.** Eligible packs with `ratio ≤ --gc-reap-ratio` (0.5: free at
-least as much as is copied), lowest first. Under `--gc-min-free` the
-threshold rises to 0.9 for that cycle. Ratio 0 → delete without copying.
-`gc run --reap-ratio` forces a deeper pass.
+**Selection.** Every eligible pack with more than `--gc-garbage` (0.5)
+garbage is reaped, most garbage first, so each victim frees at least as much
+as it copies. A pack below the line keeps its garbage until more of it dies.
+A pack with no live bytes is deleted without copying. Under `--gc-min-free`
+the line drops to 0.1 for that cycle; `gc run --garbage G` forces a pass at
+any level.
 
 **Reaping.** The victim is immutable and stays readable. Its index is walked
 once more to list live entries; their records are read in file order,
@@ -177,17 +179,17 @@ recoverable.
 | `--gc` | on | run the collector |
 | `--gc-interval` | 1 h | time between cycles |
 | `--gc-grace` | 1 h | minimum age of a sealed pack before it can be reaped; upload-lease idle timeout |
-| `--gc-reap-ratio` | 0.5 | live ratio at/below which an eligible pack is reaped |
-| `--gc-min-free` | 5 % of the filesystem | below this, the cycle reaps up to ratio 0.9 |
+| `--gc-garbage` | 0.5 | an eligible pack with more garbage than this is reaped |
+| `--gc-min-free` | 5 % of the filesystem | below this free space the cycle reaps packs above 0.1 garbage |
 | `--gc-rate` | unlimited | copier bandwidth cap (bytes/s) |
 
 `--segment-size` is the reaping granularity: smaller packs reclaim with less
 copying, cost more filter probes per lookup.
 
 ```sh
-amber-store gc status               # packs: id, sealed, bytes, live ratio, eligible;
+amber-store gc status               # packs: id, sealed, bytes, garbage, eligible;
                                     # totals; closures; union; last cycle  GET  /v1/gc
-amber-store gc run [--reap-ratio R] # start a cycle now                   POST /v1/gc/run
+amber-store gc run [--garbage G]    # score now, reap packs above G        POST /v1/gc/run
 amber-store gc why KEY              # refs whose closure holds KEY's tail  GET  /v1/gc/why/{key}
 ```
 
