@@ -34,16 +34,16 @@ func newGCTestServer(t *testing.T) (*testServer, *gc.Collector) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
-	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ib.Close() })
 	coll, err := gc.Open(filepath.Join(dir, "closures"), store, refs, gc.Options{NoSync: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { coll.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil, inbox.WithLeaser(inbox.LeaserOf(coll.Lease)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	identity, client, admin := testSigner(t), testSigner(t), testSigner(t)
 	content := string(ssh.MarshalAuthorizedKey(client.PublicKey())) +
 		"admin,wipe " + string(ssh.MarshalAuthorizedKey(admin.PublicKey()))
@@ -63,6 +63,43 @@ func newGCTestServer(t *testing.T) (*testServer, *gc.Collector) {
 	t.Cleanup(srv.Close)
 	return &testServer{srv: srv, store: store, refs: refs, inbox: ib,
 		identity: identity, client: client, admin: admin}, coll
+}
+
+// TestNewRefusesUnleasedInboxWithGC pins the wiring guard: a collector
+// without inbox leases would silently weaken the safety argument, so New
+// refuses the configuration outright.
+func TestNewRefusesUnleasedInboxWithGC(t *testing.T) {
+	dir := t.TempDir()
+	store, err := packstore.Open(filepath.Join(dir, "store"), packstore.WithSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	refs, err := refstore.Open(filepath.Join(dir, "refs"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { refs.Close() })
+	coll, err := gc.Open(filepath.Join(dir, "closures"), store, refs, gc.Options{NoSync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { coll.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 1, nil) // no leaser
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
+	defer func() {
+		if recover() == nil {
+			t.Fatal("server.New accepted a collector with an unleased inbox")
+		}
+	}()
+	identity := testSigner(t)
+	server.New(server.Config{
+		Store: store, Refs: refs, Inbox: ib, GC: coll, Identity: identity,
+		Allow: func() *allowlist.List { return &allowlist.List{} },
+	})
 }
 
 func TestGCRefLifecycleSigned(t *testing.T) {

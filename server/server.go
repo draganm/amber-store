@@ -24,7 +24,6 @@ import (
 	"github.com/draganm/amber-store/grant"
 	"github.com/draganm/amber-store/httpsig"
 	"github.com/draganm/amber-store/inbox"
-	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/nonces"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
@@ -46,9 +45,11 @@ type Config struct {
 	Inbox    *inbox.Inbox  // receives pushed packs; required
 	// GC, when non-nil, wires the garbage collector: reference writes go
 	// through the removal lock and the completeness walk, deletes release
-	// their root, pushed roots hold upload leases (via the inbox), a wipe
-	// empties the closures, and the /v1/gc routes are live. Must sit over
-	// the same Store and Refs and outlive the handler.
+	// their root, pushed roots hold upload leases, a wipe empties the
+	// closures, and the /v1/gc routes are live. Must sit over the same
+	// Store and Refs and outlive the handler, and Inbox must have been
+	// opened with inbox.WithLeaser(inbox.LeaserOf(GC.Lease)) — New panics
+	// otherwise.
 	GC *gc.Collector
 }
 
@@ -95,8 +96,12 @@ func New(cfg Config) http.Handler {
 		gc:       cfg.GC,
 		nonces:   nonces.New(window),
 	}
-	if h.gc != nil {
-		h.inbox.SetLeaser(func(root key.Key) inbox.Lease { return h.gc.Lease(root) })
+	if h.gc != nil && !h.inbox.Leased() {
+		// Not recoverable here: leases for entries recovered at inbox.Open
+		// are taken inside Open, before its workers start; wiring them now
+		// would leave those roots covered by grace alone (the safety
+		// argument of architecture/simple-gc.md would not hold).
+		panic("server: Config.GC is set but Config.Inbox was opened without inbox.WithLeaser(inbox.LeaserOf(GC.Lease))")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/identity", h.getIdentity)

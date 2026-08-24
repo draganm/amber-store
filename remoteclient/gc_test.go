@@ -31,16 +31,16 @@ func newGCHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { refs.Close() })
-	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ib.Close() })
 	coll, err := gc.Open(filepath.Join(dir, "closures"), store, refs, gc.Options{NoSync: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { coll.Close() })
+	ib, err := inbox.Open(filepath.Join(dir, "inbox"), store, 2, nil, inbox.WithLeaser(inbox.LeaserOf(coll.Lease)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ib.Close() })
 	identity, client, admin := testSigner(t), testSigner(t), testSigner(t)
 	content := string(ssh.MarshalAuthorizedKey(client.PublicKey())) +
 		"admin " + string(ssh.MarshalAuthorizedKey(admin.PublicKey()))

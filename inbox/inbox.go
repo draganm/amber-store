@@ -48,20 +48,27 @@ type Lease interface {
 	Release()
 }
 
-// SetLeaser installs the collector hook that covers in-flight uploads
-// against the reaping horizon, and takes a lease for every root already
-// pending (entries recovered from a previous run). Call it once, right
-// after Open, before traffic arrives.
-func (ib *Inbox) SetLeaser(lease func(root key.Key) Lease) {
-	ib.mu.Lock()
-	defer ib.mu.Unlock()
-	ib.leaser = lease
-	for root := range ib.groups {
-		if _, ok := ib.leases[root]; !ok {
-			ib.leases[root] = lease(root)
-		}
-	}
+// An Option configures Open.
+type Option func(*Inbox)
+
+// WithLeaser installs the collector hook that covers in-flight uploads
+// against the reaping horizon. It must be given to Open, not installed
+// later: leases live only in memory, so an entry recovered from a previous
+// run gets its lease exactly once — inside Open, before any worker can
+// drain it. Installing the hook after workers start would leave a
+// recovered root that drained first covered by grace alone.
+func WithLeaser(lease func(root key.Key) Lease) Option {
+	return func(ib *Inbox) { ib.leaser = lease }
 }
+
+// LeaserOf adapts a concrete lease constructor (gc.Collector.Lease) to the
+// WithLeaser hook.
+func LeaserOf[L Lease](lease func(root key.Key) L) func(root key.Key) Lease {
+	return func(root key.Key) Lease { return lease(root) }
+}
+
+// Leased reports whether the inbox takes upload leases.
+func (ib *Inbox) Leased() bool { return ib.leaser != nil }
 
 // leaseLocked takes or refreshes root's lease. Callers hold mu.
 func (ib *Inbox) leaseLocked(root key.Key) {
@@ -93,9 +100,10 @@ type workItem struct {
 }
 
 // Open prepares the inbox directory tree, recovers entries left by a previous
-// run, and starts `workers` processing goroutines. workers <= 0 means
-// runtime.GOMAXPROCS(0). A nil log discards.
-func Open(dir string, store *packstore.Store, workers int, log *slog.Logger) (*Inbox, error) {
+// run — leasing their roots when a leaser is configured — and starts
+// `workers` processing goroutines. workers <= 0 means runtime.GOMAXPROCS(0).
+// A nil log discards.
+func Open(dir string, store *packstore.Store, workers int, log *slog.Logger, opts ...Option) (*Inbox, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -111,6 +119,9 @@ func Open(dir string, store *packstore.Store, workers int, log *slog.Logger) (*I
 		groups:  map[key.Key]int{},
 		leases:  map[key.Key]Lease{},
 	}
+	for _, opt := range opts {
+		opt(ib)
+	}
 	ib.cond = sync.NewCond(&ib.mu)
 	for _, d := range []string{ib.dir, ib.tmpDir, ib.failDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -119,6 +130,12 @@ func Open(dir string, store *packstore.Store, workers int, log *slog.Logger) (*I
 	}
 	if err := ib.recover(); err != nil {
 		return nil, err
+	}
+	// Recovered entries bypass Commit, so lease their roots here — before
+	// the first worker can process one and drop its group. This is the only
+	// chance: leases do not survive a restart.
+	for root := range ib.groups {
+		ib.leaseLocked(root)
 	}
 	for range workers {
 		ib.wg.Add(1)

@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/admin"
-	"github.com/draganm/amber-store/inbox"
-	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/allowstore"
 	"github.com/draganm/amber-store/identity"
-	"github.com/draganm/amber-store/sshsign"
+	"github.com/draganm/amber-store/inbox"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/server"
+	"github.com/draganm/amber-store/sshsign"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/crypto/ssh"
 )
@@ -183,11 +183,6 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return err
 	}
 	defer store.Close()
-	ib, err := inbox.Open(filepath.Join(cfg.store, "inbox"), store, 0, logger)
-	if err != nil {
-		return err
-	}
-	defer ib.Close()
 	refs, err := refstore.Open(filepath.Join(cfg.store, "refs"), cfg.sync)
 	if err != nil {
 		return err
@@ -195,14 +190,24 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	defer refs.Close()
 
 	// The collector sits over the stores: deferred after them, it closes
-	// (waiting out a running cycle) before they do.
+	// (waiting out a running cycle) before they do. It opens before the
+	// inbox because the inbox leases recovered uploads at Open, before its
+	// workers start — and the inbox, deferred last, closes first, releasing
+	// those leases while the collector is still up.
 	coll, err := cfg.gc.openCollector(cfg.store, store, refs, cfg.sync)
 	if err != nil {
 		return err
 	}
+	var inboxOpts []inbox.Option
 	if coll != nil {
 		defer coll.Close()
+		inboxOpts = append(inboxOpts, inbox.WithLeaser(inbox.LeaserOf(coll.Lease)))
 	}
+	ib, err := inbox.Open(filepath.Join(cfg.store, "inbox"), store, 0, logger, inboxOpts...)
+	if err != nil {
+		return err
+	}
+	defer ib.Close()
 
 	keys, err := allowstore.Open(filepath.Join(cfg.store, "allowed-keys"), cfg.sync)
 	if err != nil {
