@@ -29,6 +29,7 @@ func newApp() *cli.App {
 		contentKeysCommand(),
 		configUserCommand(),
 		refCommand(),
+		gcCommand(),
 		remoteCommand(),
 		browseCommand(),
 	}

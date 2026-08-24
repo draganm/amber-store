@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/draganm/amber-store/gc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -30,6 +31,80 @@ func newDebugRegistry() *prometheus.Registry {
 	info.Set(1)
 	reg.MustRegister(info)
 	return reg
+}
+
+// gcCollector exports the garbage collector's cheap figures (gc.Counters —
+// nothing that scores packs) as amber_gc_* gauges, read at scrape time.
+type gcCollector struct {
+	coll *gc.Collector
+
+	refs, closures, pending, union, leases      *prometheus.Desc
+	cycleStart, cycleDuration                   *prometheus.Desc
+	cycleScored, cycleReaped                    *prometheus.Desc
+	cycleCopiedBytes, cycleFreedBytes, cycleErr *prometheus.Desc
+}
+
+// registerGCMetrics wires the amber_gc_* gauges for coll into reg.
+func registerGCMetrics(reg prometheus.Registerer, coll *gc.Collector) {
+	g := &gcCollector{
+		coll:     coll,
+		refs:     prometheus.NewDesc("amber_gc_refs", "Reference names.", nil, nil),
+		closures: prometheus.NewDesc("amber_gc_closures", "Closure files on disk.", nil, nil),
+		pending:  prometheus.NewDesc("amber_gc_pending_roots", "Named roots without a valid closure yet.", nil, nil),
+		union:    prometheus.NewDesc("amber_gc_union_tails", "Live tails in the union.", nil, nil),
+		leases:   prometheus.NewDesc("amber_gc_upload_leases", "Live upload leases.", nil, nil),
+		cycleStart: prometheus.NewDesc("amber_gc_last_cycle_start_timestamp_seconds",
+			"Start of the last completed cycle as a Unix timestamp.", nil, nil),
+		cycleDuration: prometheus.NewDesc("amber_gc_last_cycle_duration_seconds",
+			"Duration of the last completed cycle.", nil, nil),
+		cycleScored: prometheus.NewDesc("amber_gc_last_cycle_scored_packs",
+			"Packs scored by the last completed cycle.", nil, nil),
+		cycleReaped: prometheus.NewDesc("amber_gc_last_cycle_reaped_packs",
+			"Packs reaped by the last completed cycle.", nil, nil),
+		cycleCopiedBytes: prometheus.NewDesc("amber_gc_last_cycle_copied_bytes",
+			"Live record bytes the last completed cycle copied forward.", nil, nil),
+		cycleFreedBytes: prometheus.NewDesc("amber_gc_last_cycle_freed_bytes",
+			"Net bytes the last completed cycle freed.", nil, nil),
+		cycleErr: prometheus.NewDesc("amber_gc_last_cycle_error",
+			"1 when the last cycle recorded an error, else 0.", nil, nil),
+	}
+	reg.MustRegister(g)
+}
+
+func (g *gcCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, d := range []*prometheus.Desc{
+		g.refs, g.closures, g.pending, g.union, g.leases,
+		g.cycleStart, g.cycleDuration, g.cycleScored, g.cycleReaped,
+		g.cycleCopiedBytes, g.cycleFreedBytes, g.cycleErr,
+	} {
+		ch <- d
+	}
+}
+
+func (g *gcCollector) Collect(ch chan<- prometheus.Metric) {
+	ct := g.coll.Counters()
+	gauge := func(d *prometheus.Desc, v float64) {
+		ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v)
+	}
+	gauge(g.refs, float64(ct.Refs))
+	gauge(g.closures, float64(ct.Closures))
+	gauge(g.pending, float64(ct.Pending))
+	gauge(g.union, float64(ct.Union))
+	gauge(g.leases, float64(ct.Leases))
+	errv := 0.0
+	if ct.LastErr != "" {
+		errv = 1
+	}
+	gauge(g.cycleErr, errv)
+	if ct.Last == nil {
+		return
+	}
+	gauge(g.cycleStart, float64(ct.Last.Start.UnixNano())/1e9)
+	gauge(g.cycleDuration, ct.Last.Duration.Seconds())
+	gauge(g.cycleScored, float64(ct.Last.Scored))
+	gauge(g.cycleReaped, float64(len(ct.Last.Reaped)))
+	gauge(g.cycleCopiedBytes, float64(ct.Last.CopiedBytes))
+	gauge(g.cycleFreedBytes, float64(ct.Last.FreedBytes))
 }
 
 // statusRecorder captures the response code for the metrics middleware while

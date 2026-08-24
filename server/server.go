@@ -20,9 +20,11 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/allowlist"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/grant"
 	"github.com/draganm/amber-store/httpsig"
 	"github.com/draganm/amber-store/inbox"
+	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/nonces"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/refstore"
@@ -42,6 +44,12 @@ type Config struct {
 	Window   time.Duration // timestamp validity window; 0 = httpsig.DefaultWindow
 	MaxBody  int64         // request body cap; 0 = DefaultMaxBody
 	Inbox    *inbox.Inbox  // receives pushed packs; required
+	// GC, when non-nil, wires the garbage collector: reference writes go
+	// through the removal lock and the completeness walk, deletes release
+	// their root, pushed roots hold upload leases (via the inbox), a wipe
+	// empties the closures, and the /v1/gc routes are live. Must sit over
+	// the same Store and Refs and outlive the handler.
+	GC *gc.Collector
 }
 
 type handler struct {
@@ -53,6 +61,7 @@ type handler struct {
 	window   time.Duration
 	maxBody  int64
 	inbox    *inbox.Inbox
+	gc       *gc.Collector // nil: gc disabled
 	nonces   *nonces.Cache
 
 	// wipeMu serializes the wipe endpoint against every mutating handler:
@@ -83,7 +92,11 @@ func New(cfg Config) http.Handler {
 		window:   window,
 		maxBody:  maxBody,
 		inbox:    cfg.Inbox,
+		gc:       cfg.GC,
 		nonces:   nonces.New(window),
+	}
+	if h.gc != nil {
+		h.inbox.SetLeaser(func(root key.Key) inbox.Lease { return h.gc.Lease(root) })
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/identity", h.getIdentity)
@@ -95,6 +108,9 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("GET /v1/refs", h.auth(allowlist.CapRead, h.getRefs))
 	mux.HandleFunc("DELETE /v1/refs", h.auth(allowlist.CapAdmin, h.deleteRef))
 	mux.HandleFunc("POST /v1/wipe", h.auth(allowlist.CapWipe, h.postWipe))
+	mux.HandleFunc("GET /v1/gc", h.auth(allowlist.CapRead, h.gcStatus))
+	mux.HandleFunc("POST /v1/gc/run", h.auth(allowlist.CapAdmin, h.gcRun))
+	mux.HandleFunc("GET /v1/gc/why/{key}", h.auth(allowlist.CapRead, h.gcWhy))
 	return logRequests(log, mux)
 }
 

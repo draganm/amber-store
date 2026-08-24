@@ -230,13 +230,27 @@ func (h *handler) remotePull(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := newEventStream(w)
 	opts.Progress = func(done, total int) { stream.send(syncEvent{Done: done, Total: total}) }
+	if h.gc != nil {
+		// An upload lease covers the fetched objects against the reaping
+		// horizon until the reference lands; progress refreshes it so a long
+		// pull never idles past the grace window.
+		lease := h.gc.Lease(root)
+		defer lease.Release()
+		progress := opts.Progress
+		opts.Progress = func(done, total int) { lease.Refresh(); progress(done, total) }
+	}
 	stats, err := remotesync.Pull(r.Context(), h.store, rc, root, opts)
 	if err != nil {
 		h.log.Warn("pull failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return
 	}
-	if err := h.refs.Put(name, raw); err != nil {
+	if h.gc != nil {
+		err = h.gc.PutRef(name, root, raw)
+	} else {
+		err = h.refs.Put(name, raw)
+	}
+	if err != nil {
 		h.log.Warn("pull reference write failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return

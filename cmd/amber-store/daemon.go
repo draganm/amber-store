@@ -31,6 +31,7 @@ type daemonConfig struct {
 	logLevel    string
 	logFormat   string
 	remoteKeys  cli.StringSlice
+	gc          gcConfig
 }
 
 func daemonCommand() *cli.Command {
@@ -38,7 +39,7 @@ func daemonCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
 		Usage: "run the store-owning daemon, serving clients over a unix socket",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
@@ -83,7 +84,7 @@ func daemonCommand() *cli.Command {
 					"auto-generated identity stored in the store directory.",
 				Destination: &cfg.remoteKeys,
 			},
-		},
+		}, gcFlags(&cfg.gc)...),
 		Action: func(c *cli.Context) error { return runDaemon(c, cfg) },
 	}
 }
@@ -170,6 +171,18 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	}
 	defer refs.Close()
 
+	// The collector sits over the stores: deferred after them, it closes
+	// (waiting out a running cycle) before they do.
+	coll, err := cfg.gc.openCollector(cfg.store, store, refs, cfg.sync)
+	if err != nil {
+		return err
+	}
+	var daemonOpts []daemon.Option
+	if coll != nil {
+		defer coll.Close()
+		daemonOpts = append(daemonOpts, daemon.WithCollector(coll))
+	}
+
 	defSigner, overrides, err := parseRemoteKeys(cfg.remoteKeys.Value())
 	if err != nil {
 		return err
@@ -199,7 +212,7 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 			Registry:      registry,
 			DefaultSigner: defSigner,
 			Signers:       overrides,
-		}),
+		}, daemonOpts...),
 		// Route the http.Server's own diagnostics (handler panics, accept
 		// errors) through the structured logger.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),

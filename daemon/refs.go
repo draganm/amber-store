@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
 )
@@ -33,7 +35,11 @@ func refName(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 // putRef stores the CBOR reference record from the body under ?name=,
 // overwriting unconditionally. The record must decode, match the query name,
-// carry a canonical key, and that key must exist in the store.
+// and carry a canonical key. With the collector running, the pointed-to
+// content must be complete — every object reachable from the key exists — and
+// the write lands under the removal lock (the optimistic reference PUT: a 404
+// names a missing object; the caller re-sends it and retries). Without it
+// (--gc=false) only the key itself is checked, as before.
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request) {
 	name, ok := refName(w, r)
 	if !ok {
@@ -62,6 +68,29 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	// The body is stored verbatim: it is the canonical encoding (Decode
+	// rejects non-canonical bytes) and preserves the signature bytes
+	// untouched.
+	if h.gc != nil {
+		err := h.gc.PutRef(name, k, body)
+		var miss *fstree.MissingObjectError
+		switch {
+		case errors.As(err, &miss):
+			http.Error(w, "referenced content is incomplete: "+miss.Key.String()+
+				" is missing — store the objects, then retry", http.StatusNotFound)
+			return
+		case errors.Is(err, packstore.ErrNotFound):
+			http.Error(w, "referenced content is incomplete: "+err.Error(), http.StatusNotFound)
+			return
+		case err != nil:
+			h.log.Error("ref put failed", "name", name, "error", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		h.log.Info("reference stored", "name", name, "key", k)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	has, err := h.store.Has(k)
 	if err != nil {
 		h.log.Error("ref key lookup failed", "name", name, "error", err)
@@ -72,8 +101,6 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "referenced key not found in store", http.StatusNotFound)
 		return
 	}
-	// Store the body verbatim: it is the canonical encoding (Decode rejects
-	// non-canonical bytes) and preserves the signature bytes untouched.
 	if err := h.refs.Put(name, body); err != nil {
 		h.log.Error("ref put failed", "name", name, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -158,13 +185,20 @@ func (h *handler) listRefs(w http.ResponseWriter) {
 	}
 }
 
-// deleteRef removes the reference named by ?name=.
+// deleteRef removes the reference named by ?name=. With the collector
+// running the root is released: its tails leave the union, its closure file
+// goes if no other name shares it.
 func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request) {
 	name, ok := refName(w, r)
 	if !ok {
 		return
 	}
-	err := h.refs.Delete(name)
+	var err error
+	if h.gc != nil {
+		err = h.gc.DeleteRef(name)
+	} else {
+		err = h.refs.Delete(name)
+	}
 	if errors.Is(err, refstore.ErrNotFound) {
 		http.Error(w, "reference not found", http.StatusNotFound)
 		return

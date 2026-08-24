@@ -32,7 +32,59 @@ type Inbox struct {
 	groups map[key.Key]int // root -> count of unprocessed entries
 	closed bool
 
+	// Upload leases (architecture/simple-gc.md §Safety): one per root with
+	// packs in flight, taken on the first pack, refreshed per pack, released
+	// by the reference PUT (ReleaseLease). An abandoned upload's lease is
+	// never released here — it expires on the collector's idle timeout.
+	leaser func(root key.Key) Lease
+	leases map[key.Key]Lease
+
 	wg sync.WaitGroup
+}
+
+// Lease is the inbox's view of a gc upload lease (*gc.Lease satisfies it).
+type Lease interface {
+	Refresh()
+	Release()
+}
+
+// SetLeaser installs the collector hook that covers in-flight uploads
+// against the reaping horizon, and takes a lease for every root already
+// pending (entries recovered from a previous run). Call it once, right
+// after Open, before traffic arrives.
+func (ib *Inbox) SetLeaser(lease func(root key.Key) Lease) {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	ib.leaser = lease
+	for root := range ib.groups {
+		if _, ok := ib.leases[root]; !ok {
+			ib.leases[root] = lease(root)
+		}
+	}
+}
+
+// leaseLocked takes or refreshes root's lease. Callers hold mu.
+func (ib *Inbox) leaseLocked(root key.Key) {
+	if ib.leaser == nil {
+		return
+	}
+	if l, ok := ib.leases[root]; ok {
+		l.Refresh()
+		return
+	}
+	ib.leases[root] = ib.leaser(root)
+}
+
+// ReleaseLease drops root's upload lease; the reference PUT handler calls
+// it once the reference naming root is committed. Unknown roots are a
+// no-op (a ref PUT needs no preceding push).
+func (ib *Inbox) ReleaseLease(root key.Key) {
+	ib.mu.Lock()
+	defer ib.mu.Unlock()
+	if l, ok := ib.leases[root]; ok {
+		l.Release()
+		delete(ib.leases, root)
+	}
 }
 
 type workItem struct {
@@ -57,6 +109,7 @@ func Open(dir string, store *packstore.Store, workers int, log *slog.Logger) (*I
 		store:   store,
 		log:     log,
 		groups:  map[key.Key]int{},
+		leases:  map[key.Key]Lease{},
 	}
 	ib.cond = sync.NewCond(&ib.mu)
 	for _, d := range []string{ib.dir, ib.tmpDir, ib.failDir} {
@@ -136,6 +189,7 @@ func (ib *Inbox) Commit(tmpPath string, bodyHash []byte, root key.Key) (added bo
 	}
 	ib.mu.Lock()
 	ib.groups[root]++
+	ib.leaseLocked(root)
 	ib.work = append(ib.work, workItem{name: name, root: root})
 	ib.cond.Broadcast()
 	ib.mu.Unlock()
@@ -161,6 +215,14 @@ func (ib *Inbox) Close() error {
 	ib.cond.Broadcast()
 	ib.mu.Unlock()
 	ib.wg.Wait()
+	// Committed-but-unreferenced entries survive on disk and re-take their
+	// leases at the next Open; holding these would outlive the collector.
+	ib.mu.Lock()
+	for root, l := range ib.leases {
+		l.Release()
+		delete(ib.leases, root)
+	}
+	ib.mu.Unlock()
 	return nil
 }
 

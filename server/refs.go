@@ -90,12 +90,19 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 	// Uploads are acked as soon as they are durably staged, not stored. Wait for
 	// any packs tagged with this root to finish processing before checking
 	// completeness; a pack that failed to process was quarantined, so its
-	// objects stay absent and CheckComplete reports the ref incomplete.
+	// objects stay absent and the completeness walk reports the ref incomplete.
 	h.inbox.WaitFor(k)
 	// The referenced content must be complete: every object reachable from
-	// the key must exist in the store. The walk runs parallel lookups —
-	// referenced trees can be large.
-	err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
+	// the key must exist in the store. With the collector the walk (or a
+	// reused closure) runs under the removal lock and the commit merges the
+	// root into the union — the optimistic reference PUT; without it, the
+	// plain walk. Either walk runs parallel lookups — referenced trees can
+	// be large.
+	if h.gc != nil {
+		err = h.gc.PutRef(name, k, a.body)
+	} else {
+		_, err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
+	}
 	var miss *fstree.MissingObjectError
 	switch {
 	case errors.As(err, &miss):
@@ -105,14 +112,20 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 		h.signError(w, a.nonce, http.StatusNotFound, "referenced content is incomplete: "+err.Error()+" — push objects before the ref")
 		return
 	case err != nil:
-		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := h.refs.Put(name, a.body); err != nil {
 		h.log.Error("ref put failed", "name", name, "error", err)
 		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if h.gc == nil {
+		if err := h.refs.Put(name, a.body); err != nil {
+			h.log.Error("ref put failed", "name", name, "error", err)
+			h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	// The reference landed: the upload it concludes no longer needs its
+	// lease against the reaping horizon.
+	h.inbox.ReleaseLease(k)
 	h.log.Info("reference stored", "name", name, "key", k)
 	h.signAndWrite(w, a.nonce, http.StatusNoContent, "", nil)
 }
@@ -188,7 +201,9 @@ func (h *handler) listRefs(w http.ResponseWriter, a *authedRequest) {
 // deleteRef removes a reference. Ownership lives in the ref signature, but a
 // DELETE carries no record to sign, so deletion is restricted to admin
 // transport keys (spec §4) — enforced by the route's admin capability
-// requirement (h.auth(allowlist.CapAdmin, ...)), not here.
+// requirement (h.auth(allowlist.CapAdmin, ...)), not here. With the
+// collector the root is released: its tails leave the union, its closure
+// file goes if no other name shares it.
 func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	h.wipeMu.RLock()
 	defer h.wipeMu.RUnlock()
@@ -197,7 +212,11 @@ func (h *handler) deleteRef(w http.ResponseWriter, r *http.Request, a *authedReq
 		h.signError(w, a.nonce, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	err = h.refs.Delete(name)
+	if h.gc != nil {
+		err = h.gc.DeleteRef(name)
+	} else {
+		err = h.refs.Delete(name)
+	}
 	if errors.Is(err, refstore.ErrNotFound) {
 		h.signError(w, a.nonce, http.StatusNotFound, "reference not found")
 		return

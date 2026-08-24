@@ -29,6 +29,14 @@ func (h *handler) postWipe(w http.ResponseWriter, r *http.Request, a *authedRequ
 		h.signError(w, a.nonce, http.StatusInternalServerError, "wiping objects: "+err.Error())
 		return
 	}
+	// Closures last: they are derived state, and a re-walk of a surviving
+	// reference could only fail against an already-wiped store anyway.
+	if h.gc != nil {
+		if err := h.gc.Wipe(); err != nil {
+			h.signError(w, a.nonce, http.StatusInternalServerError, "wiping closures: "+err.Error())
+			return
+		}
+	}
 	h.log.Warn("store wiped", "by", string(a.pubWire))
 	h.signAndWrite(w, a.nonce, http.StatusOK, "application/json", []byte(`{"wiped":true}`))
 }

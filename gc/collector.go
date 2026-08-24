@@ -28,6 +28,9 @@ type Collector struct {
 	// re-test and the probe-list swap.
 	removal sync.RWMutex
 
+	// Per-name serialization of PutRef/DeleteRef (refops.go).
+	names nameLocks
+
 	mu      sync.Mutex // guards everything below, and union swaps
 	union   atomic.Pointer[union]
 	roots   map[key.Key]int  // root -> number of reference names

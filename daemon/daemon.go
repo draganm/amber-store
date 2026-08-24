@@ -15,6 +15,7 @@ import (
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/remotes"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -28,6 +29,19 @@ type handler struct {
 	refs    *refstore.Store
 	log     *slog.Logger
 	remotes *RemoteConfig
+	gc      *gc.Collector // nil: --gc=false — no walk on ref writes, gc routes 503
+}
+
+// An Option tweaks the daemon handler.
+type Option func(*handler)
+
+// WithCollector wires the garbage collector: PUT /v1/refs gains the
+// completeness walk (a missing object fails the write with a 404 naming
+// it), DELETE releases the root, pulls hold upload leases, and the /v1/gc
+// routes serve status, cycles and liveness queries. The collector must sit
+// over the same store and refs, and outlive the handler.
+func WithCollector(c *gc.Collector) Option {
+	return func(h *handler) { h.gc = c }
 }
 
 // RemoteConfig wires the daemon's remote-sync support: the persistent remote
@@ -55,17 +69,20 @@ func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
 // logger (method, path, status, duration), as are per-operation outcomes:
 // rejected uploads at Warn, store failures at Error, completed ingests at Info.
 // A nil logger discards all logging.
-func New(store *packstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
-	return NewWithRemotes(store, refs, logger, nil)
+func New(store *packstore.Store, refs *refstore.Store, logger *slog.Logger, opts ...Option) http.Handler {
+	return NewWithRemotes(store, refs, logger, nil, opts...)
 }
 
 // NewWithRemotes additionally registers the /v1/remotes and /v1/remote/*
 // routes backed by rc.
-func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig) http.Handler {
+func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig, opts ...Option) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	h := &handler{store: store, refs: refs, log: logger, remotes: rc}
+	for _, opt := range opts {
+		opt(h)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
@@ -75,6 +92,9 @@ func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.L
 	mux.HandleFunc("PUT /v1/refs", h.putRef)
 	mux.HandleFunc("GET /v1/refs", h.getRefs)
 	mux.HandleFunc("DELETE /v1/refs", h.deleteRef)
+	mux.HandleFunc("GET /v1/gc", h.gcStatus)
+	mux.HandleFunc("POST /v1/gc/run", h.gcRun)
+	mux.HandleFunc("GET /v1/gc/why/{key}", h.gcWhy)
 	if rc != nil {
 		mux.HandleFunc("POST /v1/remotes/preflight", h.remotePreflight)
 		mux.HandleFunc("PUT /v1/remotes", h.putRemote)

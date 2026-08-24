@@ -33,10 +33,12 @@ type serveConfig struct {
 	tlsCert       string
 	tlsKey        string
 	authWindow    time.Duration
+	segmentSize   int64
 	sync          bool
 	adminPassword string
 	logLevel      string
 	logFormat     string
+	gc            gcConfig
 }
 
 func serveCommand() *cli.Command {
@@ -44,7 +46,7 @@ func serveCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "serve",
 		Usage: "run the remote server other amber daemons push to and pull from",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
@@ -86,6 +88,12 @@ func serveCommand() *cli.Command {
 				Usage:       "request-timestamp validity window (each side of now)",
 				Destination: &cfg.authWindow,
 			},
+			&cli.Int64Flag{
+				Name:        "segment-size",
+				Value:       packstore.DefaultSegmentSize,
+				Usage:       "seal the active segment once it reaches this many bytes; the reaping granularity",
+				Destination: &cfg.segmentSize,
+			},
 			&cli.BoolFlag{
 				Name:        "sync",
 				Value:       true,
@@ -110,7 +118,7 @@ func serveCommand() *cli.Command {
 				Usage:       "log format: text or json",
 				Destination: &cfg.logFormat,
 			},
-		},
+		}, gcFlags(&cfg.gc)...),
 		Action: func(c *cli.Context) error { return runServe(c, cfg) },
 	}
 }
@@ -169,7 +177,8 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 	defer closeIdentity()
 
-	store, err := packstore.Open(filepath.Join(cfg.store, "packstore"), packstore.WithSync(cfg.sync))
+	store, err := packstore.Open(filepath.Join(cfg.store, "packstore"),
+		packstore.WithSync(cfg.sync), packstore.WithSegmentSize(cfg.segmentSize))
 	if err != nil {
 		return err
 	}
@@ -184,6 +193,16 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return err
 	}
 	defer refs.Close()
+
+	// The collector sits over the stores: deferred after them, it closes
+	// (waiting out a running cycle) before they do.
+	coll, err := cfg.gc.openCollector(cfg.store, store, refs, cfg.sync)
+	if err != nil {
+		return err
+	}
+	if coll != nil {
+		defer coll.Close()
+	}
 
 	keys, err := allowstore.Open(filepath.Join(cfg.store, "allowed-keys"), cfg.sync)
 	if err != nil {
@@ -211,6 +230,7 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		Identity: signer,
 		Log:      logger,
 		Window:   cfg.authWindow,
+		GC:       coll,
 	})
 	if cfg.adminPassword != "" {
 		ui, err := adminUI()
@@ -246,6 +266,9 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	reg := newDebugRegistry()
 	if cfg.debugListen != "" {
 		handler = metricsMiddleware(reg, handler)
+		if coll != nil {
+			registerGCMetrics(reg, coll)
+		}
 	}
 	debugAddr, err := startDebugServer(ctx, cfg.debugListen, reg, logger)
 	if err != nil {

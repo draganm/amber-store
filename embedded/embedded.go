@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/identity"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -38,6 +39,12 @@ type Config struct {
 	Grant func() []byte
 	// Sync selects fsync durability for object and ref writes.
 	Sync bool
+	// NoGC skips opening the collector; GC is nil and reference writes skip
+	// the closure bookkeeping, exactly like a --gc=false daemon.
+	NoGC bool
+	// GC configures the collector (gc.Options zero value: 1 h grace, 0.5
+	// garbage line, no background cycles). NoSync follows Sync.
+	GC gc.Options
 }
 
 // Store is a process-owned amber store plus its remote-sync surface. The
@@ -48,6 +55,13 @@ type Store struct {
 	Refs     *refstore.Store
 	Remotes  *remotes.Registry
 	Identity ssh.Signer // the store's own identity
+	// GC is the garbage collector over Objects and Refs (<dir>/closures);
+	// nil with Config.NoGC. Run/Status/Why/Lease are used directly. Write
+	// local references through PutRef/DeleteRef, not Refs.Put/Delete: a
+	// record written behind the collector's back is invisible to its union
+	// until the next Open, and a cycle in this process could reap objects
+	// the bypassing reference just named.
+	GC *gc.Collector
 
 	signer ssh.Signer
 	grant  func() []byte
@@ -85,20 +99,65 @@ func Open(dir string, cfg Config) (*Store, error) {
 		objects.Close()
 		return nil, err
 	}
+	var coll *gc.Collector
+	if !cfg.NoGC {
+		opts := cfg.GC
+		opts.NoSync = !cfg.Sync
+		coll, err = gc.Open(filepath.Join(dir, "closures"), objects, refs, opts)
+		if err != nil {
+			refs.Close()
+			objects.Close()
+			return nil, err
+		}
+	}
 	signer := cfg.Signer
 	if signer == nil {
 		signer = id
 	}
 	return &Store{
-		Objects: objects, Refs: refs, Remotes: reg, Identity: id,
+		Objects: objects, Refs: refs, Remotes: reg, Identity: id, GC: coll,
 		signer: signer, grant: cfg.Grant,
 		clients: map[string]cachedClient{},
 	}, nil
 }
 
-// Close releases the underlying stores.
+// Close releases the underlying stores; the collector goes first, as it
+// sits on top of them.
 func (s *Store) Close() error {
-	return errors.Join(s.Refs.Close(), s.Objects.Close())
+	var gcErr error
+	if s.GC != nil {
+		gcErr = s.GC.Close()
+	}
+	return errors.Join(gcErr, s.Refs.Close(), s.Objects.Close())
+}
+
+// PutRef writes the reference record raw (canonical encoding; signatures
+// are preserved verbatim) under its name, through the collector when it
+// runs: the referenced content must be complete, and a missing object fails
+// the write with an error naming it — re-store the objects and retry (the
+// optimistic reference PUT).
+func (s *Store) PutRef(raw []byte) error {
+	rec, err := reference.Decode(raw)
+	if err != nil {
+		return err
+	}
+	root, err := key.Parse(rec.Key)
+	if err != nil {
+		return err
+	}
+	if s.GC == nil {
+		return s.Refs.Put(rec.Name, raw)
+	}
+	return s.GC.PutRef(rec.Name, root, raw)
+}
+
+// DeleteRef removes the local reference name, releasing its root when the
+// collector runs. A missing name returns refstore.ErrNotFound.
+func (s *Store) DeleteRef(name string) error {
+	if s.GC == nil {
+		return s.Refs.Delete(name)
+	}
+	return s.GC.DeleteRef(name)
 }
 
 // RemoteClient builds a signed client for the registered remote name (empty
@@ -190,14 +249,34 @@ func (s *Store) Pull(ctx context.Context, remote, refName string, opts remotesyn
 	if err != nil {
 		return key.Key{}, remotesync.PullStats{}, fmt.Errorf("remote reference %q: %w", refName, err)
 	}
+	opts, release := s.leased(root, opts)
+	defer release()
 	stats, err := remotesync.Pull(ctx, s.Objects, rc, root, opts)
 	if err != nil {
 		return key.Key{}, stats, err
 	}
-	if err := s.Refs.Put(refName, raw); err != nil {
+	if err := s.PutRef(raw); err != nil {
 		return key.Key{}, stats, fmt.Errorf("writing local reference %q: %w", refName, err)
 	}
 	return root, stats, nil
+}
+
+// leased covers a pull's root with an upload lease against the reaping
+// horizon until release, refreshing it on progress so a long transfer
+// never idles past the grace window. Without a collector it is a no-op.
+func (s *Store) leased(root key.Key, opts remotesync.Opts) (remotesync.Opts, func()) {
+	if s.GC == nil {
+		return opts, func() {}
+	}
+	l := s.GC.Lease(root)
+	progress := opts.Progress
+	opts.Progress = func(done, total int) {
+		l.Refresh()
+		if progress != nil {
+			progress(done, total)
+		}
+	}
+	return opts, l.Release
 }
 
 // RemoteWipe factory-resets the named remote: every object and reference on
@@ -212,12 +291,16 @@ func (s *Store) RemoteWipe(ctx context.Context, remote string) error {
 }
 
 // PullTree completes the local store under a root the caller already knows,
-// without touching refs.
+// without touching refs. The lease covers the transfer; a reference naming
+// root should follow within the collector's grace window, or its PUT may
+// have to re-send objects (the optimistic PUT).
 func (s *Store) PullTree(ctx context.Context, remote string, root key.Key, opts remotesync.Opts) (remotesync.PullStats, error) {
 	rc, err := s.RemoteClient(remote)
 	if err != nil {
 		return remotesync.PullStats{}, err
 	}
+	opts, release := s.leased(root, opts)
+	defer release()
 	return remotesync.Pull(ctx, s.Objects, rc, root, opts)
 }
 
