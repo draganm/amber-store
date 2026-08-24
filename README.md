@@ -106,10 +106,13 @@ receives, and transfers reduce to "send what the other side is missing":
 A reference is a small record — name → key, plus creator, timestamp, and an
 SSH signature ([`architecture/references.md`](architecture/references.md)).
 References always travel **after** objects: dangling references are refused
-on both ends (the daemon checks that the pointed-to key exists; the server
-walks the whole tree under it and rejects the record if any reachable object
-is missing), which is what makes `push-objects` → `push-ref` the natural
-order. Locally a name is freely overwritable; on a server, names have owners
+on both ends — daemon and server walk the whole tree under the key and
+reject the record naming any missing object (with the garbage collector
+off, `--gc=false`, the daemon checks only that the pointed-to key exists) —
+which is what makes `push-objects` → `push-ref` the natural order. The walk
+doubles as the liveness closure of
+[`architecture/simple-gc.md`](architecture/simple-gc.md); `amber-store gc
+status|run|why` drive the collector. Locally a name is freely overwritable; on a server, names have owners
 (see below).
 
 ### How auth works
