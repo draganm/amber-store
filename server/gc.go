@@ -58,11 +58,16 @@ func (h *handler) gcStatus(w http.ResponseWriter, r *http.Request, a *authedRequ
 
 // gcRun runs one cycle now and returns its gc.CycleStats. An optional
 // ?garbage= query (a fraction) forces the selection line; absent means
-// policy. A cycle already in flight is a 409.
+// policy. A cycle already in flight is a 409. A cycle mutates the
+// packstore (reap copies, pack deletes), so like every mutating handler it
+// holds wipeMu shared — a wipe never races it; the background-interval
+// loop is fenced by postWipe's quiesce instead.
 func (h *handler) gcRun(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	if !h.gcEnabled(w, a.nonce) {
 		return
 	}
+	h.wipeMu.RLock()
+	defer h.wipeMu.RUnlock()
 	garbage := -1.0
 	if v := r.URL.Query().Get("garbage"); v != "" {
 		g, err := strconv.ParseFloat(v, 64)

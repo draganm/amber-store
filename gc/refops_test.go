@@ -159,6 +159,20 @@ func TestPutRefSerializedPerName(t *testing.T) {
 	}
 }
 
+func TestQuiesceHoldsOffCycles(t *testing.T) {
+	ts := newTestStore(t, 1<<20)
+	c := ts.openCollector(t, Options{})
+	release := c.Quiesce()
+	if _, err := c.Run(t.Context(), -1); !errors.Is(err, ErrCycleRunning) {
+		release()
+		t.Fatalf("Run while quiesced: %v, want ErrCycleRunning", err)
+	}
+	release()
+	if _, err := c.Run(t.Context(), -1); err != nil {
+		t.Fatalf("Run after release: %v", err)
+	}
+}
+
 func TestCounters(t *testing.T) {
 	ts := newTestStore(t, 1<<20)
 	root, keys := storeTree(t, ts.objects, "counters", 4)

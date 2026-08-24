@@ -147,6 +147,22 @@ func (c *Collector) Close() error {
 	return c.d.close()
 }
 
+// Quiesce cancels a running cycle, waits it out, and holds off new ones —
+// Run returns ErrCycleRunning — until the returned release is called. For
+// callers about to mutate the stores under the collector (a wipe): a cycle
+// still holding the pre-mutation union must not append or delete packs
+// while the stores change underneath it. Do not call Wipe or Close while
+// quiesced — release first; both take the same cycle lock.
+func (c *Collector) Quiesce() (release func()) {
+	c.mu.Lock()
+	if c.cancelCycle != nil {
+		c.cancelCycle()
+	}
+	c.mu.Unlock()
+	c.cycleMu.Lock() // waits out the cancelled cycle; blocks new ones
+	return c.cycleMu.Unlock
+}
+
 // Wipe cancels a running cycle and empties closures/ and the union. It
 // accompanies packstore.Wipe and refstore.Wipe, which the caller runs
 // first; afterwards the collector is empty but usable.
