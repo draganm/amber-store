@@ -338,6 +338,22 @@ func TestParseFilterSectionRejectsBadGeometry(t *testing.T) {
 		binary.BigEndian.PutUint32(b[9:13], 0)
 		binary.BigEndian.PutUint32(b[13:17], 0xFFFFFFFF)
 	})
+	// segCount == 0 (with segCountLen == 0 and fpCount == 2*segLen) satisfies
+	// every other geometry identity, so it needs its own case. This crafted
+	// geometry previously made xorfilter's Contains panic with
+	// index-out-of-range on first lookup; parse must reject it instead.
+	t.Run("segCount zero", func(t *testing.T) {
+		segLen := binary.BigEndian.Uint32(sec[9:13])
+		fpCount := 2 * segLen
+		bad := slices.Clone(sec[:filterHeaderSize+2*int(fpCount)])
+		binary.BigEndian.PutUint32(bad[17:21], 0) // segCount
+		binary.BigEndian.PutUint32(bad[21:25], 0) // segCountLen
+		binary.BigEndian.PutUint32(bad[25:29], fpCount)
+		_, err := parseFilterSection(bad)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("want ErrCorrupt, got %v", err)
+		}
+	})
 }
 
 func TestFilterSectionFieldRoundTrip(t *testing.T) {

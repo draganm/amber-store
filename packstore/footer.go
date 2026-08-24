@@ -154,6 +154,8 @@ func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 	segCount := binary.BigEndian.Uint32(b[17:21])
 	segCountLen := binary.BigEndian.Uint32(b[21:25])
 	switch {
+	case segCount == 0:
+		return nil, fmt.Errorf("%w: filter segment count is zero", ErrCorrupt)
 	case segLen == 0 || segLen&(segLen-1) != 0,
 		segLenMask != segLen-1,
 		uint64(segCountLen) != uint64(segCount)*uint64(segLen),
