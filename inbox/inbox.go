@@ -177,6 +177,11 @@ func (ib *Inbox) Commit(tmpPath string, bodyHash []byte, root key.Key) (added bo
 	switch _, statErr := os.Stat(dst); {
 	case statErr == nil:
 		ib.Discard(tmpPath)
+		// The upload is alive even when it re-sends a pack (a resumed
+		// push): the lease refreshes per received pack, not per new entry.
+		ib.mu.Lock()
+		ib.leaseLocked(root)
+		ib.mu.Unlock()
 		return false, nil
 	case !errors.Is(statErr, os.ErrNotExist):
 		return false, statErr
