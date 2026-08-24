@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/draganm/amber-store/remotes"
-	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
 	"github.com/draganm/amber-store/remoteclient"
+	"github.com/draganm/amber-store/remotes"
 	"github.com/draganm/amber-store/remotesync"
+	"github.com/draganm/amber-store/sshsign"
 )
 
 // remoteFor resolves the ?remote= query (empty selects the sole remote) into

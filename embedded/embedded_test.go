@@ -206,6 +206,12 @@ func TestRunnerEnginePullRoundTrip(t *testing.T) {
 	if err != nil || !has {
 		t.Fatalf("root object not local after pull: has=%v err=%v", has, err)
 	}
+	// The pull wrote the reference through the collector: one closure on
+	// disk, its tails in the union.
+	ct := consumer.GC.Counters()
+	if ct.Refs != 1 || ct.Closures != 1 || ct.Union == 0 {
+		t.Fatalf("collector counters after pull = %+v, want 1 ref, 1 closure, a nonempty union", ct)
+	}
 }
 
 // TestGrantCannotPushRefs: the runner's facade Push (which ends in PutRef)

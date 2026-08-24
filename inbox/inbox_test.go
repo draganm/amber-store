@@ -83,7 +83,14 @@ func TestCommitIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { ib.Close() })
+	// Dedup is a stat on the content-addressed entry name, meaningful only
+	// while the first entry is still on disk. Stop the worker pool now
+	// (Close drains the empty queue and returns) so it cannot process and
+	// remove entry one before the second Commit checks — the assertion
+	// below is deterministic instead of racing the worker.
+	if err := ib.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	obj := blobObject(t, []byte("dup payload"))
 	root := obj.Key
