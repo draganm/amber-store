@@ -95,7 +95,7 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 	// The referenced content must be complete: every object reachable from
 	// the key must exist in the store. The walk runs parallel lookups —
 	// referenced trees can be large.
-	err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
+	_, err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
 	var miss *fstree.MissingObjectError
 	switch {
 	case errors.As(err, &miss):

@@ -17,17 +17,18 @@ func (e *MissingObjectError) Error() string {
 	return fmt.Sprintf("fstree: object %s is missing", e.Key)
 }
 
-// CheckComplete verifies that every object reachable from root exists. The
-// tree is walked breadth-first, checking each level's objects with up to jobs
-// concurrent lookups (jobs <= 0 means GOMAXPROCS): interior nodes are read
-// with get — a failed read surfaces as the wrapped get error — and Blob and
-// XattrSet leaves are tested with has — an absent leaf surfaces as a
-// *MissingObjectError. Each object is checked once even when referenced
-// repeatedly.
-func CheckComplete(root key.Key, get func(key.Key) ([]byte, error), has func(key.Key) (bool, error), jobs int) error {
+// CheckComplete verifies that every object reachable from root exists and
+// returns the visited keys — root first, then discovery order, each once.
+// The tree is walked breadth-first, checking each level's objects with up
+// to jobs concurrent lookups (jobs <= 0 means GOMAXPROCS): interior nodes
+// are read with get — a failed read surfaces as the wrapped get error — and
+// Blob and XattrSet leaves are tested with has — an absent leaf surfaces as
+// a *MissingObjectError. On error the visited list is nil.
+func CheckComplete(root key.Key, get func(key.Key) ([]byte, error), has func(key.Key) (bool, error), jobs int) ([]key.Key, error) {
 	if jobs <= 0 {
 		jobs = runtime.GOMAXPROCS(0)
 	}
+	visited := []key.Key{root}
 	seen := map[key.Key]bool{root: true}
 	frontier := []key.Key{root}
 	for len(frontier) > 0 {
@@ -55,18 +56,19 @@ func CheckComplete(root key.Key, get func(key.Key) ([]byte, error), has func(key
 			})
 		}
 		if err := g.Wait(); err != nil {
-			return err
+			return nil, err
 		}
 		var next []key.Key
 		for _, cks := range children {
 			for _, ck := range cks {
 				if !seen[ck] {
 					seen[ck] = true
+					visited = append(visited, ck)
 					next = append(next, ck)
 				}
 			}
 		}
 		frontier = next
 	}
-	return nil
+	return visited, nil
 }

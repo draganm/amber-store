@@ -43,6 +43,8 @@ type WriteOpts struct {
 // an error, WriteParallel stops and returns it. With opts.Verify, a
 // key/payload mismatch stops the run with a wrapped ErrVerify.
 func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
+	w := s.beginWrite()
+	defer s.endWrite(w)
 	writers := opts.Writers
 	if writers <= 0 {
 		writers = runtime.GOMAXPROCS(0)
@@ -125,6 +127,7 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 			if !ok {
 				return flush()
 			}
+			s.observe(obj.Key)
 			if !seen.addIfAbsent(obj.Key) {
 				deduped.Add(1)
 				continue
