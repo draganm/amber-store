@@ -84,7 +84,7 @@ func TestGrantAuthedClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
@@ -173,7 +173,7 @@ func TestEmptyGrantProviderOmitsHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	inner := server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	})

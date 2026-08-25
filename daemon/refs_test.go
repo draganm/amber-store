@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
@@ -38,7 +37,7 @@ func refsServer(t *testing.T) (*httptest.Server, []byte) {
 	if err := store.Put(o.Key, o.Bytes); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	t.Cleanup(srv.Close)
 	return srv, o.Key[:]
 }

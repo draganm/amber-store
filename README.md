@@ -150,6 +150,7 @@ Three layers, local to remote
 | [`architecture/remote.md`](architecture/remote.md) | The remote server (`amber-store serve`): identity, signed HTTP protocol, wire routes, sync algorithms. |
 | [`architecture/generational-gc.md`](architecture/generational-gc.md) | Generational garbage collection: packstores as generations, the age invariant and ordered uploads, copy-forward sweeps, promotion by directory rename, leases and the ref barrier. |
 | [`architecture/simple-gc.md`](architecture/simple-gc.md) | Simple garbage collection: per-root tail closures on disk, their refcounted union in RAM, pack indexes scored against it and reaped by live ratio into the active segment; horizon, removal lock, delete-time re-test. |
+| [`architecture/mark-sweep-gc.md`](architecture/mark-sweep-gc.md) | The implemented collector: a mark bit per sealed record slotted by the packs' own footer indexes, a write barrier that greys concurrent ingests, and a sweep that rewrites mostly-dead packs — no state between cycles. |
 
 ## Usage
 

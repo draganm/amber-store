@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/admin"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/allowstore"
@@ -37,6 +38,7 @@ type serveConfig struct {
 	adminPassword string
 	logLevel      string
 	logFormat     string
+	gc            gcFlags
 }
 
 func serveCommand() *cli.Command {
@@ -44,7 +46,7 @@ func serveCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "serve",
 		Usage: "run the remote server other amber daemons push to and pull from",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
@@ -110,7 +112,7 @@ func serveCommand() *cli.Command {
 				Usage:       "log format: text or json",
 				Destination: &cfg.logFormat,
 			},
-		},
+		}, cfg.gc.flags()...),
 		Action: func(c *cli.Context) error { return runServe(c, cfg) },
 	}
 }
@@ -174,16 +176,25 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 		return err
 	}
 	defer store.Close()
-	ib, err := inbox.Open(filepath.Join(cfg.store, "inbox"), store, 0, logger)
-	if err != nil {
-		return err
-	}
-	defer ib.Close()
 	refs, err := refstore.Open(filepath.Join(cfg.store, "refs"), cfg.sync)
 	if err != nil {
 		return err
 	}
 	defer refs.Close()
+	// Deferred after the stores, so it closes first: Close waits out a
+	// running cycle before the stores under it go away.
+	coll, err := gc.Open(filepath.Join(cfg.store, "closures"), store, refs, cfg.gc.options())
+	if err != nil {
+		return err
+	}
+	defer coll.Close()
+	// Deferred after the collector, so drains stop before it: the inbox's
+	// store writes hold the collector's write gate against a sweep.
+	ib, err := inbox.Open(filepath.Join(cfg.store, "inbox"), store, 0, logger, inbox.WithGate(coll.BeginWrite))
+	if err != nil {
+		return err
+	}
+	defer ib.Close()
 
 	keys, err := allowstore.Open(filepath.Join(cfg.store, "allowed-keys"), cfg.sync)
 	if err != nil {
@@ -204,13 +215,14 @@ func runServe(c *cli.Context, cfg *serveConfig) error {
 	}
 
 	handler := server.New(server.Config{
-		Store:    store,
-		Inbox:    ib,
-		Refs:     refs,
-		Allow:    keys.Current,
-		Identity: signer,
-		Log:      logger,
-		Window:   cfg.authWindow,
+		Store:     store,
+		Inbox:     ib,
+		Refs:      refs,
+		Allow:     keys.Current,
+		Identity:  signer,
+		Log:       logger,
+		Window:    cfg.authWindow,
+		Collector: coll,
 	})
 	if cfg.adminPassword != "" {
 		ui, err := adminUI()

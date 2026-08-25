@@ -58,8 +58,34 @@ func completeTree(t *testing.T) []fstree.Object {
 func TestCheckComplete_CompleteTree(t *testing.T) {
 	objs := completeTree(t)
 	root := objs[len(objs)-1]
-	if err := fstree.CheckComplete(root.Key, mapGetter(objs...), mapHas(objs...), 4); err != nil {
-		t.Fatalf("CheckComplete on a complete tree: %v", err)
+	visited, err := fstree.CheckComplete(root.Key, mapGetter(objs...), mapHas(objs...), 4)
+	if err != nil {
+		t.Fatalf("CheckComplete: %v", err)
+	}
+	if len(visited) != len(objs) {
+		t.Errorf("visited %d keys, want %d", len(visited), len(objs))
+	}
+	if visited[0] != root.Key {
+		t.Errorf("visited[0] = %s, want root", visited[0])
+	}
+	want := make(map[key.Key]bool, len(objs))
+	for _, o := range objs {
+		want[o.Key] = true
+	}
+	seen := make(map[key.Key]bool, len(visited))
+	for _, k := range visited {
+		if seen[k] {
+			t.Errorf("key %s visited twice", k)
+		}
+		seen[k] = true
+		if !want[k] {
+			t.Errorf("unexpected visited key %s", k)
+		}
+	}
+	for k := range want {
+		if !seen[k] {
+			t.Errorf("key %s not visited", k)
+		}
 	}
 }
 
@@ -73,7 +99,7 @@ func TestCheckComplete_MissingLeaf(t *testing.T) {
 			present = append(present, o)
 		}
 	}
-	err := fstree.CheckComplete(root.Key, mapGetter(present...), mapHas(present...), 4)
+	_, err := fstree.CheckComplete(root.Key, mapGetter(present...), mapHas(present...), 4)
 	var miss *fstree.MissingObjectError
 	if !errors.As(err, &miss) {
 		t.Fatalf("err = %v, want a *MissingObjectError", err)
@@ -95,7 +121,7 @@ func TestCheckComplete_MissingInteriorNode(t *testing.T) {
 	}
 	// mapGetter fails absent fetches with key.ErrBadKeyLength; the wrapped get
 	// error must surface so callers can map it to their own not-found.
-	err := fstree.CheckComplete(root.Key, mapGetter(present...), mapHas(present...), 4)
+	_, err := fstree.CheckComplete(root.Key, mapGetter(present...), mapHas(present...), 4)
 	if !errors.Is(err, key.ErrBadKeyLength) {
 		t.Fatalf("err = %v, want the wrapped get error", err)
 	}

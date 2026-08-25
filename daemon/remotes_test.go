@@ -82,7 +82,7 @@ func newRemoteServer(t *testing.T, identity ssh.Signer, clientPub ssh.PublicKey)
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
@@ -108,7 +108,7 @@ func newDaemonFor(t *testing.T, serverSrv *httptest.Server, identity, client ssh
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := daemon.NewWithRemotes(store, refs, slog.New(slog.DiscardHandler), &daemon.RemoteConfig{
+	h := daemon.NewWithRemotes(store, refs, openCollector(t, store, refs), slog.New(slog.DiscardHandler), &daemon.RemoteConfig{
 		Registry:      registry,
 		DefaultSigner: client,
 	})
@@ -294,7 +294,7 @@ func TestRemoteRoutesAbsentWithoutConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer refs.Close()
-	srv := httptest.NewServer(daemon.New(store, refs, nil))
+	srv := httptest.NewServer(daemon.New(store, refs, openCollector(t, store, refs), nil))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/v1/remotes")
 	if err != nil {

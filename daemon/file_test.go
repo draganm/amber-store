@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/draganm/amber-store/daemon"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 )
@@ -96,7 +95,7 @@ func TestGetFile_RejectsDirectoryKey(t *testing.T) {
 
 func TestGetFile_SetsContentLength(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 	c := serveOnSocket(t, store)
 

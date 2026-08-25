@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/allowlist"
@@ -46,6 +47,17 @@ type testServer struct {
 	admin    ssh.Signer
 }
 
+// openTestCollector opens a GC collector over the pair, as serve does.
+func openTestCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	dir := t.TempDir()
@@ -72,11 +84,12 @@ func newTestServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 	h := server.New(server.Config{
-		Store:    store,
-		Refs:     refs,
-		Allow:    func() *allowlist.List { return allow },
-		Identity: identity,
-		Inbox:    ib,
+		Store:     store,
+		Refs:      refs,
+		Allow:     func() *allowlist.List { return allow },
+		Identity:  identity,
+		Inbox:     ib,
+		Collector: openTestCollector(t, store, refs),
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)

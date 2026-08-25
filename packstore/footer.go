@@ -154,6 +154,8 @@ func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 	segCount := binary.BigEndian.Uint32(b[17:21])
 	segCountLen := binary.BigEndian.Uint32(b[21:25])
 	switch {
+	case segCount == 0:
+		return nil, fmt.Errorf("%w: filter segment count is zero", ErrCorrupt)
 	case segLen == 0 || segLen&(segLen-1) != 0,
 		segLenMask != segLen-1,
 		uint64(segCountLen) != uint64(segCount)*uint64(segLen),
@@ -177,6 +179,16 @@ func parseFilterSection(b []byte) (*xorfilter.BinaryFuse[uint16], error) {
 // searchIndex finds k in a parsed index section: fanout bucket on the last
 // byte, then binary search on the full key within the bucket.
 func searchIndex(fanout *[256]uint32, entries []byte, k key.Key) (off uint64, slen uint32, ok bool) {
+	pos, ok := searchIndexPos(fanout, entries, k)
+	if !ok {
+		return 0, 0, false
+	}
+	e := entries[pos*indexEntrySize:]
+	return binary.BigEndian.Uint64(e[32:40]), binary.BigEndian.Uint32(e[40:44]), true
+}
+
+// searchIndexPos returns k's entry position within the index section.
+func searchIndexPos(fanout *[256]uint32, entries []byte, k key.Key) (pos int, ok bool) {
 	b := k[key.Size-1]
 	lo := uint32(0)
 	if b > 0 {
@@ -188,13 +200,13 @@ func searchIndex(fanout *[256]uint32, entries []byte, k key.Key) (off uint64, sl
 		return bytes.Compare(e[:32], k[:]) >= 0
 	})
 	if i >= n {
-		return 0, 0, false
+		return 0, false
 	}
-	e := entries[(int(lo)+i)*indexEntrySize:]
-	if !bytes.Equal(e[:32], k[:]) {
-		return 0, 0, false
+	pos = int(lo) + i
+	if !bytes.Equal(entries[pos*indexEntrySize:][:32], k[:]) {
+		return 0, false
 	}
-	return binary.BigEndian.Uint64(e[32:40]), binary.BigEndian.Uint32(e[40:44]), true
+	return pos, true
 }
 
 // buildFooter assembles the complete footer (seal marker, index section,
@@ -303,6 +315,12 @@ func parseFooter(mm []byte) (*footerView, error) {
 // lookup finds k in the segment's index.
 func (fv *footerView) lookup(k key.Key) (off uint64, slen uint32, ok bool) {
 	return searchIndex(&fv.fanout, fv.entries, k)
+}
+
+// lookupPos finds k's position in the segment's index — the mark-set bit
+// slot for the record (see markset.go).
+func (fv *footerView) lookupPos(k key.Key) (pos int, ok bool) {
+	return searchIndexPos(&fv.fanout, fv.entries, k)
 }
 
 // sealedSegment is an immutable, fully mmap'd segment.

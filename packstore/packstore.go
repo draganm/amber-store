@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/key"
@@ -76,13 +78,64 @@ type Store struct {
 	cfg  config
 
 	appendMu sync.Mutex
-	mu       sync.RWMutex
-	sealed   []*sealedSegment // ascending id; newest last
-	active   *activeSegment   // nil until the first write of a session
-	nextID   uint64
-	closed   bool
-	failed   error          // sticky write-path failure; written under appendMu+mu, read under either
-	scrubs   sync.WaitGroup // in-flight Verify walks; Close waits before munmap
+
+	// write-barrier grey capture, see barrier.go
+	capturing atomic.Bool
+	greyMu    sync.Mutex
+	grey      map[key.Key]struct{}
+
+	mu     sync.RWMutex
+	sealed []*sealedSegment // ascending id; newest last
+	active *activeSegment   // nil until the first write of a session
+	nextID uint64
+	closed bool
+	failed error // sticky write-path failure; written under appendMu+mu, read under either
+
+	// scrubMu/scrubN/scrubC track in-flight lock-free mmap walks (Verify,
+	// ScanIndex, Record): Close/Wipe/Remove wait for scrubN to reach 0 before
+	// munmap. A plain sync.WaitGroup does not work here: Remove and Wipe
+	// release mu before waiting, so a new scrub can register (Add) while the
+	// wait is in progress, and WaitGroup treats a concurrent Add-during-Wait
+	// as misuse and panics. The cond var tolerates that: a late scrub cannot
+	// reach a segment already detached from the probe list, so the waiter
+	// just keeps waiting until scrubN drops back to 0. See beginScrub,
+	// endScrub, waitScrubs.
+	scrubMu sync.Mutex
+	scrubN  int
+	scrubC  *sync.Cond
+
+	writesMu sync.Mutex
+	writes   map[*writeToken]time.Time // in-flight Put/WriteBatch/WriteParallel starts
+}
+
+// beginScrub registers a lock-free mmap walk. Call while holding mu.RLock
+// after the closed check, so registration is ordered before Close, Wipe and
+// Remove detach segments.
+func (s *Store) beginScrub() {
+	s.scrubMu.Lock()
+	s.scrubN++
+	s.scrubMu.Unlock()
+}
+
+// endScrub deregisters a walk started with beginScrub.
+func (s *Store) endScrub() {
+	s.scrubMu.Lock()
+	s.scrubN--
+	if s.scrubN == 0 {
+		s.scrubC.Broadcast()
+	}
+	s.scrubMu.Unlock()
+}
+
+// waitScrubs blocks until no scrub is in flight. Unlike WaitGroup.Wait it
+// tolerates concurrent registrations: a late scrub cannot reach a segment
+// already detached from the probe list, and the waiter just keeps waiting.
+func (s *Store) waitScrubs() {
+	s.scrubMu.Lock()
+	for s.scrubN > 0 {
+		s.scrubC.Wait()
+	}
+	s.scrubMu.Unlock()
 }
 
 // Open opens (creating if necessary) a store rooted at dir. Only one Store
@@ -105,7 +158,8 @@ func Open(dir string, opts ...Option) (*Store, error) {
 		dirF.Close()
 		return nil, fmt.Errorf("packstore: %s is already open: %w", dir, err)
 	}
-	s := &Store{dir: dir, dirF: dirF, cfg: cfg, nextID: 1}
+	s := &Store{dir: dir, dirF: dirF, cfg: cfg, nextID: 1, writes: make(map[*writeToken]time.Time)}
+	s.scrubC = sync.NewCond(&s.scrubMu)
 	if err := s.load(); err != nil {
 		s.releaseDir()
 		return nil, err
@@ -266,7 +320,11 @@ func (s *Store) createActive() error {
 func (s *Store) append(k key.Key, rec []byte, syncNow bool) error {
 	s.appendMu.Lock()
 	defer s.appendMu.Unlock()
+	return s.appendLocked(k, rec, syncNow)
+}
 
+// appendLocked is append's body. The caller must hold appendMu.
+func (s *Store) appendLocked(k key.Key, rec []byte, syncNow bool) error {
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -408,6 +466,8 @@ func (s *Store) sealActiveLocked() error {
 // returns an error after appending part of the batch, it best-effort fsyncs
 // that prefix first, so Has-visible records never stay non-durable.
 func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
+	w := s.beginWrite()
+	defer s.endWrite(w)
 	seen := make(map[key.Key]struct{})
 	appended := false
 	fail := func(err error) error {
@@ -424,6 +484,7 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 			continue
 		}
 		seen[obj.Key] = struct{}{}
+		s.observe(obj.Key)
 		has, err := s.Has(obj.Key)
 		if err != nil {
 			return fail(fmt.Errorf("exists (%s): %w", obj.Key, err))
@@ -447,12 +508,15 @@ func (s *Store) WriteBatch(seq iter.Seq2[Object, error]) error {
 // A dedup hit returns success without fsyncing; if the matching record was
 // appended by a still-running batch, its durability rides on that batch's commit.
 func (s *Store) Put(k key.Key, data []byte) error {
+	w := s.beginWrite()
+	defer s.endWrite(w)
 	s.mu.RLock()
 	failed := s.failed
 	s.mu.RUnlock()
 	if failed != nil {
 		return failed
 	}
+	s.observe(k)
 	has, err := s.Has(k)
 	if err != nil {
 		return err
@@ -655,9 +719,11 @@ func (s *Store) Wipe() error {
 	s.failed = nil
 	// From here readers see an empty store; a Verify that started after this
 	// unlock walks an empty snapshot. Pre-existing scrubs still hold the old
-	// mmaps, so wait before unmapping (see Close).
+	// mmaps, so wait before unmapping (see Close). waitScrubs tolerates a
+	// scrub registering after this unlock (unlike WaitGroup.Wait): it can
+	// only ever reach the empty snapshot above, never the detached segments.
 	s.mu.Unlock()
-	s.scrubs.Wait()
+	s.waitScrubs()
 
 	var firstErr error
 	if active != nil {
@@ -710,7 +776,7 @@ func (s *Store) Close() error {
 	// scrubs cannot start (closed is set; Verify checks it under mu.RLock).
 	// Callers wanting a faster Close cancel Verify's context first.
 	s.mu.Unlock()
-	s.scrubs.Wait()
+	s.waitScrubs()
 
 	for _, seg := range s.sealed {
 		if err := seg.close(); err != nil && firstErr == nil {

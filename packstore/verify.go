@@ -29,12 +29,12 @@ func (s *Store) Verify(ctx context.Context) error {
 		s.mu.RUnlock()
 		return ErrClosed
 	}
-	// Registering under the read lock orders the Add strictly before any
+	// Registering under the read lock orders beginScrub strictly before any
 	// Close (which sets closed under the write lock and then waits): a scrub
 	// can never start after Close begins, and Close never unmaps while a
 	// scrub is walking the mappings.
-	s.scrubs.Add(1)
-	defer s.scrubs.Done()
+	s.beginScrub()
+	defer s.endScrub()
 	segs := make([]*sealedSegment, len(s.sealed))
 	copy(segs, s.sealed)
 	s.mu.RUnlock()

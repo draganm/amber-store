@@ -29,6 +29,12 @@ func (h *handler) postWipe(w http.ResponseWriter, r *http.Request, a *authedRequ
 		h.signError(w, a.nonce, http.StatusInternalServerError, "wiping objects: "+err.Error())
 		return
 	}
+	// After the stores: cancels any running cycle, waits it out, clears the
+	// last-cycle stats.
+	if err := h.coll.Wipe(); err != nil {
+		h.signError(w, a.nonce, http.StatusInternalServerError, "resetting the collector: "+err.Error())
+		return
+	}
 	h.log.Warn("store wiped", "by", string(a.pubWire))
 	h.signAndWrite(w, a.nonce, http.StatusOK, "application/json", []byte(`{"wiped":true}`))
 }

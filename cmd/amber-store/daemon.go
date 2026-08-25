@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/draganm/amber-store/daemon"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/identity"
 	"github.com/draganm/amber-store/remotes"
 	"github.com/draganm/amber-store/socketpath"
@@ -31,6 +33,58 @@ type daemonConfig struct {
 	logLevel    string
 	logFormat   string
 	remoteKeys  cli.StringSlice
+	gc          gcFlags
+}
+
+// gcFlags are the collector options shared by the daemon and serve commands.
+type gcFlags struct {
+	interval time.Duration
+	grace    time.Duration
+	garbage  float64
+	rate     int64
+	minFree  uint64
+}
+
+func (g *gcFlags) options() gc.Options {
+	return gc.Options{
+		Interval: g.interval,
+		Grace:    g.grace,
+		Garbage:  g.garbage,
+		Rate:     g.rate,
+		MinFree:  g.minFree,
+	}
+}
+
+func (g *gcFlags) flags() []cli.Flag {
+	return []cli.Flag{
+		&cli.DurationFlag{
+			Name:        "gc-interval",
+			Usage:       "time between background gc cycles (0 = only explicit runs)",
+			Destination: &g.interval,
+		},
+		&cli.DurationFlag{
+			Name:        "gc-grace",
+			Value:       gc.DefaultGrace,
+			Usage:       "minimum age of a sealed pack before a cycle may reap it",
+			Destination: &g.grace,
+		},
+		&cli.Float64Flag{
+			Name:        "gc-garbage",
+			Value:       gc.DefaultGarbage,
+			Usage:       "selection line: reap packs with at least this fraction of garbage (0.1 under min-free pressure)",
+			Destination: &g.garbage,
+		},
+		&cli.Int64Flag{
+			Name:        "gc-rate",
+			Usage:       "gc copier bandwidth cap in bytes/s (0 = unlimited)",
+			Destination: &g.rate,
+		},
+		&cli.Uint64Flag{
+			Name:        "gc-min-free",
+			Usage:       "free-space floor in bytes that lowers the selection line (0 = 5% of the filesystem)",
+			Destination: &g.minFree,
+		},
+	}
 }
 
 func daemonCommand() *cli.Command {
@@ -38,7 +92,7 @@ func daemonCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
 		Usage: "run the store-owning daemon, serving clients over a unix socket",
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.StringFlag{
 				Name:        "store",
 				Aliases:     []string{"s"},
@@ -83,7 +137,7 @@ func daemonCommand() *cli.Command {
 					"auto-generated identity stored in the store directory.",
 				Destination: &cfg.remoteKeys,
 			},
-		},
+		}, cfg.gc.flags()...),
 		Action: func(c *cli.Context) error { return runDaemon(c, cfg) },
 	}
 }
@@ -170,6 +224,14 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	}
 	defer refs.Close()
 
+	// Deferred after the stores, so it closes first: Close waits out a
+	// running cycle before the stores under it go away.
+	coll, err := gc.Open(filepath.Join(cfg.store, "closures"), store, refs, cfg.gc.options())
+	if err != nil {
+		return err
+	}
+	defer coll.Close()
+
 	defSigner, overrides, err := parseRemoteKeys(cfg.remoteKeys.Value())
 	if err != nil {
 		return err
@@ -195,7 +257,7 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 	defer os.Remove(sock)
 
 	srv := &http.Server{
-		Handler: daemon.NewWithRemotes(store, refs, logger, &daemon.RemoteConfig{
+		Handler: daemon.NewWithRemotes(store, refs, coll, logger, &daemon.RemoteConfig{
 			Registry:      registry,
 			DefaultSigner: defSigner,
 			Signers:       overrides,

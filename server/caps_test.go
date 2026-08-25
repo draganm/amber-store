@@ -75,7 +75,7 @@ func newCapsHarness(t *testing.T, lines ...string) *capsHarness {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: capsSigner(t),
 	}))

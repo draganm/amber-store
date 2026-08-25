@@ -15,6 +15,7 @@ import (
 
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/remotes"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/packstore"
@@ -26,6 +27,7 @@ import (
 type handler struct {
 	store   *packstore.Store
 	refs    *refstore.Store
+	coll    *gc.Collector
 	log     *slog.Logger
 	remotes *RemoteConfig
 }
@@ -51,21 +53,24 @@ func (rc *RemoteConfig) signerFor(name string) (ssh.Signer, error) {
 	return nil, errors.New("no remote signing key configured")
 }
 
-// New returns an http.Handler serving the store. Every request is logged to
-// logger (method, path, status, duration), as are per-operation outcomes:
-// rejected uploads at Warn, store failures at Error, completed ingests at Info.
-// A nil logger discards all logging.
-func New(store *packstore.Store, refs *refstore.Store, logger *slog.Logger) http.Handler {
-	return NewWithRemotes(store, refs, logger, nil)
+// New returns an http.Handler serving the store. coll is the store's GC
+// collector (required): reference PUTs prepare through it and object writes
+// hold its write gate, so uploads and reference publication stay safe
+// against a concurrent cycle. Every request is logged to logger (method,
+// path, status, duration), as are per-operation outcomes: rejected uploads
+// at Warn, store failures at Error, completed ingests at Info. A nil logger
+// discards all logging.
+func New(store *packstore.Store, refs *refstore.Store, coll *gc.Collector, logger *slog.Logger) http.Handler {
+	return NewWithRemotes(store, refs, coll, logger, nil)
 }
 
 // NewWithRemotes additionally registers the /v1/remotes and /v1/remote/*
 // routes backed by rc.
-func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.Logger, rc *RemoteConfig) http.Handler {
+func NewWithRemotes(store *packstore.Store, refs *refstore.Store, coll *gc.Collector, logger *slog.Logger, rc *RemoteConfig) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	h := &handler{store: store, refs: refs, log: logger, remotes: rc}
+	h := &handler{store: store, refs: refs, coll: coll, log: logger, remotes: rc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/objects", h.postObjects)
 	mux.HandleFunc("GET /v1/tar/{key}", h.getTar)
@@ -75,6 +80,9 @@ func NewWithRemotes(store *packstore.Store, refs *refstore.Store, logger *slog.L
 	mux.HandleFunc("PUT /v1/refs", h.putRef)
 	mux.HandleFunc("GET /v1/refs", h.getRefs)
 	mux.HandleFunc("DELETE /v1/refs", h.deleteRef)
+	mux.HandleFunc("GET /v1/gc/status", h.gcStatus)
+	mux.HandleFunc("POST /v1/gc/run", h.gcRun)
+	mux.HandleFunc("GET /v1/gc/why", h.gcWhy)
 	if rc != nil {
 		mux.HandleFunc("POST /v1/remotes/preflight", h.remotePreflight)
 		mux.HandleFunc("PUT /v1/remotes", h.putRemote)
@@ -126,6 +134,10 @@ type ingestResponse struct {
 // returns store stats. Malformed-stream and verification failures are client
 // errors (422); other failures are 500.
 func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
+	// The whole upload is one write span: a sweep waits for it, and its
+	// dedup hits can never race a condemned pack's removal.
+	done := h.coll.BeginWrite()
+	defer done()
 	start := time.Now()
 	rd := amberpack.NewReader(r.Body)
 	seq := func(yield func(packstore.Object, error) bool) {

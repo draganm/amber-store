@@ -93,9 +93,11 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 	// objects stay absent and CheckComplete reports the ref incomplete.
 	h.inbox.WaitFor(k)
 	// The referenced content must be complete: every object reachable from
-	// the key must exist in the store. The walk runs parallel lookups —
-	// referenced trees can be large.
-	err = fstree.CheckComplete(k, h.store.Get, h.store.Has, 0)
+	// the key must exist in the store. The walk (parallel lookups —
+	// referenced trees can be large) prepares through the GC collector,
+	// whose barrier hand-off keeps a reference committed during a cycle's
+	// mark from dangling.
+	commit, abort, err := h.coll.PrepareRef(k)
 	var miss *fstree.MissingObjectError
 	switch {
 	case errors.As(err, &miss):
@@ -109,10 +111,12 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 		return
 	}
 	if err := h.refs.Put(name, a.body); err != nil {
+		abort()
 		h.log.Error("ref put failed", "name", name, "error", err)
 		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
 		return
 	}
+	commit()
 	h.log.Info("reference stored", "name", name, "key", k)
 	h.signAndWrite(w, a.nonce, http.StatusNoContent, "", nil)
 }
