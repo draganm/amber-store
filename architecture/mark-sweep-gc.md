@@ -73,6 +73,13 @@ the mark must be protected (specs/gc.qnt, policy "barrier"):
   pre-existing, unmarked tree survives the sweep it races.
 - **Reference deletes** are just refstore deletes. No bookkeeping: the
   next cycle no longer marks from the dropped root.
+- **The sweep excludes object writes.** `Compact` must not overlap an
+  ingest: a dedup hit against a record in a condemned pack would report
+  success and then lose the record to the pack's removal. Every write
+  span — a daemon ingest, a remote pull's object writes, an inbox
+  drain — holds the collector's `BeginWrite` gate (the reference lock,
+  shared), so the sweep waits out in-flight writes and a write stalls
+  only for the sweep, never the mark.
 
 What remains optimistic: an upload whose dedup hits land *before* the
 barrier began and whose reference PUT lands *after* the sweep can find

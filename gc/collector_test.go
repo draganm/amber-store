@@ -217,6 +217,46 @@ func TestBeginWriteDedupHitSurvivesCycle(t *testing.T) {
 	}
 }
 
+// TestStatusSerializesWithCycle pins Status to cycleMu: the advisory mark
+// probes sealed footers without scrub registration, so it must never
+// overlap a sweep's munmap. Status called mid-cycle returns only after the
+// cycle does.
+func TestStatusSerializesWithCycle(t *testing.T) {
+	ts := newTestStore(t, 4<<10)
+	c := ts.openCollector(t, Options{})
+	root, _ := storeTree(t, ts.objects, "a", 10)
+	putTestRef(t, c, ts.refs, "a", root)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.mu.Lock()
+	c.midMark = func() { close(entered); <-release }
+	c.mu.Unlock()
+	cycleDone := make(chan struct{})
+	go func() {
+		defer close(cycleDone)
+		if _, err := c.Run(context.Background(), -1); err != nil {
+			t.Errorf("cycle: %v", err)
+		}
+	}()
+	<-entered
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		if _, err := c.Status(context.Background()); err != nil {
+			t.Errorf("status: %v", err)
+		}
+	}()
+	select {
+	case <-statusDone:
+		t.Error("Status returned while a cycle was mid-mark")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-cycleDone
+	<-statusDone
+}
+
 func TestOpenSweepsStaleClosureState(t *testing.T) {
 	ts := newTestStore(t, 1<<20)
 	dir := filepath.Join(ts.dir, "closures")
