@@ -20,9 +20,11 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/daemon"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/refstore"
 )
 
 // serveOnSocket starts the daemon handler on a fresh unix socket under a temp
@@ -41,7 +43,7 @@ func serveOnSocket(t *testing.T, store *packstore.Store) *client.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.New(store, openRefs(t), nil)}
+	srv := &http.Server{Handler: newHandler(t, store, nil)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return client.New(sock)
@@ -55,6 +57,25 @@ func openStore(t *testing.T) *packstore.Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// openCollector opens a GC collector over the pair, as production does.
+func openCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// newHandler wires the daemon handler over store with fresh refs and a
+// collector, exactly as runDaemon does.
+func newHandler(t *testing.T, store *packstore.Store, logger *slog.Logger) http.Handler {
+	t.Helper()
+	refs := openRefs(t)
+	return daemon.New(store, refs, openCollector(t, store, refs), logger)
 }
 
 // packOf serializes objects into a pack-write stream.
@@ -129,7 +150,7 @@ func waitForLog(t *testing.T, buf *syncBuf, wants ...string) {
 func TestLogging_RejectedIngestIsLogged(t *testing.T) {
 	store := openStore(t)
 	buf := &syncBuf{}
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), slog.New(slog.NewTextHandler(buf, nil))))
+	srv := httptest.NewServer(newHandler(t, store, slog.New(slog.NewTextHandler(buf, nil))))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
@@ -148,7 +169,7 @@ func TestLogging_RejectedIngestIsLogged(t *testing.T) {
 func TestLogging_SuccessfulIngestIsLogged(t *testing.T) {
 	store := openStore(t)
 	buf := &syncBuf{}
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), slog.New(slog.NewTextHandler(buf, nil))))
+	srv := httptest.NewServer(newHandler(t, store, slog.New(slog.NewTextHandler(buf, nil))))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
@@ -185,7 +206,7 @@ func TestPostObjects_StoresAndReportsStats(t *testing.T) {
 
 func TestPostObjects_MalformedStreamIs422(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/objects", "application/octet-stream",
@@ -201,7 +222,7 @@ func TestPostObjects_MalformedStreamIs422(t *testing.T) {
 
 func TestPostObjects_TamperedKeyIs422(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	good := mustBlob(t, "honest")
@@ -349,7 +370,7 @@ func TestGetTar_PathTarsSubdirectory(t *testing.T) {
 
 func TestGetTar_MissingRootIs404(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	// A well-formed directory key that was never stored.
@@ -373,7 +394,7 @@ func TestGetTar_MissingRootIs404(t *testing.T) {
 
 func TestGetTar_NonDirectoryKeyIs400(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	// A blob key is not a directory object; rejected with 400 before any lookup,
@@ -456,7 +477,7 @@ func TestGetLs_ListsDirectoryEntries(t *testing.T) {
 
 func TestGetLs_StreamsNDJSON(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	content := mustBlob(t, "alpha")
@@ -500,7 +521,7 @@ func TestGetLs_StreamsNDJSON(t *testing.T) {
 
 func TestGetLs_MissingDirIs404(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	xb := mustBlob(t, "x")
@@ -523,7 +544,7 @@ func TestGetLs_MissingDirIs404(t *testing.T) {
 
 func TestGetLs_NonDirectoryKeyIs400(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	blob := mustBlob(t, "data")
@@ -632,7 +653,7 @@ func TestGetContentKeys_FileKeyRoot(t *testing.T) {
 
 func TestGetContentKeys_MissingRootIs404(t *testing.T) {
 	store := openStore(t)
-	srv := httptest.NewServer(daemon.New(store, openRefs(t), nil))
+	srv := httptest.NewServer(newHandler(t, store, nil))
 	defer srv.Close()
 
 	xb := mustBlob(t, "x")

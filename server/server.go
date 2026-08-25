@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/allowlist"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/grant"
 	"github.com/draganm/amber-store/httpsig"
 	"github.com/draganm/amber-store/inbox"
@@ -42,6 +43,11 @@ type Config struct {
 	Window   time.Duration // timestamp validity window; 0 = httpsig.DefaultWindow
 	MaxBody  int64         // request body cap; 0 = DefaultMaxBody
 	Inbox    *inbox.Inbox  // receives pushed packs; required
+	// Collector is the store's GC collector; required. Reference PUTs
+	// prepare through it so a reference committed while a cycle marks
+	// never dangles; give the Inbox its BeginWrite gate (inbox.WithGate)
+	// so drains cannot race a sweep.
+	Collector *gc.Collector
 }
 
 type handler struct {
@@ -53,6 +59,7 @@ type handler struct {
 	window   time.Duration
 	maxBody  int64
 	inbox    *inbox.Inbox
+	coll     *gc.Collector
 	nonces   *nonces.Cache
 
 	// wipeMu serializes the wipe endpoint against every mutating handler:
@@ -83,6 +90,7 @@ func New(cfg Config) http.Handler {
 		window:   window,
 		maxBody:  maxBody,
 		inbox:    cfg.Inbox,
+		coll:     cfg.Collector,
 		nonces:   nonces.New(window),
 	}
 	mux := http.NewServeMux()

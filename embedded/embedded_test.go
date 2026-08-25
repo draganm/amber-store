@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/allowlist"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/embedded"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/grant"
@@ -66,7 +67,7 @@ func startCentral(t *testing.T, allowLines string) (string, ssh.Signer) {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
@@ -378,4 +379,15 @@ func TestRemoteWipeWithoutCapability(t *testing.T) {
 	if err := engine.RemoteWipe(context.Background(), "central"); err == nil {
 		t.Fatal("RemoteWipe succeeded without the wipe capability")
 	}
+}
+
+// openTestCollector opens a GC collector over the pair, as serve does.
+func openTestCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
 }

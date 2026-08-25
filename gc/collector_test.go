@@ -1,6 +1,7 @@
 package gc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"hash/crc32"
@@ -172,6 +173,47 @@ func TestPrepareRefMissingObjectFails(t *testing.T) {
 	}
 	if _, _, err := c.PrepareRef(rootObj.Key); err == nil {
 		t.Fatal("PrepareRef accepted a root with a missing object")
+	}
+}
+
+// TestBeginWriteDedupHitSurvivesCycle re-puts an object that lives only in
+// a condemned pack while a cycle sits between its mark and its sweep: the
+// dedup hit writes nothing, so only the write barrier's grey set (mark) and
+// the BeginWrite gate (sweep) keep the record from vanishing with its pack.
+func TestBeginWriteDedupHitSurvivesCycle(t *testing.T) {
+	ts := newTestStore(t, 4<<10)
+	c := ts.openCollector(t, Options{})
+	rootA, _ := storeTree(t, ts.objects, "live", 30)
+	putTestRef(t, c, ts.refs, "live", rootA)
+	_, keysB := storeTree(t, ts.objects, "dead", 30) // never referenced
+	deadKey := keysB[0]
+	want, err := ts.objects.Get(deadKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.midMark = func() {
+		done := c.BeginWrite()
+		defer done()
+		if err := ts.objects.Put(deadKey, want); err != nil {
+			t.Errorf("dedup-hit put during cycle: %v", err)
+		}
+	}
+	c.mu.Unlock()
+	backdatePacks(t, ts)
+	stats, err := c.Run(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Reaped) == 0 {
+		t.Fatal("cycle reaped nothing; the dedup-hit race was never exercised")
+	}
+	got, err := ts.objects.Get(deadKey)
+	if err != nil {
+		t.Fatalf("dedup-hit object lost to the sweep: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("dedup-hit object corrupted by the sweep")
 	}
 }
 

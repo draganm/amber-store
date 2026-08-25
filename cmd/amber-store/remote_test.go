@@ -54,7 +54,7 @@ func startRemoteServer(t *testing.T, clientPub ssh.PublicKey) *httptest.Server {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
@@ -91,7 +91,7 @@ func startDaemonWithRemotes(t *testing.T, signer ssh.Signer) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.NewWithRemotes(store, refs, nil, &daemon.RemoteConfig{
+	srv := &http.Server{Handler: daemon.NewWithRemotes(store, refs, openTestCollector(t, store, refs), nil, &daemon.RemoteConfig{
 		Registry:      registry,
 		DefaultSigner: signer,
 	})}

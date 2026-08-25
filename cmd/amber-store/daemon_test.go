@@ -13,10 +13,22 @@ import (
 	"github.com/draganm/amber-store/amberpack"
 	"github.com/draganm/amber-store/client"
 	"github.com/draganm/amber-store/daemon"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/refstore"
 )
+
+// openTestCollector opens a GC collector over the pair, as runDaemon does.
+func openTestCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
 
 // startDaemon brings up the daemon HTTP handler directly on a fresh unix socket
 // (no CLI), returning the socket path. It deliberately avoids newApp().Run so it
@@ -50,7 +62,7 @@ func startDaemon(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: daemon.New(store, refs, nil)}
+	srv := &http.Server{Handler: daemon.New(store, refs, openTestCollector(t, store, refs), nil)}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return sock

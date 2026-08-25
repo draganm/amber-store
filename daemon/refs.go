@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/packstore"
 	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/refstore"
 )
@@ -33,7 +35,10 @@ func refName(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 // putRef stores the CBOR reference record from the body under ?name=,
 // overwriting unconditionally. The record must decode, match the query name,
-// carry a canonical key, and that key must exist in the store.
+// carry a canonical key, and the tree that key roots must be complete —
+// every reachable object present. The write prepares through the GC
+// collector: the completeness walk doubles as the collector's barrier
+// hand-off, so a reference committed while a cycle marks never dangles.
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request) {
 	name, ok := refName(w, r)
 	if !ok {
@@ -62,23 +67,29 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	has, err := h.store.Has(k)
-	if err != nil {
-		h.log.Error("ref key lookup failed", "name", name, "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	commit, abort, err := h.coll.PrepareRef(k)
+	var miss *fstree.MissingObjectError
+	switch {
+	case errors.As(err, &miss):
+		http.Error(w, "referenced content is incomplete: "+miss.Key.String()+" is missing — store objects before the ref", http.StatusNotFound)
 		return
-	}
-	if !has {
-		http.Error(w, "referenced key not found in store", http.StatusNotFound)
+	case errors.Is(err, packstore.ErrNotFound):
+		http.Error(w, "referenced content is incomplete: "+err.Error()+" — store objects before the ref", http.StatusNotFound)
+		return
+	case err != nil:
+		h.log.Error("ref completeness walk failed", "name", name, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// Store the body verbatim: it is the canonical encoding (Decode rejects
 	// non-canonical bytes) and preserves the signature bytes untouched.
 	if err := h.refs.Put(name, body); err != nil {
+		abort()
 		h.log.Error("ref put failed", "name", name, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	commit()
 	h.log.Info("reference stored", "name", name, "key", k)
 	w.WriteHeader(http.StatusNoContent)
 }

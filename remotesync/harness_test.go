@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/packstore"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/allowlist"
@@ -74,7 +75,7 @@ func newHarnessMW(t *testing.T, mw func(http.Handler) http.Handler) *harness {
 		t.Fatal(err)
 	}
 	var handler http.Handler = server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	})
@@ -135,4 +136,15 @@ func buildTree(t *testing.T, store *packstore.Store) key.Key {
 		}
 	}
 	return leaf.Key
+}
+
+// openTestCollector opens a GC collector over the pair, as serve does.
+func openTestCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
 }

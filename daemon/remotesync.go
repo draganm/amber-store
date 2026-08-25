@@ -230,17 +230,33 @@ func (h *handler) remotePull(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := newEventStream(w)
 	opts.Progress = func(done, total int) { stream.send(syncEvent{Done: done, Total: total}) }
+	// The pull's object writes are one write span against the GC sweep; the
+	// gate is released before the reference prepares (PrepareRef takes the
+	// same lock — never nest them).
+	writeDone := h.coll.BeginWrite()
 	stats, err := remotesync.Pull(r.Context(), h.store, rc, root, opts)
+	writeDone()
 	if err != nil {
 		h.log.Warn("pull failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return
 	}
+	// Optimistic: if a cycle slipped between the gate release and here and
+	// reaped part of the tree (possible only past the grace period), the
+	// completeness walk fails cleanly and the client retries.
+	commit, abort, err := h.coll.PrepareRef(root)
+	if err != nil {
+		h.log.Warn("pull reference prepare failed", "name", name, "error", err)
+		stream.send(syncEvent{Error: err.Error()})
+		return
+	}
 	if err := h.refs.Put(name, raw); err != nil {
+		abort()
 		h.log.Warn("pull reference write failed", "name", name, "error", err)
 		stream.send(syncEvent{Error: err.Error()})
 		return
 	}
+	commit()
 	h.log.Info("pull complete", "name", name, "fetched", stats.ObjectsFetched, "key", root)
 	stream.send(syncEvent{Key: root.String(), PullStats: &pullStatsLine{
 		ObjectsFetched: stats.ObjectsFetched,

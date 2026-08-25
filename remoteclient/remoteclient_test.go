@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/allowlist"
 	"github.com/draganm/amber-store/key"
@@ -70,7 +71,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(server.New(server.Config{
-		Store: store, Inbox: ib, Refs: refs,
+		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
 		Identity: identity,
 	}))
@@ -204,4 +205,15 @@ func TestReachableKeys_IncompleteTreeErrors(t *testing.T) {
 	if _, err := c.ReachableKeys(context.Background(), node.Key); err == nil {
 		t.Fatal("expected an error walking an incomplete tree")
 	}
+}
+
+// openTestCollector opens a GC collector over the pair, as serve does.
+func openTestCollector(t *testing.T, store *packstore.Store, refs *refstore.Store) *gc.Collector {
+	t.Helper()
+	c, err := gc.Open(filepath.Join(t.TempDir(), "closures"), store, refs, gc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
 }
