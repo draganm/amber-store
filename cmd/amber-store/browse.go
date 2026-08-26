@@ -5,8 +5,6 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 )
@@ -34,7 +32,10 @@ func browseCommand() *cli.Command {
 			if !term.IsTerminal(int(os.Stdout.Fd())) {
 				return fmt.Errorf("browse requires a terminal")
 			}
-			cl := client.New(socketpath.Resolve(socket))
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err

@@ -78,13 +78,16 @@ Daemon and clients must independently agree on a socket path. Resolution order
 2. `$AMBER_STORE_SOCKET`;
 3. `$XDG_RUNTIME_DIR/amber-store.sock`, when `XDG_RUNTIME_DIR` is set and
    absolute (typical on Linux);
-4. `/tmp/amber-store-<uid>.sock`.
+4. `/tmp/amber-store-<uid>/sock`.
 
 The fallback deliberately ignores `TMPDIR`: tools like nix-shell and direnv
 set a fresh per-shell `TMPDIR`, which would make a daemon and a client started
 in different shells resolve different "default" paths and never meet. `/tmp`
-is stable for every process of a user; the per-uid suffix avoids cross-user
-collisions, and the socket's file mode keeps other users from connecting.
+is stable for every process of a user but world-writable, so another user
+could squat a bare socket name there. The fallback therefore lives in a
+per-user directory that daemon and clients create with mode 0700 and refuse
+to use unless it is a real directory owned by the caller with no group/other
+access.
 
 ## Wire protocol
 

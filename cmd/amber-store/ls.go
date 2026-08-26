@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 )
@@ -43,7 +42,10 @@ func runLs(c *cli.Context, cfg *lsConfig) error {
 	if c.NArg() != 1 {
 		return fmt.Errorf("ls requires exactly one KEY[/PATH] argument, got %d", c.NArg())
 	}
-	cl := client.New(socketpath.Resolve(cfg.socket))
+	cl, err := daemonClient(cfg.socket)
+	if err != nil {
+		return err
+	}
 	k, path, err := resolveSpec(c.Context, cl, c.Args().First())
 	if err != nil {
 		return err

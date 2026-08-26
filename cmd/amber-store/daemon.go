@@ -245,7 +245,10 @@ func runDaemon(c *cli.Context, cfg *daemonConfig) error {
 		return err
 	}
 
-	sock := socketpath.Resolve(cfg.socket)
+	sock, err := socketpath.Resolve(cfg.socket)
+	if err != nil {
+		return err
+	}
 	// Remove a stale socket from a previous run before binding.
 	if err := os.Remove(sock); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing stale socket %s: %w", sock, err)

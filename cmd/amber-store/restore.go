@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/tarextract"
 	"github.com/urfave/cli/v2"
 )
@@ -34,7 +32,10 @@ func runRestore(c *cli.Context, cfg *restoreConfig) error {
 	if c.NArg() != 2 {
 		return fmt.Errorf("restore requires exactly two arguments KEY[/PATH] and DIR, got %d", c.NArg())
 	}
-	cl := client.New(socketpath.Resolve(cfg.socket))
+	cl, err := daemonClient(cfg.socket)
+	if err != nil {
+		return err
+	}
 	k, path, err := resolveSpec(c.Context, cl, c.Args().Get(0))
 	if err != nil {
 		return err

@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/client"
+	"github.com/draganm/amber-store/key"
+	"github.com/draganm/amber-store/reference"
 	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/sshsign"
 	"github.com/draganm/amber-store/userconfig"
-	"github.com/draganm/amber-store/key"
-	"github.com/draganm/amber-store/reference"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/crypto/ssh"
 )
@@ -24,6 +24,16 @@ func socketFlag(dst *string) cli.Flag {
 		Usage:       "daemon unix socket (default: $AMBER_STORE_SOCKET or a per-user path)",
 		Destination: dst,
 	}
+}
+
+// daemonClient resolves the socket (flag, env, or the verified per-user
+// default) and returns a client for it.
+func daemonClient(socket string) (*client.Client, error) {
+	sock, err := socketpath.Resolve(socket)
+	if err != nil {
+		return nil, err
+	}
+	return client.New(sock), nil
 }
 
 func refCommand() *cli.Command {
@@ -78,7 +88,11 @@ func refCreateCommand() *cli.Command {
 					return fmt.Errorf("signing reference %q: %w", name, err)
 				}
 			}
-			return client.New(socketpath.Resolve(socket)).PutRef(c.Context, rec)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			return cl.PutRef(c.Context, rec)
 		},
 	}
 }
@@ -93,7 +107,11 @@ func refLsCommand() *cli.Command {
 			if c.NArg() != 0 {
 				return fmt.Errorf("ref ls takes no arguments, got %d", c.NArg())
 			}
-			infos, err := client.New(socketpath.Resolve(socket)).ListRefs(c.Context)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			infos, err := cl.ListRefs(c.Context)
 			if err != nil {
 				return err
 			}
@@ -145,7 +163,11 @@ func refShowCommand() *cli.Command {
 			if c.NArg() != 1 {
 				return fmt.Errorf("ref show requires exactly one NAME argument, got %d", c.NArg())
 			}
-			rec, err := client.New(socketpath.Resolve(socket)).GetRef(c.Context, c.Args().First())
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			rec, err := cl.GetRef(c.Context, c.Args().First())
 			if err != nil {
 				return err
 			}
@@ -180,7 +202,11 @@ func refVerifySignatureCommand() *cli.Command {
 				return fmt.Errorf("ref verify-signature requires exactly one NAME argument, got %d", c.NArg())
 			}
 			name := c.Args().First()
-			rec, err := client.New(socketpath.Resolve(socket)).GetRef(c.Context, name)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			rec, err := cl.GetRef(c.Context, name)
 			if err != nil {
 				return err
 			}
@@ -216,7 +242,11 @@ func refRmCommand() *cli.Command {
 			if c.NArg() != 1 {
 				return fmt.Errorf("ref rm requires exactly one NAME argument, got %d", c.NArg())
 			}
-			return client.New(socketpath.Resolve(socket)).DeleteRef(c.Context, c.Args().First())
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			return cl.DeleteRef(c.Context, c.Args().First())
 		},
 	}
 }

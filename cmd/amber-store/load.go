@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/urfave/cli/v2"
 )
 
@@ -40,7 +38,11 @@ func runLoad(c *cli.Context, cfg *loadConfig) error {
 	}
 	defer f.Close()
 
-	stats, err := client.New(socketpath.Resolve(cfg.socket)).Ingest(c.Context, f)
+	cl, err := daemonClient(cfg.socket)
+	if err != nil {
+		return err
+	}
+	stats, err := cl.Ingest(c.Context, f)
 	if err != nil {
 		return err
 	}

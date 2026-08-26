@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/remotesync"
 	"github.com/urfave/cli/v2"
 )
@@ -61,7 +59,10 @@ func remoteAddCommand() *cli.Command {
 				return fmt.Errorf("remote add requires NAME URL arguments, got %d", c.NArg())
 			}
 			name, url := c.Args().Get(0), c.Args().Get(1)
-			cl := client.New(socketpath.Resolve(socket))
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
 			info, err := cl.RemotePreflight(c.Context, url)
 			if err != nil {
 				return err
@@ -101,7 +102,11 @@ func remoteRmCommand() *cli.Command {
 			if c.NArg() != 1 {
 				return fmt.Errorf("remote rm requires exactly one NAME argument, got %d", c.NArg())
 			}
-			return client.New(socketpath.Resolve(socket)).RemoteRemove(c.Context, c.Args().First())
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			return cl.RemoteRemove(c.Context, c.Args().First())
 		},
 	}
 }
@@ -113,7 +118,11 @@ func remoteLsCommand() *cli.Command {
 		Usage: "list registered remotes",
 		Flags: []cli.Flag{socketFlag(&socket)},
 		Action: func(c *cli.Context) error {
-			infos, err := client.New(socketpath.Resolve(socket)).RemoteList(c.Context)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			infos, err := cl.RemoteList(c.Context)
 			if err != nil {
 				return err
 			}
@@ -160,7 +169,10 @@ func remotePushPullCommand(name string) *cli.Command {
 			if err != nil {
 				return err
 			}
-			cl := client.New(socketpath.Resolve(socket))
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
 			progress := func(done, total int) {
 				if total > 0 {
 					fmt.Fprintf(os.Stderr, "\r%s: %d/%d objects", name, done, total)
@@ -200,7 +212,11 @@ func remoteLsRefsCommand() *cli.Command {
 			if c.NArg() > 1 {
 				return fmt.Errorf("remote ls-refs takes at most one REMOTE argument, got %d", c.NArg())
 			}
-			infos, err := client.New(socketpath.Resolve(socket)).RemoteLsRefs(c.Context, c.Args().First())
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			infos, err := cl.RemoteLsRefs(c.Context, c.Args().First())
 			if err != nil {
 				return err
 			}
