@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"math"
 
 	"github.com/draganm/amber-store/key"
 	"github.com/klauspost/compress/zstd"
@@ -19,7 +18,9 @@ const (
 	tagChunk byte = 0x01
 	flagZstd byte = 0x01
 
-	maxPayload = math.MaxUint32 // u32 length fields cap one object at 4 GiB
+	// MaxPayload bounds one object's payload, stored or decoded. The length
+	// fields are untrusted and size allocations. Real objects are ~1 MiB.
+	MaxPayload = 256 << 20
 )
 
 var (
@@ -56,7 +57,8 @@ func init() {
 	if zstdEnc, err = zstd.NewWriter(nil); err != nil {
 		panic(err)
 	}
-	if zstdDec, err = zstd.NewReader(nil); err != nil {
+	// CapLimit stops DecodeAll at the dst capacity DecodePayload sizes from ulen.
+	if zstdDec, err = zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true), zstd.WithDecoderMaxMemory(MaxPayload)); err != nil {
 		panic(err)
 	}
 }
@@ -86,11 +88,10 @@ func EncodeRecord(k key.Key, data []byte) ([]byte, error) {
 	return rec, nil
 }
 
-// payloadFits reports whether a payload of n bytes fits the format's u32 length
-// fields. Split out of EncodeRecord so the bound is testable without allocating
-// 4 GiB.
+// payloadFits reports whether a payload of n bytes is within MaxPayload. Split
+// out of EncodeRecord so the bound is testable without allocating it.
 func payloadFits(n int) bool {
-	return uint64(n) <= maxPayload
+	return n <= MaxPayload
 }
 
 // ParseRecord validates the record at the start of b (which may extend past it)
@@ -114,6 +115,9 @@ func ParseRecord(b []byte) (Record, error) {
 	}
 	if flags&flagZstd == 0 && ulen != slen {
 		return Record{}, fmt.Errorf("%w: raw record with ulen %d != slen %d", ErrCorrupt, ulen, slen)
+	}
+	if ulen > MaxPayload {
+		return Record{}, fmt.Errorf("%w: record ulen %d exceeds limit %d", ErrCorrupt, ulen, MaxPayload)
 	}
 	if flags&flagZstd != 0 && slen >= ulen {
 		return Record{}, fmt.Errorf("%w: compressed record with slen %d >= ulen %d", ErrCorrupt, slen, ulen)

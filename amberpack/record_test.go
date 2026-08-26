@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"testing"
 
 	"github.com/draganm/amber-store/key"
@@ -105,14 +106,30 @@ func TestRecordEmptyPayload(t *testing.T) {
 }
 
 func TestRecordTooLarge(t *testing.T) {
-	if !payloadFits(math.MaxUint32) {
-		t.Fatal("payloadFits must accept exactly 4 GiB - 1")
+	if !payloadFits(MaxPayload) {
+		t.Fatal("payloadFits must accept exactly MaxPayload")
 	}
-	if payloadFits(math.MaxUint32 + 1) {
-		t.Fatal("payloadFits must reject > 4 GiB - 1")
+	if payloadFits(MaxPayload + 1) {
+		t.Fatal("payloadFits must reject MaxPayload+1")
 	}
 	if !payloadFits(0) {
 		t.Fatal("payloadFits must accept empty payloads")
+	}
+}
+
+func TestParseRecordRejectsOversizedUlen(t *testing.T) {
+	o := mkObj(t, compressible(4096))
+	rec, err := EncodeRecord(o.Key, o.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec[33]&flagZstd == 0 {
+		t.Fatal("test needs a compressed record")
+	}
+	binary.BigEndian.PutUint32(rec[34:38], math.MaxUint32)
+	fixCRC(rec)
+	if _, err := ParseRecord(rec); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("want ErrCorrupt, got %v", err)
 	}
 }
 
@@ -208,6 +225,19 @@ func TestDecodePayloadErrors(t *testing.T) {
 	t.Run("bad zstd frame", func(t *testing.T) {
 		if _, err := DecodePayload(flagZstd, 100, []byte("not a zstd frame")); !errors.Is(err, ErrCorrupt) {
 			t.Fatalf("want ErrCorrupt, got %v", err)
+		}
+	})
+	t.Run("bomb stops at ulen", func(t *testing.T) {
+		bomb := zstdEnc.EncodeAll(make([]byte, 64<<20), nil)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := DecodePayload(flagZstd, 1024, bomb)
+		runtime.ReadMemStats(&after)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("want ErrCorrupt, got %v", err)
+		}
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+			t.Fatalf("decoding allocated %d bytes for a 1 KiB ulen", grew)
 		}
 	})
 	t.Run("ulen mismatch", func(t *testing.T) {

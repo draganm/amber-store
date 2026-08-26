@@ -240,7 +240,7 @@ func TestReader_RecordCRCMismatch(t *testing.T) {
 }
 
 func TestReader_OversizedPayloadRejected(t *testing.T) {
-	// A header claiming a payload above maxWirePayload is rejected before any
+	// A header claiming a payload above MaxPayload is rejected before any
 	// allocation (and before the CRC check).
 	o := mkObj(t, []byte("x"))
 	rec, err := EncodeRecord(o.Key, o.Bytes)
@@ -250,7 +250,7 @@ func TestReader_OversizedPayloadRejected(t *testing.T) {
 	// Only the header follows the magic — no payload bytes — so the size guard
 	// must fire before the payload ReadFull, not after.
 	hdr := bytes.Clone(rec[:RecHeaderSize])
-	binary.BigEndian.PutUint32(hdr[38:42], maxWirePayload+1)
+	binary.BigEndian.PutUint32(hdr[38:42], MaxPayload+1)
 	if _, err := collect(t, NewReader(bytes.NewReader(wirePack(hdr)))); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("err = %v, want ErrMalformed (oversized payload)", err)
 	}
