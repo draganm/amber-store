@@ -96,8 +96,10 @@ does not carry a valid signature by the pinned key, the daemon aborts with a
 
 The signed payload is a canonical CBOR map (deterministic, integer keys — the
 project-wide convention) of `{method, path+query, timestamp, nonce,
-blake3(body)}`, signed as an SSHSIG v1 blob in namespace `amber-store-http`
-via `internal/sshsign`. The expensive part — hashing a multi-megabyte pack —
+blake3(body), audience}`, signed as an SSHSIG v1 blob in namespace
+`amber-store-http` via `internal/sshsign`. The audience is the server's
+public key as pinned at `remote add`, so a server cannot relay a request to
+another server that allows the same client key. The expensive part — hashing a multi-megabyte pack —
 is BLAKE3; SSHSIG's internal SHA-512 only ever covers the ~100-byte canonical
 payload, so signing cost is constant regardless of body size.
 

@@ -46,9 +46,10 @@ func keyLine(s ssh.Signer) string {
 }
 
 type capsHarness struct {
-	srv   *httptest.Server
-	store *packstore.Store
-	refs  *refstore.Store
+	srv      *httptest.Server
+	identity []byte // server public key, wire format: the request audience
+	store    *packstore.Store
+	refs     *refstore.Store
 }
 
 // newCapsHarness starts a server whose allowlist is built from lines.
@@ -74,20 +75,21 @@ func newCapsHarness(t *testing.T, lines ...string) *capsHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity := capsSigner(t)
 	srv := httptest.NewServer(server.New(server.Config{
 		Store: store, Inbox: ib, Refs: refs, Collector: openTestCollector(t, store, refs),
 		Allow:    func() *allowlist.List { return allow },
-		Identity: capsSigner(t),
+		Identity: identity,
 	}))
 	t.Cleanup(srv.Close)
-	return &capsHarness{srv: srv, store: store, refs: refs}
+	return &capsHarness{srv: srv, identity: identity.PublicKey().Marshal(), store: store, refs: refs}
 }
 
 // signedDo sends one signed request; grantRaw (may be nil) rides the
 // Amber-Grant header.
-func signedDo(t *testing.T, srv *httptest.Server, signer ssh.Signer, grantRaw []byte, method, pathQuery string, body []byte) *http.Response {
+func signedDo(t *testing.T, h *capsHarness, signer ssh.Signer, grantRaw []byte, method, pathQuery string, body []byte) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(method, srv.URL+pathQuery, bytes.NewReader(body))
+	req, err := http.NewRequest(method, h.srv.URL+pathQuery, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +97,7 @@ func signedDo(t *testing.T, srv *httptest.Server, signer ssh.Signer, grantRaw []
 	if _, err := rand.Read(nonce); err != nil {
 		t.Fatal(err)
 	}
-	if err := httpsig.SignRequest(req, signer, time.Now().UnixNano(), nonce, body); err != nil {
+	if err := httpsig.SignRequest(req, signer, h.identity, time.Now().UnixNano(), nonce, body); err != nil {
 		t.Fatal(err)
 	}
 	if grantRaw != nil {
@@ -153,7 +155,7 @@ func TestPushOnlyKeyCannotWriteRefs(t *testing.T) {
 	h := newCapsHarness(t, "read,push-objects "+keyLine(pushOnly))
 	root := storedBlob(t, h, "content")
 	raw := signedRecord(t, pushOnly, "steal:1", root)
-	resp := signedDo(t, h.srv, pushOnly, nil, http.MethodPut, "/v1/refs?name=steal%3A1", raw)
+	resp := signedDo(t, h, pushOnly, nil, http.MethodPut, "/v1/refs?name=steal%3A1", raw)
 	if resp.StatusCode != http.StatusForbidden {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("got %d (%s), want 403", resp.StatusCode, b)
@@ -165,16 +167,16 @@ func TestLegacyKeyKeepsFullAccess(t *testing.T) {
 	h := newCapsHarness(t, keyLine(legacy)) // no options
 	root := storedBlob(t, h, "content")
 	raw := signedRecord(t, legacy, "ok:1", root)
-	resp := signedDo(t, h.srv, legacy, nil, http.MethodPut, "/v1/refs?name=ok%3A1", raw)
+	resp := signedDo(t, h, legacy, nil, http.MethodPut, "/v1/refs?name=ok%3A1", raw)
 	if resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("got %d (%s), want 204", resp.StatusCode, b)
 	}
-	if resp := signedDo(t, h.srv, legacy, nil, http.MethodGet, "/v1/refs?name=ok%3A1", nil); resp.StatusCode != http.StatusOK {
+	if resp := signedDo(t, h, legacy, nil, http.MethodGet, "/v1/refs?name=ok%3A1", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("read-back got %d", resp.StatusCode)
 	}
 	// Legacy keys must not delete (admin only), as today.
-	if resp := signedDo(t, h.srv, legacy, nil, http.MethodDelete, "/v1/refs?name=ok%3A1", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, legacy, nil, http.MethodDelete, "/v1/refs?name=ok%3A1", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("delete got %d, want 403", resp.StatusCode)
 	}
 }
@@ -186,13 +188,13 @@ func TestReadOnlyKeyCannotPushObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := signedDo(t, h.srv, readOnly, nil, http.MethodPost,
+	resp := signedDo(t, h, readOnly, nil, http.MethodPost,
 		"/v1/objects?root="+hex.EncodeToString(o.Key[:]), []byte("pack-bytes-do-not-matter"))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("got %d, want 403", resp.StatusCode)
 	}
 	// But reading works.
-	if resp := signedDo(t, h.srv, readOnly, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
+	if resp := signedDo(t, h, readOnly, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("list got %d, want 200", resp.StatusCode)
 	}
 }
@@ -228,23 +230,23 @@ func TestGrantAuthorizesUnlistedKey(t *testing.T) {
 	g := mint([]string{allowlist.CapRead, allowlist.CapPushObjects}, 15*time.Minute)
 
 	// Without a grant: 403.
-	if resp := signedDo(t, h.srv, runner, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("no grant: got %d, want 403", resp.StatusCode)
 	}
 	// With the grant: reads work.
-	if resp := signedDo(t, h.srv, runner, g, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
+	if resp := signedDo(t, h, runner, g, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("with grant: got %d (%s), want 200", resp.StatusCode, b)
 	}
 	// The grant never authorizes a ref write.
 	root := storedBlob(t, h, "content")
 	raw := signedRecord(t, runner, "steal:2", root)
-	if resp := signedDo(t, h.srv, runner, g, http.MethodPut, "/v1/refs?name=steal%3A2", raw); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, g, http.MethodPut, "/v1/refs?name=steal%3A2", raw); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("grant ref write: got %d, want 403", resp.StatusCode)
 	}
 	// Expired grant: 403.
 	expired := mint([]string{allowlist.CapRead}, -time.Hour)
-	if resp := signedDo(t, h.srv, runner, expired, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, expired, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expired grant: got %d, want 403", resp.StatusCode)
 	}
 	// Grant bound to a different subject: 403.
@@ -258,7 +260,7 @@ func TestGrantAuthorizesUnlistedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp := signedDo(t, h.srv, runner, otherGrant, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, otherGrant, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("foreign grant: got %d, want 403", resp.StatusCode)
 	}
 }
@@ -277,7 +279,7 @@ func TestGrantFromNonDelegateIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp := signedDo(t, h.srv, runner, g, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, g, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("got %d, want 403", resp.StatusCode)
 	}
 }

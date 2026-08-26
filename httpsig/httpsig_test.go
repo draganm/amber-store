@@ -13,6 +13,9 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// audience stands in for the verifying server's public key.
+var audience = []byte("server-public-key-wire-bytes")
+
 func testSigner(t *testing.T) ssh.Signer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -33,7 +36,7 @@ func signedRequest(t *testing.T, signer ssh.Signer, ts int64, body []byte) *http
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := httpsig.SignRequest(req, signer, ts, []byte("nonce-16-bytes!!"), body); err != nil {
+	if err := httpsig.SignRequest(req, signer, audience, ts, []byte("nonce-16-bytes!!"), body); err != nil {
 		t.Fatal(err)
 	}
 	return req
@@ -44,7 +47,7 @@ func TestRequestRoundTrip(t *testing.T) {
 	now := time.Now()
 	body := []byte("the body")
 	req := signedRequest(t, signer, now.UnixNano(), body)
-	pub, nonce, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow)
+	pub, nonce, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestRequestRejectsTamperedBody(t *testing.T) {
 	signer := testSigner(t)
 	now := time.Now()
 	req := signedRequest(t, signer, now.UnixNano(), []byte("the body"))
-	if _, _, err := httpsig.VerifyRequest(req, []byte("evil body"), now, httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, []byte("evil body"), now, httpsig.DefaultWindow); err == nil {
 		t.Fatal("tampered body verified")
 	}
 }
@@ -71,7 +74,7 @@ func TestRequestRejectsTamperedPath(t *testing.T) {
 	body := []byte("the body")
 	req := signedRequest(t, signer, now.UnixNano(), body)
 	req.URL.Path = "/v1/refs"
-	if _, _, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow); err == nil {
 		t.Fatal("tampered path verified")
 	}
 }
@@ -81,19 +84,19 @@ func TestRequestRejectsStaleTimestamp(t *testing.T) {
 	now := time.Now()
 	body := []byte("b")
 	req := signedRequest(t, signer, now.Add(-10*time.Minute).UnixNano(), body)
-	if _, _, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow); err == nil {
 		t.Fatal("stale timestamp verified")
 	}
 	// future timestamps beyond the window are rejected too
 	req = signedRequest(t, signer, now.Add(10*time.Minute).UnixNano(), body)
-	if _, _, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow); err == nil {
 		t.Fatal("future timestamp verified")
 	}
 }
 
 func TestRequestRejectsMissingHeaders(t *testing.T) {
 	req, _ := http.NewRequest("GET", "http://server/v1/refs", nil)
-	if _, _, err := httpsig.VerifyRequest(req, nil, time.Now(), httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, nil, time.Now(), httpsig.DefaultWindow); err == nil {
 		t.Fatal("unsigned request verified")
 	}
 }
@@ -104,7 +107,7 @@ func TestRequestRejectsTamperedMethod(t *testing.T) {
 	body := []byte("the body")
 	req := signedRequest(t, signer, now.UnixNano(), body)
 	req.Method = "GET"
-	if _, _, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow); err == nil {
+	if _, _, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow); err == nil {
 		t.Fatal("tampered method verified")
 	}
 }
@@ -116,7 +119,7 @@ func TestRequestRejectsPartialHeaders(t *testing.T) {
 	for _, h := range []string{httpsig.HeaderPublicKey, httpsig.HeaderTimestamp, httpsig.HeaderNonce, httpsig.HeaderSignature} {
 		req := signedRequest(t, signer, now.UnixNano(), body)
 		req.Header.Del(h)
-		if _, _, err := httpsig.VerifyRequest(req, body, now, httpsig.DefaultWindow); err == nil {
+		if _, _, err := httpsig.VerifyRequest(req, audience, body, now, httpsig.DefaultWindow); err == nil {
 			t.Fatalf("request without %s verified", h)
 		}
 	}
@@ -169,10 +172,10 @@ func TestVerifyRequestHashMatchesVerifyRequest(t *testing.T) {
 	}
 	nonce := []byte("nonce-1234567890")
 	now := time.Unix(1000, 0)
-	if err := httpsig.SignRequest(req, signer, now.UnixNano(), nonce, body); err != nil {
+	if err := httpsig.SignRequest(req, signer, audience, now.UnixNano(), nonce, body); err != nil {
 		t.Fatal(err)
 	}
-	pub, gotNonce, err := httpsig.VerifyRequestHash(req, httpsig.HashBody(body), now, httpsig.DefaultWindow)
+	pub, gotNonce, err := httpsig.VerifyRequestHash(req, audience, httpsig.HashBody(body), now, httpsig.DefaultWindow)
 	if err != nil {
 		t.Fatalf("VerifyRequestHash: %v", err)
 	}
@@ -212,5 +215,17 @@ func TestSplitSignatureTrailerRejectsMalformed(t *testing.T) {
 	bad := []byte{0x00, 0x00, 0x10, 0x00} // claims a 4096-byte signature
 	if _, _, ok := httpsig.SplitSignatureTrailer(bad); ok {
 		t.Fatal("ok = true when the claimed signature length exceeds the body")
+	}
+}
+
+// A request signed for one server must not verify on another.
+func TestRequestBoundToAudience(t *testing.T) {
+	signer := testSigner(t)
+	now := time.Now()
+	body := []byte("relayed")
+	req := signedRequest(t, signer, now.UnixNano(), body)
+	otherServer := []byte("some-other-server-public-key")
+	if _, _, err := httpsig.VerifyRequest(req, otherServer, body, now, httpsig.DefaultWindow); err == nil {
+		t.Fatal("request signed for one server verified on another")
 	}
 }

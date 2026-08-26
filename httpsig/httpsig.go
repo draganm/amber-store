@@ -1,6 +1,8 @@
 // Package httpsig signs and verifies amber-store remote-protocol HTTP
 // messages. A request signature covers a canonical CBOR map of
-// {method, path+query, timestamp, nonce, blake3(body)}; a response signature
+// {method, path+query, timestamp, nonce, blake3(body), audience}, where the
+// audience is the target server's public key so one server cannot relay a
+// request to another that allows the same client key. A response signature
 // covers {request nonce, status, blake3(body)}. Both are SSHSIG blobs in the
 // amber-store-http namespace, base64 in Amber-* headers. The expensive part —
 // hashing a multi-megabyte body — is blake3; SSHSIG's internal SHA-512 only
@@ -57,6 +59,7 @@ type requestPayload struct {
 	Timestamp int64  `cbor:"2,keyasint"`
 	Nonce     []byte `cbor:"3,keyasint"`
 	BodyHash  []byte `cbor:"4,keyasint"`
+	Audience  []byte `cbor:"5,keyasint"` // intended server's public key, SSH wire format
 }
 
 type responsePayload struct {
@@ -118,29 +121,30 @@ func notNil(b []byte) []byte {
 	return b
 }
 
-func requestSigPayload(method, pathQuery string, timestamp int64, nonce, bodyHash []byte) ([]byte, error) {
+func requestSigPayload(method, pathQuery string, timestamp int64, nonce, bodyHash, audience []byte) ([]byte, error) {
 	return encMode.Marshal(requestPayload{
 		Method:    method,
 		PathQuery: pathQuery,
 		Timestamp: timestamp,
 		Nonce:     notNil(nonce),
 		BodyHash:  notNil(bodyHash),
+		Audience:  notNil(audience),
 	})
 }
 
-// SignRequest signs req's method, path+query, timestamp, nonce and body, and
-// sets the four Amber-* headers. body must be the exact bytes the request
-// will send.
-func SignRequest(req *http.Request, signer ssh.Signer, timestamp int64, nonce, body []byte) error {
-	return SignRequestHash(req, signer, timestamp, nonce, HashBody(body))
+// SignRequest signs req's method, path+query, timestamp, nonce and body for
+// the server whose public key (SSH wire format) is audience, and sets the
+// four Amber-* headers. body must be the exact bytes the request will send.
+func SignRequest(req *http.Request, signer ssh.Signer, audience []byte, timestamp int64, nonce, body []byte) error {
+	return SignRequestHash(req, signer, audience, timestamp, nonce, HashBody(body))
 }
 
 // SignRequestHash is SignRequest for a body the caller has already hashed —
 // needed when the body is streamed (so it is never held whole), since the
 // signature header must be set before the body is sent. bodyHash must be the
 // blake3-256 of the exact bytes the request will send.
-func SignRequestHash(req *http.Request, signer ssh.Signer, timestamp int64, nonce, bodyHash []byte) error {
-	payload, err := requestSigPayload(req.Method, req.URL.RequestURI(), timestamp, nonce, bodyHash)
+func SignRequestHash(req *http.Request, signer ssh.Signer, audience []byte, timestamp int64, nonce, bodyHash []byte) error {
+	payload, err := requestSigPayload(req.Method, req.URL.RequestURI(), timestamp, nonce, bodyHash, audience)
 	if err != nil {
 		return fmt.Errorf("encoding request signature payload: %w", err)
 	}
@@ -156,19 +160,20 @@ func SignRequestHash(req *http.Request, signer ssh.Signer, timestamp int64, nonc
 }
 
 // VerifyRequest checks r's Amber-* headers against body. See VerifyRequestHash.
-func VerifyRequest(r *http.Request, body []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
-	return VerifyRequestHash(r, HashBody(body), now, window)
+func VerifyRequest(r *http.Request, audience, body []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
+	return VerifyRequestHash(r, audience, HashBody(body), now, window)
 }
 
 // VerifyRequestHash is VerifyRequest for callers that have already hashed the
 // body (e.g. a streaming receiver). bodyHash must be blake3-256 of the exact
-// request body bytes: the timestamp must be within window of now and the
-// signature must verify over the reconstructed payload with the claimed public
-// key. It returns the claimed key and the nonce; the caller still must check
+// request body bytes and audience the verifying server's own public key (SSH
+// wire format). The timestamp must be within window of now and the signature
+// must verify over the reconstructed payload with the claimed public key.
+// It returns the claimed key and the nonce; the caller still must check
 // the nonce for replay and the key against an allowlist. Callers should map any
 // non-nil error to a 401 response. The nonce is returned even on failure so
 // error responses can be signed over it.
-func VerifyRequestHash(r *http.Request, bodyHash []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
+func VerifyRequestHash(r *http.Request, audience, bodyHash []byte, now time.Time, window time.Duration) (ssh.PublicKey, []byte, error) {
 	pubB64 := r.Header.Get(HeaderPublicKey)
 	tsStr := r.Header.Get(HeaderTimestamp)
 	nonceB64 := r.Header.Get(HeaderNonce)
@@ -200,7 +205,7 @@ func VerifyRequestHash(r *http.Request, bodyHash []byte, now time.Time, window t
 	if d < -window || d > window {
 		return nil, nonce, fmt.Errorf("request timestamp outside the ±%s window", window)
 	}
-	payload, err := requestSigPayload(r.Method, r.URL.RequestURI(), ts, nonce, bodyHash)
+	payload, err := requestSigPayload(r.Method, r.URL.RequestURI(), ts, nonce, bodyHash, audience)
 	if err != nil {
 		return nil, nonce, fmt.Errorf("encoding request signature payload: %w", err)
 	}

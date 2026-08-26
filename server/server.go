@@ -55,12 +55,13 @@ type handler struct {
 	refs     *refstore.Store
 	allow    func() *allowlist.List
 	identity ssh.Signer
-	log      *slog.Logger
-	window   time.Duration
-	maxBody  int64
-	inbox    *inbox.Inbox
-	coll     *gc.Collector
-	nonces   *nonces.Cache
+	identityWire []byte // identity.PublicKey().Marshal(): request audience and /v1/identity body
+	log          *slog.Logger
+	window       time.Duration
+	maxBody      int64
+	inbox        *inbox.Inbox
+	coll         *gc.Collector
+	nonces       *nonces.Cache
 
 	// wipeMu serializes the wipe endpoint against every mutating handler:
 	// writers hold it shared, postWipe exclusively.
@@ -82,16 +83,17 @@ func New(cfg Config) http.Handler {
 		maxBody = DefaultMaxBody
 	}
 	h := &handler{
-		store:    cfg.Store,
-		refs:     cfg.Refs,
-		allow:    cfg.Allow,
-		identity: cfg.Identity,
-		log:      log,
-		window:   window,
-		maxBody:  maxBody,
-		inbox:    cfg.Inbox,
-		coll:     cfg.Collector,
-		nonces:   nonces.New(window),
+		store:        cfg.Store,
+		refs:         cfg.Refs,
+		allow:        cfg.Allow,
+		identity:     cfg.Identity,
+		identityWire: cfg.Identity.PublicKey().Marshal(),
+		log:          log,
+		window:       window,
+		maxBody:      maxBody,
+		inbox:        cfg.Inbox,
+		coll:         cfg.Collector,
+		nonces:       nonces.New(window),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/identity", h.getIdentity)
@@ -190,7 +192,7 @@ func (h *handler) auth(need string, next authedHandler) http.HandlerFunc {
 			return
 		}
 		now := time.Now()
-		pub, nonce, err := httpsig.VerifyRequest(r, body, now, h.window)
+		pub, nonce, err := httpsig.VerifyRequest(r, h.identityWire, body, now, h.window)
 		if err != nil {
 			h.log.Warn("request authentication failed", "error", err)
 			h.signError(w, nonce, http.StatusUnauthorized, err.Error())
@@ -202,9 +204,7 @@ func (h *handler) auth(need string, next authedHandler) http.HandlerFunc {
 			h.signError(w, nonce, http.StatusForbidden, err.Error())
 			return
 		}
-		// Replay check only for authorized keys: a valid signature is free
-		// to produce with any fresh key, so recording nonces before the
-		// allowlist check lets anyone grow the cache without bound.
+		// After authorize so unlisted keys cannot grow the nonce cache.
 		if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
 			h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
 			h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
@@ -223,5 +223,5 @@ func (h *handler) auth(need string, next authedHandler) http.HandlerFunc {
 // self-signed: trust comes from the user confirming the fingerprint at
 // `remote add`, not from this signature.
 func (h *handler) getIdentity(w http.ResponseWriter, r *http.Request) {
-	h.signAndWrite(w, nil, http.StatusOK, "application/octet-stream", h.identity.PublicKey().Marshal())
+	h.signAndWrite(w, nil, http.StatusOK, "application/octet-stream", h.identityWire)
 }
