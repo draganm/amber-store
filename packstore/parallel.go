@@ -34,12 +34,12 @@ type WriteOpts struct {
 // WriteParallel stores every object the iterator yields using multiple
 // concurrent workers. Compression and (optional) verification run in
 // parallel; appends serialize on the active segment. Each worker fsyncs after
-// appending BatchSize bytes and once more when the input is exhausted.
+// appending BatchSize bytes, and the run fsyncs once more before returning.
 //
 // Like WriteBatch, WriteParallel is durable-on-return but NOT atomic: on
 // error or crash a valid prefix remains, which a content-addressed re-run
-// deduplicates (a dedup hit against a record appended by a concurrent,
-// uncommitted run rides on that run's eventual fsync). If the iterator yields
+// deduplicates. The final fsync also covers dedup hits against records a
+// concurrent, uncommitted run appended. If the iterator yields
 // an error, WriteParallel stops and returns it. With opts.Verify, a
 // key/payload mismatch stops the run with a wrapped ErrVerify.
 func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
@@ -91,11 +91,11 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 	}
 
 	err := eg.Wait()
-	if err != nil && stored.Load() > 0 {
-		// Mirror WriteBatch's error-path contract: records appended before
-		// the error are Has-visible, so they must not stay non-durable.
-		// Best-effort; an fsync failure poisons the store via setFailed.
-		s.syncActive()
+	// Always fsync, as WriteBatch does. Even with nothing appended a dedup
+	// hit may have matched another run's unsynced record. On error the
+	// appended prefix is Has-visible and must become durable too.
+	if serr := s.syncActive(); err == nil {
+		err = serr
 	}
 	return WriteStats{
 		Stored:      int(stored.Load()),
@@ -106,26 +106,17 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 
 // runWriter consumes objects, encoding (compressing, optionally verifying)
 // them concurrently with its siblings and appending them to the store. It
-// fsyncs after batchSize appended bytes and once more when the channel
-// closes. On ctx cancellation it returns without flushing; WriteParallel
-// issues a final best-effort fsync for the whole run's appends (the segment
-// file is shared, so one sync covers every worker).
+// fsyncs after every batchSize appended bytes. The final fsync is
+// WriteParallel's.
 func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int, verify bool, stored, deduped, bytesStored *atomic.Int64) error {
 	pending := 0
-	flush := func() error {
-		if pending == 0 {
-			return nil
-		}
-		pending = 0
-		return s.syncActive()
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case obj, ok := <-ch:
 			if !ok {
-				return flush()
+				return nil
 			}
 			s.observe(obj.Key)
 			if !seen.addIfAbsent(obj.Key) {
@@ -156,7 +147,8 @@ func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, 
 			bytesStored.Add(int64(len(obj.Data)))
 			pending += len(rec)
 			if pending >= batchSize {
-				if err := flush(); err != nil {
+				pending = 0
+				if err := s.syncActive(); err != nil {
 					return err
 				}
 			}

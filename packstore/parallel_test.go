@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	"github.com/draganm/amber-store/amberpack"
 )
 
 func TestWriteParallelStoresAll(t *testing.T) {
@@ -122,5 +124,45 @@ func TestWriteParallelErrorFlushesPrefix(t *testing.T) {
 		if err != nil || !bytes.Equal(data, o.Data) {
 			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
 		}
+	}
+}
+
+// A dedup-only run must still fsync: the matched records may belong to a
+// concurrent writer that has not synced yet.
+func TestWriteParallelDedupOnlyRunStillSyncs(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	objs := testObjects(t, 4)
+	// Stand in for a concurrent, not-yet-committed writer.
+	for _, o := range objs {
+		rec, err := amberpack.EncodeRecord(o.Key, o.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.append(o.Key, rec, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := s.fsyncs.Load()
+	stats, err := s.WriteParallel(objSeq(objs, -1), WriteOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Stored != 0 || stats.Deduped != len(objs) {
+		t.Fatalf("stats = %+v, want all deduped", stats)
+	}
+	if s.fsyncs.Load() == before {
+		t.Fatal("WriteParallel returned success without an fsync")
+	}
+}
+
+func TestWriteParallelSyncsOncePerRun(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	objs := testObjects(t, 16)
+	before := s.fsyncs.Load()
+	if _, err := s.WriteParallel(objSeq(objs, -1), WriteOpts{Writers: 8}); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.fsyncs.Load() - before; n != 1 {
+		t.Fatalf("%d fsyncs for one small run, want 1", n)
 	}
 }
