@@ -73,6 +73,10 @@ func DecodeXattrs(b []byte) (map[string][]byte, error) {
 		return nil, fmt.Errorf("cborx: expected CBOR map (major 5), got major %d", major)
 	}
 	b = rest
+	// n is untrusted and presizes the map. A pair needs at least 2 bytes.
+	if n > uint64(len(b))/2 {
+		return nil, fmt.Errorf("cborx: xattr map claims %d pairs in %d bytes", n, len(b))
+	}
 	m := make(map[string][]byte, n)
 	for i := range n {
 		var name, val []byte
