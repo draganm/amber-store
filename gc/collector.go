@@ -89,10 +89,10 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-// Wipe cancels a running cycle. It accompanies packstore.Wipe and
-// refstore.Wipe, which the caller runs first; the collector itself holds
-// no state to clear.
-func (c *Collector) Wipe() error {
+// Wipe cancels a running cycle, waits it out and then runs reset (the
+// store wipe) while holding the cycle slot. The mark reads segment mmaps
+// unpinned, so the stores must not be wiped under it.
+func (c *Collector) Wipe(reset func() error) error {
 	c.mu.Lock()
 	if c.cancelCycle != nil {
 		c.cancelCycle()
@@ -100,6 +100,9 @@ func (c *Collector) Wipe() error {
 	c.mu.Unlock()
 	c.cycleMu.Lock() // wait out the cancelled cycle
 	defer c.cycleMu.Unlock()
+	if err := reset(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.last, c.lastErr = nil, nil
