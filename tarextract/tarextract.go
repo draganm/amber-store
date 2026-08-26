@@ -41,6 +41,11 @@ func Extract(r io.Reader, destDir string) error {
 		if err != nil {
 			return err
 		}
+		// safeJoin is lexical. An earlier symlink member could still lead
+		// MkdirAll/OpenFile out of destDir.
+		if err := rejectSymlinkComponents(destDir, target); err != nil {
+			return err
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o700); err != nil {
@@ -104,6 +109,24 @@ func Extract(r io.Reader, destDir string) error {
 	return nil
 }
 
+// rejectSymlinkComponents fails if any existing component of path below
+// dest is not a real directory.
+func rejectSymlinkComponents(dest, path string) error {
+	for p := path; strings.HasPrefix(p, dest+string(os.PathSeparator)); p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("refusing to extract through non-directory %s", p)
+		}
+	}
+	return nil
+}
+
 // safeJoin joins name under dest, rejecting any name that escapes dest.
 // It rejects names that contain ".." components (in any position) as well as
 // absolute paths, so that a tar archive cannot write outside of destDir.
@@ -135,20 +158,18 @@ func writeRegular(target string, r io.Reader) error {
 
 // applyMeta restores permissions, ownership, xattrs, and mtime for target.
 // Permissions and mtime are faithful; ownership only when running as root;
-// xattrs best-effort. mtime is set last. Symlink targets are not chmod'd and
-// their xattrs are skipped.
+// xattrs best-effort. chown runs before chmod because it clears
+// setuid/setgid. mtime is set last. Symlink targets are not chmod'd and their xattrs are skipped.
 func applyMeta(target string, h *tar.Header, isSymlink bool) error {
-	if !isSymlink {
-		if err := unix.Chmod(target, uint32(h.Mode&0o7777)); err != nil {
-			return fmt.Errorf("%s: chmod: %w", target, err)
-		}
-	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(target, h.Uid, h.Gid); err != nil {
 			return fmt.Errorf("%s: chown: %w", target, err)
 		}
 	}
 	if !isSymlink {
+		if err := unix.Chmod(target, uint32(h.Mode&0o7777)); err != nil {
+			return fmt.Errorf("%s: chmod: %w", target, err)
+		}
 		for k, v := range h.PAXRecords {
 			if !strings.HasPrefix(k, xattrPrefix) {
 				continue

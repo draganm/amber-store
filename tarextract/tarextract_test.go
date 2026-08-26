@@ -81,3 +81,96 @@ func TestExtract_RejectsUnsafeName(t *testing.T) {
 		t.Fatalf("expected error extracting an escaping path")
 	}
 }
+
+func buildTar(t *testing.T, entries ...*tar.Header) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range entries {
+		h.Format = tar.FormatPAX
+		h.ModTime = time.Unix(1_700_000_000, 0)
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			if _, err := tw.Write(bytes.Repeat([]byte("x"), int(h.Size))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf
+}
+
+// A symlink member followed by entries beneath it must not let the archive
+// write through the link to a location outside destDir.
+func TestExtract_RejectsWriteThroughSymlink(t *testing.T) {
+	outside := t.TempDir()
+	for name, entries := range map[string][]*tar.Header{
+		"file through link": {
+			{Name: "a", Typeflag: tar.TypeSymlink, Linkname: outside},
+			{Name: "a/pwned", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		},
+		"dir through link": {
+			{Name: "a", Typeflag: tar.TypeSymlink, Linkname: outside},
+			{Name: "a/sub/", Typeflag: tar.TypeDir, Mode: 0o755},
+			{Name: "a/sub/pwned", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		},
+		"dir entry on top of link": {
+			{Name: "a", Typeflag: tar.TypeSymlink, Linkname: outside},
+			{Name: "a/", Typeflag: tar.TypeDir, Mode: 0o755},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dest := filepath.Join(t.TempDir(), "out")
+			if err := tarextract.Extract(buildTar(t, entries...), dest); err == nil {
+				t.Fatalf("expected error")
+			}
+			leaked, _ := os.ReadDir(outside)
+			if len(leaked) != 0 {
+				t.Fatalf("wrote outside destDir: %v", leaked)
+			}
+		})
+	}
+}
+
+// The regular case still works: a symlink member sitting next to, not
+// above, the entries that follow it.
+func TestExtract_SymlinkSibling(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "out")
+	err := tarextract.Extract(buildTar(t,
+		&tar.Header{Name: "d/", Typeflag: tar.TypeDir, Mode: 0o755},
+		&tar.Header{Name: "d/link", Typeflag: tar.TypeSymlink, Linkname: "/etc"},
+		&tar.Header{Name: "d/f", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+	), dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "d", "f")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// chown(2) strips setuid/setgid, so ownership must be restored before the
+// mode. Only observable when Extract actually chowns, i.e. as root.
+func TestExtract_SetuidSurvivesChown(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to exercise the chown path")
+	}
+	dest := filepath.Join(t.TempDir(), "out")
+	err := tarextract.Extract(buildTar(t,
+		&tar.Header{Name: "suid", Typeflag: tar.TypeReg, Mode: 0o4755, Size: 1, Uid: 1, Gid: 1},
+	), dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(dest, "suid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSetuid == 0 {
+		t.Fatalf("setuid bit lost: mode %v", fi.Mode())
+	}
+}
