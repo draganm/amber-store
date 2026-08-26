@@ -172,9 +172,9 @@ func (h *handler) authorize(pub ssh.PublicKey, r *http.Request, now time.Time) (
 	return allowlist.ParseCaps(g.Caps)
 }
 
-// auth reads the (size-capped) body, verifies the request signature, checks
-// the nonce for replay and resolves the key's effective capabilities
-// (allowlist or grant) against the route's required capability — all before
+// auth reads the (size-capped) body, verifies the request signature,
+// resolves the key's effective capabilities (allowlist or grant), checks
+// the nonce for replay and matches the route's required capability — all before
 // the wrapped handler can cause any side effect. Bad signature/timestamp/
 // replay are 401; a valid signature that is not authorized, or lacks the
 // required capability, is 403.
@@ -196,17 +196,18 @@ func (h *handler) auth(need string, next authedHandler) http.HandlerFunc {
 			h.signError(w, nonce, http.StatusUnauthorized, err.Error())
 			return
 		}
-		// Replay check after signature verification so unauthenticated junk
-		// cannot grow the nonce cache.
-		if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
-			h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
-			h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
-			return
-		}
 		ent, err := h.authorize(pub, r, now)
 		if err != nil {
 			h.log.Warn("key not authorized", "key", ssh.FingerprintSHA256(pub), "error", err)
 			h.signError(w, nonce, http.StatusForbidden, err.Error())
+			return
+		}
+		// Replay check only for authorized keys: a valid signature is free
+		// to produce with any fresh key, so recording nonces before the
+		// allowlist check lets anyone grow the cache without bound.
+		if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
+			h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
+			h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
 			return
 		}
 		if !ent.Allows(need) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
@@ -254,5 +255,48 @@ func TestBodyOverCapRejected(t *testing.T) {
 	if err := httpsig.VerifyResponse(ts.identity.PublicKey().Marshal(), nil, resp.StatusCode,
 		httpsig.HashBody(respBody), resp.Header.Get(httpsig.HeaderSignature)); err != nil {
 		t.Fatalf("413 response signature: %v", err)
+	}
+}
+
+// sendTwice signs one request with a fixed nonce and sends it twice,
+// returning both status codes.
+func (ts *testServer) sendTwice(t *testing.T, signer ssh.Signer, pathQuery string, body []byte) (first, second int) {
+	t.Helper()
+	req, err := http.NewRequest("POST", ts.srv.URL+pathQuery, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := httpsig.SignRequest(req, signer, time.Now().UnixNano(), []byte("fixed-nonce-0123"), body); err != nil {
+		t.Fatal(err)
+	}
+	send := func() int {
+		r2 := req.Clone(req.Context())
+		r2.Body = io.NopCloser(bytes.NewReader(body))
+		resp, err := http.DefaultClient.Do(r2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	return send(), send()
+}
+
+// An unlisted key must not occupy the replay cache: anyone with a fresh
+// key could otherwise grow it without bound and slow every sweep. The
+// observable symptom of recording it is that the repeat answers 401
+// (replay) instead of 403.
+func TestUnauthorizedKeyDoesNotEnterNonceCache(t *testing.T) {
+	ts := newTestServer(t)
+	stranger := testSigner(t)
+	if a, b := ts.sendTwice(t, stranger, "/v1/objects/missing", nil); a != 403 || b != 403 {
+		t.Fatalf("auth route: got %d then %d, want 403 twice", a, b)
+	}
+	o, err := fstree.EncodeBlob([]byte("stranger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := ts.sendTwice(t, stranger, "/v1/objects?root="+o.Key.String(), packOf(t, o)); a != 403 || b != 403 {
+		t.Fatalf("push route: got %d then %d, want 403 twice", a, b)
 	}
 }
