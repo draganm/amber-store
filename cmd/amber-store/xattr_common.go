@@ -1,6 +1,11 @@
 package main
 
-import "bytes"
+import (
+	"bytes"
+	"errors"
+
+	"golang.org/x/sys/unix"
+)
 
 // splitXattrNames splits a NUL-separated xattr name list into names, dropping
 // empty entries.
@@ -12,6 +17,32 @@ func splitXattrNames(buf []byte) []string {
 		}
 	}
 	return names
+}
+
+// readXattrsWith lists xattrs with list and reads each with get (the
+// unix.Llistxattr / unix.Lgetxattr shapes). ENOTSUP from a filesystem
+// without xattr support means "no xattrs", as in tar and rsync.
+func readXattrsWith(path string, list func(string, []byte) (int, error), get func(string, string, []byte) (int, error)) (map[string][]byte, error) {
+	sz, err := list(path, nil)
+	if err != nil {
+		return nil, ignoreUnsupported(err)
+	}
+	if sz == 0 {
+		return nil, nil
+	}
+	buf := make([]byte, sz)
+	sz, err = list(path, buf)
+	if err != nil {
+		return nil, ignoreUnsupported(err)
+	}
+	return readAllXattrs(path, buf[:sz], get)
+}
+
+func ignoreUnsupported(err error) error {
+	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+		return nil
+	}
+	return err
 }
 
 // readAllXattrs fetches each named attribute's value using get, returning a map.
