@@ -819,3 +819,42 @@ func TestWipeClearsPoisonedWritePath(t *testing.T) {
 		}
 	}
 }
+
+// A failed WriteAt can leave junk past a.size. Sealing must not put the
+// footer before it, since parseFooter anchors at EOF.
+func TestSealTruncatesStaleBytesPastLogicalEnd(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, WithSegmentSize(4096))
+	first := blobObj(t, append(incompressible(1000), 1))
+	if err := s.Put(first.Key, first.Data); err != nil {
+		t.Fatal(err)
+	}
+	active, err := filepath.Glob(filepath.Join(dir, "*"+activeSuffix))
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active segments: %v %v", active, err)
+	}
+	f, err := os.OpenFile(active[0], os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(bytes.Repeat([]byte{0xEE}, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Push the segment over the threshold so this Put seals it.
+	second := blobObj(t, append(incompressible(4000), 2))
+	if err := s.Put(second.Key, second.Data); err != nil {
+		t.Fatalf("sealing Put: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openStore(t, dir)
+	for _, o := range []Object{first, second} {
+		data, err := s2.Get(o.Key)
+		if err != nil || !bytes.Equal(data, o.Data) {
+			t.Fatalf("Get(%s) after reopen: %v", o.Key, err)
+		}
+	}
+}

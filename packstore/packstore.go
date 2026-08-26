@@ -428,6 +428,11 @@ func (s *Store) sealActiveLocked() error {
 	if err != nil {
 		return err
 	}
+	// The footer is located from EOF, so drop anything a failed WriteAt
+	// left past a.size.
+	if err := a.f.Truncate(a.size); err != nil {
+		return err
+	}
 	if _, err := a.f.WriteAt(footer, a.size); err != nil {
 		return err
 	}
