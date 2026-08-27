@@ -81,3 +81,6 @@ func AddPeer(n *Node, a netaddr.EndpointAddr) bool { return n.addPeer(a) }
 
 // KnownPeers lists the node's peer set.
 func KnownPeers(n *Node) []ikey.EndpointID { return n.peerIDs() }
+
+// IndexRoot reads the peer's index root.
+func IndexRoot(p *PeerSource, ctx context.Context) (key.Key, error) { return p.indexRoot(ctx) }

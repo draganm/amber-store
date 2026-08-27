@@ -2,9 +2,13 @@ package nixcache
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -22,6 +26,7 @@ type SwarmOpts struct {
 	KeyPath string         // 32-byte identity seed, created if missing
 	Bind    netip.AddrPort // UDP bind address
 	Relay   relay.Mode
+	RelayCA string // PEM file trusted for relay TLS besides the system roots
 	Extra   []iroh.Option
 }
 
@@ -48,6 +53,10 @@ func NewSwarm(ctx context.Context, o SwarmOpts) (*Swarm, error) {
 	if err != nil {
 		return nil, err
 	}
+	tc, err := relayTLS(o.RelayCA)
+	if err != nil {
+		return nil, err
+	}
 	s := &Swarm{conns: map[ikey.EndpointID]*iroh.Conn{}}
 	opts := append([]iroh.Option{
 		iroh.WithSecretKey(sk),
@@ -55,6 +64,7 @@ func NewSwarm(ctx context.Context, o SwarmOpts) (*Swarm, error) {
 		iroh.WithBindAddr(o.Bind),
 		iroh.WithRelayMode(o.Relay),
 		iroh.WithNetReport(),
+		iroh.WithRelayTLSConfig(tc),
 		iroh.WithTransportConfig(&iroh.QUICTransportConfig{MaxIncomingStreams: 256}),
 	}, o.Extra...)
 	s.ep, err = iroh.Bind(ctx, opts...)
@@ -73,6 +83,24 @@ func NewSwarm(ctx context.Context, o SwarmOpts) (*Swarm, error) {
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	return s, nil
+}
+
+func relayTLS(caFile string) (*tls.Config, error) {
+	if caFile == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s: no certificates", caFile)
+	}
+	return &tls.Config{RootCAs: pool}, nil
 }
 
 func (s *Swarm) Endpoint() *iroh.Endpoint   { return s.ep }

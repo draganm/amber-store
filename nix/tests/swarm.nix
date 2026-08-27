@@ -24,6 +24,13 @@ let
         grep -h '^StorePath: ' $out/cache/*.narinfo | cut -d' ' -f2 \
           > $out/cache/store-paths
       '';
+  # relay certificate so the seeder relay serves HTTPS and QAD
+  relayCert = pkgs.runCommand "relay-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir $out
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -subj /CN=seeder -addext "subjectAltName=DNS:seeder" -days 3650 \
+      -keyout $out/key.pem -out $out/cert.pem
+  '';
   common = {
     imports = [ module ];
     virtualisation.vlans = [ 1 ];
@@ -39,6 +46,8 @@ let
       catalogUrls = [ "http://origin/store-paths" ];
       syncEvery = "2s";
       p2pPort = 8322;
+      relays = [ "https://seeder:3340" ];
+      relayCa = "${relayCert}/cert.pem";
       environmentFiles = [ "/run/nix-cached.env" ];
     };
     # started from the test script, which knows the signing key and
@@ -60,13 +69,30 @@ in
     };
     seeder = {
       imports = [ common ];
-      services.nix-cached.seed = true;
+      networking.firewall.allowedTCPPorts = [ 3340 ];
+      networking.firewall.allowedUDPPorts = [ 3340 ];
+      services.nix-cached = {
+        seed = true;
+        serveRelay = ":3340";
+        relayUrl = "https://seeder:3340";
+        relayCert = "${relayCert}/cert.pem";
+        relayKey = "${relayCert}/key.pem";
+      };
     };
     leaf1 = common;
     # budget below the closure's NAR size
     leaf2 = {
       imports = [ common ];
       services.nix-cached.budgetBytes = 8 * 1024 * 1024;
+    };
+    # no UDP in or out: only reachable through the seeder's relay
+    leaf3 = { lib, ... }: {
+      imports = [ common ];
+      networking.firewall.allowedUDPPorts = lib.mkForce [ ];
+      networking.firewall.extraCommands = ''
+        iptables -A OUTPUT -p udp -m multiport --dports 8322,3340 -j DROP
+        ip6tables -A OUTPUT -p udp -m multiport --dports 8322,3340 -j DROP
+      '';
     };
   };
 
@@ -104,6 +130,8 @@ in
 
     start_cached(leaf1, f"-peer {peer}")
     start_cached(leaf2, f"-peer {peer}")
+    start_cached(leaf3, f"-peer {peer}")
+
 
     def substitute(machine):
         machine.succeed(
@@ -121,6 +149,20 @@ in
     # leaf2 must get everything from the other nodes
     origin.succeed("systemctl stop nginx")
     substitute(leaf2)
+
+    # leaf1 and leaf2 have UDP and must be on direct paths only
+    metrics = leaf1.succeed("curl -fsS --unix-socket /var/lib/nix-cached/admin.sock http://x/metrics")
+    assert 'nix_cached_swarm_peers{path="direct"} 0' not in metrics, metrics
+
+    # leaf3 has no UDP path and must come through the relay
+    substitute(leaf3)
+    metrics = leaf3.succeed("curl -fsS --unix-socket /var/lib/nix-cached/admin.sock http://x/metrics")
+    assert 'nix_cached_swarm_peers{path="direct"} 0' in metrics, metrics
+    assert 'nix_cached_swarm_peers{path="relay"} 0' not in metrics, metrics
+    seeder.succeed(
+        "curl -fsS --unix-socket /var/lib/nix-cached/admin.sock http://x/metrics"
+        " | grep nix_cached_relay_datagrams_forwarded_total | grep -qv ' 0$'"
+    )
 
     # after eviction and GC, leaf2's store is far below the full cache
     leaf2.succeed(

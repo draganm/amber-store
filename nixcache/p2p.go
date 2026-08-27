@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/tmc/go-iroh/iroh"
 	ikey "github.com/tmc/go-iroh/key"
 	"github.com/tmc/go-iroh/netaddr"
+	"github.com/tmc/go-iroh/relay"
 )
 
 // The swarm speaks one ALPN. Each request is a postcard enum on its own
@@ -128,6 +131,87 @@ func readStatus(r io.Reader) error {
 	default:
 		return errors.New("nixcache: peer error")
 	}
+}
+
+// RelayMode selects the n0 default relays, a custom set, or none, plus an
+// own embedded relay.
+func RelayMode(urls []string, disabled bool, own *RelayHost) (relay.Mode, error) {
+	if disabled {
+		if len(urls) > 0 || own != nil {
+			return relay.Mode{}, errors.New("--no-relay conflicts with --relay and --serve-relay")
+		}
+		return relay.ModeDisabled(), nil
+	}
+	var rus []netaddr.RelayURL
+	for _, s := range urls {
+		u, err := parseRelayURL(s)
+		if err != nil {
+			return relay.Mode{}, err
+		}
+		rus = append(rus, u)
+	}
+	if len(urls) == 0 {
+		if own == nil {
+			return relay.ModeDefault(), nil
+		}
+		rus = relay.ModeDefault().Map().URLs()
+	}
+	// An explicit port in an https relay URL means an embedded nix-cached
+	// relay, which serves QAD on that same port instead of iroh's 7842.
+	m := relay.MapFromURLs(rus...)
+	for _, c := range m.Configs() {
+		if p := relayURLPort(c.URL); c.QUIC != nil && p != 0 {
+			c.QUIC = &relay.QUICConfig{Port: p}
+			m.Insert(c)
+		}
+	}
+	if own != nil {
+		m.Insert(own.config())
+	}
+	return relay.ModeCustom(m), nil
+}
+
+// WithSwarmRelays adds the swarm's own relays (--relay, --serve-relay) to
+// peers that name none, assuming a swarm shares its relays. A peer given as
+// id@host:port is then still reachable when UDP to it is blocked. The n0
+// default relays are left out, a peer may be homed on any of them.
+func WithSwarmRelays(peers []netaddr.EndpointAddr, urls []string, own *RelayHost) []netaddr.EndpointAddr {
+	var rus []netaddr.RelayURL
+	if own != nil {
+		rus = append(rus, own.URL())
+	}
+	for _, s := range urls {
+		if u, err := parseRelayURL(s); err == nil {
+			rus = append(rus, u)
+		}
+	}
+	out := make([]netaddr.EndpointAddr, len(peers))
+	for i, p := range peers {
+		if len(p.RelayURLs()) == 0 {
+			for _, u := range rus {
+				p = p.WithRelayURL(u)
+			}
+		}
+		out[i] = p
+	}
+	return out
+}
+
+func relayURLPort(u netaddr.RelayURL) uint16 {
+	pu, err := url.Parse(u.String())
+	if err != nil {
+		return 0
+	}
+	p, _ := strconv.Atoi(pu.Port())
+	return uint16(p)
+}
+
+func parseRelayURL(s string) (netaddr.RelayURL, error) {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return netaddr.RelayURL{}, fmt.Errorf("relay %q is not an http(s) URL", s)
+	}
+	return netaddr.RelayURLFromURL(u), nil
 }
 
 func loadIdentity(path string) (ikey.SecretKey, error) {

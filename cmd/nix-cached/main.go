@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -17,8 +18,6 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/nixcache"
-	"github.com/tmc/go-iroh/endpointticket"
-	"github.com/tmc/go-iroh/relay"
 )
 
 type listFlag []string
@@ -36,10 +35,18 @@ func main() {
 		trusted  listFlag
 		catalogs listFlag
 		peers    listFlag
+		relays   listFlag
 	)
 	cfg := nixcache.NodeConfig{}
 	listen := flag.String("listen", "127.0.0.1:8321", "substituter listen address")
 	flag.Var(&peers, "peer", "peer as <endpointid>@host:port or endpoint ticket (repeatable)")
+	flag.Var(&relays, "relay", "relay URL replacing the default n0 relays (repeatable)")
+	noRelay := flag.Bool("no-relay", false, "do not use relays, direct UDP only")
+	serveRelay := flag.String("serve-relay", "", "run an iroh relay for the swarm on this TCP listen address, e.g. :3340")
+	relayURL := flag.String("relay-url", "", "external URL of --serve-relay (default http://<interface addr>:<port>)")
+	relayCert := flag.String("relay-cert", "", "PEM certificate for --serve-relay; serves HTTPS and QUIC address discovery on the same port")
+	relayKey := flag.String("relay-key", "", "PEM key for --relay-cert")
+	relayCA := flag.String("relay-ca", "", "PEM CA bundle to trust for relays in addition to the system roots")
 	p2pPort := flag.Int("p2p-port", 0, fmt.Sprintf("swarm UDP port (default %d when peering)", nixcache.DefaultP2PPort))
 	flag.StringVar(&cfg.Dir, "dir", "", "node state directory (required)")
 	flag.StringVar(&cfg.Upstream, "upstream", "https://cache.nixos.org", "upstream cache URL")
@@ -82,6 +89,15 @@ func main() {
 	if cfg.Seed && len(catalogs) == 0 {
 		fatalf(2, "--seed needs at least one --catalog-url")
 	}
+	if *serveRelay == "" && (*relayURL != "" || *relayCert != "") {
+		fatalf(2, "--relay-url and --relay-cert need --serve-relay")
+	}
+	if (*relayCert == "") != (*relayKey == "") {
+		fatalf(2, "--relay-cert and --relay-key go together")
+	}
+	if *serveRelay != "" && len(peers) == 0 && *p2pPort == 0 {
+		*p2pPort = nixcache.DefaultP2PPort
+	}
 	if len(peers) > 0 || *p2pPort != 0 {
 		if *p2pPort == 0 {
 			*p2pPort = nixcache.DefaultP2PPort
@@ -90,18 +106,33 @@ func main() {
 		if cfg.Peers, err = nixcache.ParsePeers(peers); err != nil {
 			fatalf(2, "%v", err)
 		}
+		if *serveRelay != "" {
+			rh, err := nixcache.ServeRelay(nixcache.RelayOpts{Listen: *serveRelay, ExternalURL: *relayURL, CertFile: *relayCert, KeyFile: *relayKey})
+			if err != nil {
+				fatalf(1, "serve relay: %v", err)
+			}
+			defer rh.Close()
+			cfg.RelayHost = rh
+			slog.Info("serving relay", "listen", *serveRelay, "url", rh.URL())
+		}
+		relayMode, err := nixcache.RelayMode(relays, *noRelay, cfg.RelayHost)
+		if err != nil {
+			fatalf(2, "%v", err)
+		}
+		cfg.Peers = nixcache.WithSwarmRelays(cfg.Peers, relays, cfg.RelayHost)
 		sw, err := nixcache.NewSwarm(context.Background(), nixcache.SwarmOpts{
 			KeyPath: filepath.Join(cfg.Dir, "p2p.key"),
 			Bind:    netip.AddrPortFrom(netip.IPv6Unspecified(), uint16(*p2pPort)),
-			Relay:   relay.ModeDisabled(),
+			Relay:   relayMode,
+			RelayCA: *relayCA,
 		})
 		if err != nil {
 			fatalf(1, "%v", err)
 		}
 		defer sw.Close()
 		cfg.Swarm = sw
-		fmt.Printf("nix-cached: swarm endpoint id=%s\n", sw.ID())
-		fmt.Printf("nix-cached: swarm ticket=%s\n", endpointticket.Encode(sw.Addr()))
+		slog.Info("swarm endpoint", "id", sw.ID(), "udp_port", *p2pPort)
+		sw.LogAddr()
 	}
 
 	node, err := nixcache.OpenNode(cfg)

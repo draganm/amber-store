@@ -36,6 +36,7 @@ type NodeConfig struct {
 	// Swarm joins the swarm. Nil disables peering. Peers are probed before
 	// upstream.
 	Swarm           *Swarm
+	RelayHost       *RelayHost // embedded relay, for metrics
 	Peers           []netaddr.EndpointAddr
 	PeerConcurrency int   // cap on in-flight peer-serving requests; 0: 4, seeders 64
 	PeerByteRate    int64 // peer-serving bandwidth cap, bytes/second; 0: unlimited

@@ -72,6 +72,9 @@ nix_cached_known_peers %d
 		m.narBytesServed.Load(),
 		n.catalog.Len(), n.indexedPaths(), n.store.SizeBytes(), direct, relayed,
 		len(n.peerIDs()))
+	if n.cfg.RelayHost != nil {
+		io.WriteString(w, n.cfg.RelayHost.Metrics())
+	}
 }
 
 func (n *Node) indexedPaths() int {

@@ -5,7 +5,13 @@ let
     [ "-dir" "/var/lib/nix-cached" "-listen" cfg.listen "-upstream" cfg.upstream ]
     ++ lib.concatMap (u: [ "-catalog-url" u ]) cfg.catalogUrls
     ++ lib.concatMap (p: [ "-peer" p ]) cfg.peers
+    ++ lib.concatMap (r: [ "-relay" r ]) cfg.relays
+    ++ lib.optional cfg.noRelay "-no-relay"
     ++ lib.optionals (cfg.p2pPort != null) [ "-p2p-port" (toString cfg.p2pPort) ]
+    ++ lib.optionals (cfg.serveRelay != null) [ "-serve-relay" cfg.serveRelay ]
+    ++ lib.optionals (cfg.relayUrl != null) [ "-relay-url" cfg.relayUrl ]
+    ++ lib.optionals (cfg.relayCert != null) [ "-relay-cert" cfg.relayCert "-relay-key" cfg.relayKey ]
+    ++ lib.optionals (cfg.relayCa != null) [ "-relay-ca" cfg.relayCa ]
     ++ lib.concatMap (k: [ "-trusted-key" k ]) cfg.trustedKeys
     ++ lib.optionals (cfg.syncEvery != null) [ "-sync-every" cfg.syncEvery ]
     ++ lib.optionals (cfg.catalogTtl != null) [ "-catalog-ttl" cfg.catalogTtl ]
@@ -37,10 +43,46 @@ in
       default = [ ];
       description = "Peers as <endpointid>@host:port or endpoint tickets.";
     };
+    relays = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Relay URLs replacing the default n0 relays.";
+    };
+    noRelay = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Use no relays, direct UDP only.";
+    };
     p2pPort = lib.mkOption {
       type = lib.types.nullOr lib.types.port;
       default = null;
       description = "Swarm UDP port (8322 when peering). Setting it enables peering without static peers.";
+    };
+    serveRelay = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = ":3340";
+      description = "Run an iroh relay for the swarm on this TCP listen address.";
+    };
+    relayUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "External URL of serveRelay as given to peers' relays option.";
+    };
+    relayCert = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "PEM certificate for serveRelay. Enables HTTPS and QUIC address discovery so NATed peers can find a direct path.";
+    };
+    relayKey = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "PEM key for relayCert.";
+    };
+    relayCa = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "PEM CA bundle trusted for relays in addition to the system roots.";
     };
     trustedKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;

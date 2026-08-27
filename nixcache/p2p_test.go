@@ -3,9 +3,15 @@ package nixcache_test
 import (
 	"bytes"
 	"encoding/hex"
+	"net/netip"
+	"strings"
 	"testing"
 
+	ikey "github.com/tmc/go-iroh/key"
+	"github.com/tmc/go-iroh/netaddr"
+
 	"github.com/draganm/amber-store/nixcache"
+	"github.com/tmc/go-iroh/relay"
 )
 
 // TestRequestWireGolden pins the postcard encoding of each request variant:
@@ -61,6 +67,59 @@ func TestParsePeers(t *testing.T) {
 	for _, bad := range []string{sw.ID().String(), "nope@127.0.0.1:1", sw.ID().String() + "@"} {
 		if _, err := nixcache.ParsePeers([]string{bad}); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestRelayMode(t *testing.T) {
+	if _, err := nixcache.RelayMode([]string{"https://r.example"}, true, nil); err == nil {
+		t.Fatal("--relay with --no-relay accepted")
+	}
+	if _, err := nixcache.RelayMode([]string{"not a url"}, false, nil); err == nil {
+		t.Fatal("bad relay URL accepted")
+	}
+	m, err := nixcache.RelayMode([]string{"https://r.example./"}, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if urls := m.Map().URLs(); len(urls) != 1 || urls[0].String() != "https://r.example./" {
+		t.Fatalf("urls = %v", urls)
+	}
+	if m, _ := nixcache.RelayMode(nil, false, nil); len(m.Map().URLs()) == 0 {
+		t.Fatal("default mode has no relays")
+	}
+	if m, _ := nixcache.RelayMode(nil, true, nil); len(m.Map().URLs()) != 0 {
+		t.Fatal("disabled mode has relays")
+	}
+	rh, err := nixcache.ServeRelay(nixcache.RelayOpts{Listen: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rh.Close()
+	if _, err := nixcache.RelayMode(nil, true, rh); err == nil {
+		t.Fatal("--serve-relay with --no-relay accepted")
+	}
+	m, _ = nixcache.RelayMode(nil, false, rh)
+	if urls := m.Map().URLs(); len(urls) < 2 || !m.Map().Contains(rh.URL()) {
+		t.Fatalf("own relay plus defaults expected: %v", urls)
+	}
+	sk, _ := ikey.GenerateSecretKey()
+	peers := []netaddr.EndpointAddr{netaddr.NewEndpointAddr(sk.Public().EndpointID()).WithIP(netip.MustParseAddrPort("127.0.0.1:1"))}
+	got := nixcache.WithSwarmRelays(peers, []string{"https://seeder:3340"}, rh)
+	if len(got[0].RelayURLs()) != 2 || len(got[0].IPAddrs()) != 1 {
+		t.Fatalf("WithSwarmRelays = %v", got[0])
+	}
+	if again := nixcache.WithSwarmRelays(got, []string{"https://other"}, nil); len(again[0].RelayURLs()) != 2 {
+		t.Fatalf("peer with relays modified: %v", again[0])
+	}
+	m, _ = nixcache.RelayMode([]string{"https://seeder:3340", "https://r.example"}, false, nil)
+	for _, c := range m.Map().Configs() {
+		want := uint16(relay.DefaultQUICPort)
+		if strings.Contains(c.URL.String(), "seeder") {
+			want = 3340
+		}
+		if c.QUIC == nil || c.QUIC.Port != want {
+			t.Fatalf("%s: QUIC = %+v, want port %d", c.URL, c.QUIC, want)
 		}
 	}
 }

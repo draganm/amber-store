@@ -62,7 +62,8 @@ Add `amber-store` to your flake inputs and import the module:
 
 ## Peering
 
-Peering is off until a node is given `-p2p-port` or `-peer`. The minimal form:
+Peering is off until a node is given `-p2p-port`, `-peer` or
+`-serve-relay`. The minimal form:
 
 ```console
 $ nix-cached --dir ... --p2p-port 8322
@@ -80,12 +81,41 @@ $ nix-cached --dir ... --peer endpointac…
 
 The endpoint id is derived from `p2p.key` in the state directory and
 stays stable. The ticket additionally carries the node's current
-addresses and is re-logged when those change. Only one
+addresses and home relay and is re-logged when those change. Only one
 side needs `-peer`; connections are used in both directions.
 
 The transport is QUIC over one UDP port (8322 unless `-p2p-port` says
 otherwise); open it in the firewall of any node that should accept
-peers directly.
+peers directly. A node bound to the wildcard address advertises the
+addresses of its network interfaces.
+
+### NAT and relays
+
+Nodes keep a connection to a *relay* (by default the public n0 relays)
+which forwards traffic between peers that cannot reach each other
+directly and helps them punch through NATs to a direct UDP path. A
+node's home relay is part of its ticket. `-relay <url>` replaces the
+default set, `-no-relay` turns relays off for swarms where every node
+is directly reachable.
+
+A swarm that should not depend on third-party relays can run its own on
+the seeder:
+
+```console
+$ nix-cached --dir /var/lib/nix-cached --seed --serve-relay :3340 \
+    --relay-url https://seeder.example.org:3340 \
+    --relay-cert cert.pem --relay-key key.pem
+```
+
+and point the leaves at it with `--relay https://seeder.example.org:3340`
+(plus `--relay-ca ca.pem` for a private CA). With a certificate the
+relay serves HTTPS on the TCP port and QUIC address discovery on the
+same UDP port, which tells NATed leaves their public address so they
+can hole-punch a direct path. Without `--relay-cert` it speaks plain
+HTTP and only forwards, so two NATed leaves stay on the relay. Peers
+given as `id@host:port` are also tried through the configured relays
+when UDP to them is blocked. Relay traffic shows up as
+`nix_cached_relay_*` metrics on the seeder.
 
 ### Seeding a mirror
 
@@ -160,8 +190,9 @@ the catalog, aging starts at the next pass.
 |---|---|
 | `nix_cached_ingest_total{source=...}` | paths fetched, split by `swarm` vs `upstream` — your p2p hit rate |
 | `nix_cached_narinfo_requests_total{result=...}` | what clients ask for and how it was answered |
-| `nix_cached_swarm_peers` | currently connected peers |
+| `nix_cached_swarm_peers{path=...}` | connected peers, split by `direct` vs `relay` path |
 | `nix_cached_known_peers` | configured peers |
+| `nix_cached_relay_*_total` | embedded relay counters (`-serve-relay`) |
 | `nix_cached_store_bytes` | store size on disk |
 
 The daemon logs every ingest with its source, peer connections and
@@ -180,7 +211,8 @@ configured catalog. Add the channel's `store-paths.xz` via
 so this is a cache miss, not an outage.
 
 **`swarm_peers` stays 0.**
-- *Firewall*: UDP port 8322 must be open on at least one side. Dials that reach nothing fail with
+- *Firewall*: UDP port 8322 must be open on at least one side, or both
+  sides need a common relay. Dials that reach nothing fail with
   `timeout: no recent network activity` in `peer connect ... err=...`.
   On some systems legacy `iptables` rules land in a table the active
   nftables ruleset never consults; verify with `nft list ruleset`.
@@ -228,6 +260,12 @@ download; everything after the first request is a local hit.
 --seed            eagerly mirror the whole catalog
 --peer            <endpointid>@host:port or ticket, repeatable
 --p2p-port        swarm UDP port             default 8322 when peering
+--relay           relay URL replacing the n0 defaults, repeatable
+--no-relay        direct UDP only
+--serve-relay     run a relay on this TCP address, e.g. :3340
+--relay-url       external URL of --serve-relay
+--relay-cert/-key TLS certificate for --serve-relay, enables QAD
+--relay-ca        extra CA bundle trusted for relays
 --sync-every      catalog and peer sync interval   default 5m
 --stall-timeout   abort stalled upstream transfers default 1m
 --trusted-key     accepted narinfo signing key, repeatable
