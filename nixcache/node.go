@@ -77,8 +77,8 @@ type Node struct {
 	pins  map[string]bool // explicit pins, persisted
 
 	peerMu    sync.Mutex
-	peerRoots map[ikey.EndpointID]key.Key  // last synced index root per peer
-	peerSet   map[ikey.EndpointID]struct{} // static peers plus discovered ones
+	peerRoots map[ikey.EndpointID]key.Key // last synced index root per peer
+	peerSet   map[ikey.EndpointID]*peerState
 
 	catalogTags sync.Map // catalog URL -> ETag of the last ingested list
 	catalogMu   sync.RWMutex
@@ -118,7 +118,7 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{cfg: cfg, store: store, catalog: catalog, trusted: trusted, root: root, pins: pins,
-		peerRoots: map[ikey.EndpointID]key.Key{}, peerSet: map[ikey.EndpointID]struct{}{},
+		peerRoots: map[ikey.EndpointID]key.Key{}, peerSet: map[ikey.EndpointID]*peerState{},
 		catalogCur: map[string]*Catalog{}, swarmStats: remotesync.NewStats()}
 	if cfg.BudgetBytes > 0 {
 		n.evict = newEvictPolicy(cfg.BudgetBytes)
@@ -145,7 +145,8 @@ func OpenNode(cfg NodeConfig) (*Node, error) {
 		n.server.Attach(cfg.Swarm)
 		n.server.Ensure = n.ensure
 		for _, a := range cfg.Peers {
-			n.addPeer(a)
+			cfg.Swarm.AddAddr(a)
+			n.addPeer(a.ID, true)
 		}
 	}
 	return n, nil
@@ -279,6 +280,9 @@ func (n *Node) Run(ctx context.Context, l net.Listener) error {
 	go n.syncLoop(ctx)
 	if n.cfg.Swarm != nil && len(n.cfg.Peers) > 0 {
 		go n.connectLoop(ctx)
+	}
+	if n.cfg.Swarm != nil {
+		go n.discoverLoop(ctx)
 	}
 	srv := &http.Server{Handler: n.server}
 	go func() {

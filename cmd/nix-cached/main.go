@@ -42,6 +42,7 @@ func main() {
 	flag.Var(&peers, "peer", "peer as <endpointid>@host:port or endpoint ticket (repeatable)")
 	flag.Var(&relays, "relay", "relay URL replacing the default n0 relays (repeatable)")
 	noRelay := flag.Bool("no-relay", false, "do not use relays, direct UDP only")
+	useMDNS := flag.Bool("mdns", false, "also discover peers on the local network via mDNS")
 	serveRelay := flag.String("serve-relay", "", "run an iroh relay for the swarm on this TCP listen address, e.g. :3340")
 	relayURL := flag.String("relay-url", "", "external URL of --serve-relay (default http://<interface addr>:<port>)")
 	relayCert := flag.String("relay-cert", "", "PEM certificate for --serve-relay; serves HTTPS and QUIC address discovery on the same port")
@@ -124,6 +125,7 @@ func main() {
 			KeyPath: filepath.Join(cfg.Dir, "p2p.key"),
 			Bind:    netip.AddrPortFrom(netip.IPv6Unspecified(), uint16(*p2pPort)),
 			Relay:   relayMode,
+			MDNS:    *useMDNS,
 			RelayCA: *relayCA,
 		})
 		if err != nil {

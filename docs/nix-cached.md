@@ -82,7 +82,11 @@ $ nix-cached --dir ... --peer endpointac…
 The endpoint id is derived from `p2p.key` in the state directory and
 stays stable. The ticket additionally carries the node's current
 addresses and home relay and is re-logged when those change. Only one
-side needs `-peer`; connections are used in both directions.
+side needs `-peer`; connections are used in both directions. Every
+node announces itself on a gossip topic that spans the swarm, so
+further nodes are discovered through any one well-known member, not
+full mesh configuration. `-mdns` additionally finds nodes on the local
+network without any configuration.
 
 The transport is QUIC over one UDP port (8322 unless `-p2p-port` says
 otherwise); open it in the firewall of any node that should accept
@@ -191,7 +195,7 @@ the catalog, aging starts at the next pass.
 | `nix_cached_ingest_total{source=...}` | paths fetched, split by `swarm` vs `upstream` — your p2p hit rate |
 | `nix_cached_narinfo_requests_total{result=...}` | what clients ask for and how it was answered |
 | `nix_cached_swarm_peers{path=...}` | connected peers, split by `direct` vs `relay` path |
-| `nix_cached_known_peers` | configured peers |
+| `nix_cached_known_peers` | peers known via config, gossip or mDNS |
 | `nix_cached_relay_*_total` | embedded relay counters (`-serve-relay`) |
 | `nix_cached_store_bytes` | store size on disk |
 
@@ -225,9 +229,12 @@ so this is a cache miss, not an outage.
 
 **Peers are connected but pulls still come from upstream.** Check
 `known_peers` vs `swarm_peers`: a connection alone does not make a
-node a *content* peer — that happens via configuration, and its index
-is pulled on the sync interval (`-sync-every`, default 5 min). Requests
-that arrive before then are served from upstream.
+node a *content* peer — that happens via configuration or gossip
+(`peer discovered` in the journal), and its index is pulled on the
+sync interval (`-sync-every`, default 5 min). Requests that arrive
+before then are served from upstream so they never wait on discovery.
+Discovered peers that fail two syncs in a row are dropped again
+(`peer dropped`).
 
 **Misses answer 503 for a while.** After cache.nixos.org returns
 429/503, the node backs off (honoring `Retry-After`, capped at 15 min)
@@ -266,6 +273,7 @@ download; everything after the first request is a local hit.
 --relay-url       external URL of --serve-relay
 --relay-cert/-key TLS certificate for --serve-relay, enables QAD
 --relay-ca        extra CA bundle trusted for relays
+--mdns            discover peers on the local network
 --sync-every      catalog and peer sync interval   default 5m
 --stall-timeout   abort stalled upstream transfers default 1m
 --trusted-key     accepted narinfo signing key, repeatable

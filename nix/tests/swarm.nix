@@ -132,6 +132,11 @@ in
     start_cached(leaf2, f"-peer {peer}")
     start_cached(leaf3, f"-peer {peer}")
 
+    # leaf1 and leaf2 only know the seeder and find each other via gossip
+    leaf1.wait_until_succeeds(
+        "curl -fsS --unix-socket /var/lib/nix-cached/admin.sock http://x/metrics | grep -x 'nix_cached_known_peers [3-9]'",
+        timeout=60,
+    )
 
     def substitute(machine):
         machine.succeed(

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/remotesync"
@@ -19,33 +20,44 @@ const maxPeerIndexBytes = 512 << 20
 // NAR payload) into the local store. Peer lookups afterwards are local
 // tree walks.
 func (n *Node) SyncPeers(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, id := range n.peerIDs() {
-		src := &PeerSource{Swarm: n.cfg.Swarm, ID: id}
-		root, err := src.indexRoot(ctx)
-		if err != nil {
-			slog.Warn("peer index sync", "peer", id, "err", err)
-			continue
-		}
-		if root == (key.Key{}) {
-			continue
-		}
-		n.peerMu.Lock()
-		known := n.peerRoots[id] == root
-		n.peerMu.Unlock()
-		if known {
-			continue
-		}
-		n.gcMu.RLock()
-		_, err = remotesync.Pull(ctx, n.store, src, root, remotesync.Opts{MaxBytes: maxPeerIndexBytes})
-		n.gcMu.RUnlock()
-		if err != nil {
-			slog.Warn("peer index sync", "peer", id, "err", err)
-			continue
-		}
-		n.peerMu.Lock()
-		n.peerRoots[id] = root
-		n.peerMu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.syncPeer(ctx, id)
+		}()
 	}
+	wg.Wait()
+}
+
+func (n *Node) syncPeer(ctx context.Context, id ikey.EndpointID) {
+	src := &PeerSource{Swarm: n.cfg.Swarm, ID: id}
+	root, err := src.indexRoot(ctx)
+	n.peerResult(id, err)
+	if err != nil {
+		slog.Warn("peer index sync", "peer", id.Short(), "err", err)
+		return
+	}
+	if root == (key.Key{}) {
+		return
+	}
+	n.peerMu.Lock()
+	known := n.peerRoots[id] == root
+	n.peerMu.Unlock()
+	if known {
+		return
+	}
+	n.gcMu.RLock()
+	_, err = remotesync.Pull(ctx, n.store, src, root, remotesync.Opts{MaxBytes: maxPeerIndexBytes})
+	n.gcMu.RUnlock()
+	if err != nil {
+		slog.Warn("peer index sync", "peer", id.Short(), "err", err)
+		return
+	}
+	n.peerMu.Lock()
+	n.peerRoots[id] = root
+	n.peerMu.Unlock()
 }
 
 // snapshotPeerRoots returns the synced roots. GC marks them (structure

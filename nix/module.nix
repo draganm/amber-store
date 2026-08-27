@@ -12,6 +12,7 @@ let
     ++ lib.optionals (cfg.relayUrl != null) [ "-relay-url" cfg.relayUrl ]
     ++ lib.optionals (cfg.relayCert != null) [ "-relay-cert" cfg.relayCert "-relay-key" cfg.relayKey ]
     ++ lib.optionals (cfg.relayCa != null) [ "-relay-ca" cfg.relayCa ]
+    ++ lib.optional cfg.mdns "-mdns"
     ++ lib.concatMap (k: [ "-trusted-key" k ]) cfg.trustedKeys
     ++ lib.optionals (cfg.syncEvery != null) [ "-sync-every" cfg.syncEvery ]
     ++ lib.optionals (cfg.catalogTtl != null) [ "-catalog-ttl" cfg.catalogTtl ]
@@ -83,6 +84,11 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "PEM CA bundle trusted for relays in addition to the system roots.";
+    };
+    mdns = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Also discover peers on the local network via mDNS.";
     };
     trustedKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;

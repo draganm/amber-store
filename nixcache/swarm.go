@@ -13,21 +13,36 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tmc/go-iroh/dns"
 	"github.com/tmc/go-iroh/endpointticket"
+	"github.com/tmc/go-iroh/gossip"
 	"github.com/tmc/go-iroh/iroh"
+	"github.com/tmc/go-iroh/iroh/mdns"
 	ikey "github.com/tmc/go-iroh/key"
 	"github.com/tmc/go-iroh/netaddr"
 	"github.com/tmc/go-iroh/relay"
+	"github.com/zeebo/blake3"
 	"golang.org/x/sync/singleflight"
 )
+
+// swarmTopic is the gossip topic every node joins to announce its address.
+var swarmTopic = gossip.TopicID(blake3.Sum256([]byte("amber-swarm/1")))
 
 // SwarmOpts configures NewSwarm.
 type SwarmOpts struct {
 	KeyPath string         // 32-byte identity seed, created if missing
 	Bind    netip.AddrPort // UDP bind address
 	Relay   relay.Mode
+	MDNS    bool   // also find peers on the local network
 	RelayCA string // PEM file trusted for relay TLS besides the system roots
 	Extra   []iroh.Option
+}
+
+// discoverer is gossip.Discovery or mdns.Discovery.
+type discoverer interface {
+	Start(context.Context) error
+	Peers() []ikey.EndpointID
+	Updated() <-chan struct{}
 }
 
 // Swarm keeps one QUIC connection per peer over an iroh endpoint and
@@ -36,6 +51,9 @@ type SwarmOpts struct {
 type Swarm struct {
 	ep     *iroh.Endpoint
 	router *iroh.Router
+	gossip *gossip.Gossip
+	lookup *iroh.AddressLookupServices
+	disc   []discoverer
 	handle atomic.Pointer[func(*iroh.Stream)] // nil until a Server attaches
 
 	mu    sync.Mutex
@@ -57,13 +75,20 @@ func NewSwarm(ctx context.Context, o SwarmOpts) (*Swarm, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Swarm{conns: map[ikey.EndpointID]*iroh.Conn{}}
+	s := &Swarm{lookup: &iroh.AddressLookupServices{}, conns: map[ikey.EndpointID]*iroh.Conn{}}
+	if o.MDNS {
+		m := mdns.New(sk.Public().EndpointID())
+		s.lookup.AddPublisher(m)
+		s.lookup.AddResolver(m)
+		s.disc = append(s.disc, m)
+	}
 	opts := append([]iroh.Option{
 		iroh.WithSecretKey(sk),
 		iroh.WithALPNs(swarmALPN),
 		iroh.WithBindAddr(o.Bind),
 		iroh.WithRelayMode(o.Relay),
 		iroh.WithNetReport(),
+		iroh.WithAddressLookup(s.lookup),
 		iroh.WithRelayTLSConfig(tc),
 		iroh.WithTransportConfig(&iroh.QUICTransportConfig{MaxIncomingStreams: 256}),
 	}, o.Extra...)
@@ -71,11 +96,13 @@ func NewSwarm(ctx context.Context, o SwarmOpts) (*Swarm, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.gossip = gossip.NewGossip(s.ep)
 	s.router, err = iroh.NewRouter(s.ep, map[string]iroh.ProtocolHandler{
 		swarmALPN: iroh.ProtocolHandlerFunc(func(ctx context.Context, c *iroh.Conn) error {
 			s.serveConn(c)
 			return nil
 		}),
+		gossip.ALPN: s.gossip.Handler(),
 	}, nil)
 	if err != nil {
 		s.ep.Shutdown(ctx)
@@ -101,6 +128,54 @@ func relayTLS(caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("%s: no certificates", caFile)
 	}
 	return &tls.Config{RootCAs: pool}, nil
+}
+
+// Discover joins the gossip topic through bootstrap and, if enabled,
+// browses mDNS. Peers and Updated report what was found.
+func (s *Swarm) Discover(bootstrap []netaddr.EndpointAddr) {
+	d := gossip.New(s.ID(), gossip.WithGossip(s.gossip, swarmTopic, bootstrap))
+	s.lookup.AddPublisher(d)
+	s.lookup.AddResolver(d)
+	// The endpoint published its address before d was registered.
+	d.Publish(dns.EndpointDataFromAddr(s.Addr()))
+	s.disc = append(s.disc, d)
+	for _, d := range s.disc {
+		go func() {
+			if err := d.Start(s.ctx); err != nil && s.ctx.Err() == nil {
+				slog.Warn("discovery", "err", err)
+			}
+		}()
+	}
+}
+
+// Peers lists discovered endpoint IDs.
+func (s *Swarm) Peers() []ikey.EndpointID {
+	var out []ikey.EndpointID
+	for _, d := range s.disc {
+		out = append(out, d.Peers()...)
+	}
+	return out
+}
+
+// Updated is signalled when Peers may have grown.
+func (s *Swarm) Updated() <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	for _, d := range s.disc {
+		go func() {
+			for {
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-d.Updated():
+				}
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+			}
+		}()
+	}
+	return ch
 }
 
 func (s *Swarm) Endpoint() *iroh.Endpoint   { return s.ep }
@@ -129,6 +204,7 @@ func (s *Swarm) LogAddr() {
 // Close shuts the endpoint down.
 func (s *Swarm) Close() error {
 	s.cancel()
+	s.gossip.Shutdown(context.Background())
 	err := s.router.Shutdown(context.Background())
 	if errors.Is(err, iroh.ErrEndpointClosed) {
 		return nil

@@ -77,10 +77,16 @@ func SetMidIngest(n *Node, f func() error) { n.midIngest = f }
 func ConnectLoop(n *Node, ctx context.Context) { n.connectLoop(ctx) }
 
 // AddPeer feeds a discovered peer to the node.
-func AddPeer(n *Node, a netaddr.EndpointAddr) bool { return n.addPeer(a) }
+func AddPeer(n *Node, a netaddr.EndpointAddr) bool {
+	n.cfg.Swarm.AddAddr(a)
+	return n.addPeer(a.ID, false)
+}
 
 // KnownPeers lists the node's peer set.
 func KnownPeers(n *Node) []ikey.EndpointID { return n.peerIDs() }
 
 // IndexRoot reads the peer's index root.
 func IndexRoot(p *PeerSource, ctx context.Context) (key.Key, error) { return p.indexRoot(ctx) }
+
+// Discover runs the gossip discovery loop.
+func Discover(n *Node, ctx context.Context) { n.discoverLoop(ctx) }
