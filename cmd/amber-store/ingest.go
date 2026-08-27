@@ -13,14 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/draganm/amber-store/amberpack"
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/amberignore"
-	"github.com/draganm/amber-store/socketpath"
-	"github.com/draganm/amber-store/userconfig"
+	"github.com/draganm/amber-store/amberpack"
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/key"
 	"github.com/draganm/amber-store/reference"
+	"github.com/draganm/amber-store/userconfig"
 	"github.com/urfave/cli/v2"
 )
 
@@ -373,6 +371,11 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			return err
 		}
 	} else {
+		// Before starting the builder goroutine so an error cannot strand it.
+		cl, err := daemonClient(cfg.socket)
+		if err != nil {
+			return err
+		}
 		// Stream the pack to the daemon: build into a pipe consumed as the request
 		// body, capturing the build's root and error out-of-band.
 		pr, pw := io.Pipe()
@@ -390,7 +393,6 @@ func runIngest(c *cli.Context, cfg *ingestConfig) error {
 			}
 			resCh <- result{r, err}
 		}()
-		cl := client.New(socketpath.Resolve(cfg.socket))
 		_, ingErr := cl.Ingest(ctx, pr)
 		res := <-resCh
 		// A closed-pipe build error is a secondary effect: the transport closes

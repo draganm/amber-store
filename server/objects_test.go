@@ -159,7 +159,7 @@ func TestObjectsGetReturnsInBandSignedPack(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonce := []byte("nonce-16-bytes!!")
-	if err := httpsig.SignRequest(req, ts.client, time.Now().UnixNano(), nonce, body); err != nil {
+	if err := httpsig.SignRequest(req, ts.client, ts.identity.PublicKey().Marshal(), time.Now().UnixNano(), nonce, body); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -252,7 +252,7 @@ func TestPostObjectsReplayedNonceRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := httpsig.SignRequest(req, ts.client, time.Now().UnixNano(), []byte("fixed-nonce-0123"), body); err != nil {
+	if err := httpsig.SignRequest(req, ts.client, ts.identity.PublicKey().Marshal(), time.Now().UnixNano(), []byte("fixed-nonce-0123"), body); err != nil {
 		t.Fatal(err)
 	}
 	send := func() int {

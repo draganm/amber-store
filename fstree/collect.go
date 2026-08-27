@@ -1,6 +1,7 @@
 package fstree
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -85,37 +86,51 @@ func ResolveEntry(root key.Key, path string, get func(key.Key) ([]byte, error)) 
 // DirNode index levels into the DirLeaves that hold them. Entries are returned
 // in name order (the order the leaves store them). get fetches the bytes stored
 // under a key.
+//
+// Names must strictly increase across leaves. This also stops a pushed DAG
+// whose DirNodes repeat one child from expanding multiplicatively.
 func CollectEntries(k key.Key, get func(key.Key) ([]byte, error)) ([]Entry, error) {
+	var out []Entry
+	if err := collectEntries(k, get, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func collectEntries(k key.Key, get func(key.Key) ([]byte, error), out *[]Entry) error {
 	data, err := get(k)
 	if err != nil {
-		return nil, fmt.Errorf("fstree: reading %s: %w", k, err)
+		return fmt.Errorf("fstree: reading %s: %w", k, err)
 	}
 	switch k.Type() {
 	case key.DirLeaf:
 		entries, err := DecodeDirLeaf(data)
 		if err != nil {
-			return nil, fmt.Errorf("fstree: decoding DirLeaf %s: %w", k, err)
+			return fmt.Errorf("fstree: decoding DirLeaf %s: %w", k, err)
 		}
-		return entries, nil
+		for _, e := range entries {
+			if n := len(*out); n > 0 && bytes.Compare(e.Name, (*out)[n-1].Name) <= 0 {
+				return fmt.Errorf("fstree: DirLeaf %s: entry %q is not after %q", k, e.Name, (*out)[n-1].Name)
+			}
+			*out = append(*out, e)
+		}
+		return nil
 	case key.DirNode:
 		pairs, err := DecodeDirNode(data)
 		if err != nil {
-			return nil, fmt.Errorf("fstree: decoding DirNode %s: %w", k, err)
+			return fmt.Errorf("fstree: decoding DirNode %s: %w", k, err)
 		}
-		var out []Entry
 		for _, p := range pairs {
 			ck, err := key.Parse(p.ChildKey)
 			if err != nil {
-				return nil, fmt.Errorf("fstree: child key in DirNode %s: %w", k, err)
+				return fmt.Errorf("fstree: child key in DirNode %s: %w", k, err)
 			}
-			sub, err := CollectEntries(ck, get)
-			if err != nil {
-				return nil, err
+			if err := collectEntries(ck, get, out); err != nil {
+				return err
 			}
-			out = append(out, sub...)
 		}
-		return out, nil
+		return nil
 	default:
-		return nil, fmt.Errorf("fstree: %s is not a directory object (type %v)", k, k.Type())
+		return fmt.Errorf("fstree: %s is not a directory object (type %v)", k, k.Type())
 	}
 }

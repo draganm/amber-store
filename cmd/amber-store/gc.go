@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/urfave/cli/v2"
 )
 
@@ -31,7 +29,11 @@ func gcStatusCommand() *cli.Command {
 			if c.NArg() != 0 {
 				return fmt.Errorf("gc status takes no arguments, got %d", c.NArg())
 			}
-			st, err := client.New(socketpath.Resolve(socket)).GCStatus(c.Context)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			st, err := cl.GCStatus(c.Context)
 			if err != nil {
 				return err
 			}
@@ -76,7 +78,11 @@ func gcRunCommand() *cli.Command {
 			if c.NArg() != 0 {
 				return fmt.Errorf("gc run takes no arguments, got %d", c.NArg())
 			}
-			stats, err := client.New(socketpath.Resolve(socket)).GCRun(c.Context, garbage)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			stats, err := cl.GCRun(c.Context, garbage)
 			if err != nil {
 				return err
 			}
@@ -104,7 +110,11 @@ func gcWhyCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			names, err := client.New(socketpath.Resolve(socket)).GCWhy(c.Context, k)
+			cl, err := daemonClient(socket)
+			if err != nil {
+				return err
+			}
+			names, err := cl.GCWhy(c.Context, k)
 			if err != nil {
 				return err
 			}

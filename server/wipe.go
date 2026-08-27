@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -18,21 +19,19 @@ import (
 func (h *handler) postWipe(w http.ResponseWriter, r *http.Request, a *authedRequest) {
 	h.wipeMu.Lock()
 	defer h.wipeMu.Unlock()
-	// Refs first: if the object wipe fails midway, the store holds dangling
-	// (ref-less) objects — invisible garbage — rather than refs pointing at
-	// deleted content.
-	if err := h.refs.Wipe(); err != nil {
-		h.signError(w, a.nonce, http.StatusInternalServerError, "wiping references: "+err.Error())
-		return
-	}
-	if err := h.store.Wipe(); err != nil {
-		h.signError(w, a.nonce, http.StatusInternalServerError, "wiping objects: "+err.Error())
-		return
-	}
-	// After the stores: cancels any running cycle, waits it out, clears the
-	// last-cycle stats.
-	if err := h.coll.Wipe(); err != nil {
-		h.signError(w, a.nonce, http.StatusInternalServerError, "resetting the collector: "+err.Error())
+	// The collector runs this once no cycle is marking. Refs first: if the
+	// object wipe fails midway we keep garbage rather than dangling refs.
+	err := h.coll.Wipe(func() error {
+		if err := h.refs.Wipe(); err != nil {
+			return fmt.Errorf("wiping references: %w", err)
+		}
+		if err := h.store.Wipe(); err != nil {
+			return fmt.Errorf("wiping objects: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		h.signError(w, a.nonce, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.log.Warn("store wiped", "by", string(a.pubWire))

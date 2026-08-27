@@ -139,7 +139,7 @@ func (c *Client) signedRequest(ctx context.Context, method, pathQuery, contentTy
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := httpsig.SignRequest(req, c.signer, time.Now().UnixNano(), nonce, body); err != nil {
+	if err := httpsig.SignRequest(req, c.signer, c.serverPubWire, time.Now().UnixNano(), nonce, body); err != nil {
 		return nil, nil, err
 	}
 	if contentType != "" {
@@ -184,7 +184,7 @@ func (c *Client) doStreaming(ctx context.Context, method, pathQuery, contentType
 	if err != nil {
 		return 0, nil, err
 	}
-	if err := httpsig.SignRequestHash(req, c.signer, time.Now().UnixNano(), nonce, bodyHash); err != nil {
+	if err := httpsig.SignRequestHash(req, c.signer, c.serverPubWire, time.Now().UnixNano(), nonce, bodyHash); err != nil {
 		return 0, nil, err
 	}
 	if contentType != "" {

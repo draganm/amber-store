@@ -54,3 +54,15 @@ func TestEncodeXattrs_Empty(t *testing.T) {
 		t.Errorf("EncodeXattrs(empty) = %x, want a0", got)
 	}
 }
+
+func TestDecodeXattrs_RejectsOversizedCount(t *testing.T) {
+	for _, body := range [][]byte{
+		{0xba, 0xff, 0xff, 0xff, 0xff},
+		{0xbb, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00},
+		{0xb9, 0xff, 0xff, 0x40, 0x40},
+	} {
+		if _, err := DecodeXattrs(body); err == nil {
+			t.Fatalf("%x: expected error", body)
+		}
+	}
+}

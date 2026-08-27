@@ -337,3 +337,40 @@ func TestWhy(t *testing.T) {
 		t.Fatalf("Why after rm = %v, want none", names)
 	}
 }
+
+// Wipe must not reset the stores while a cycle is still marking.
+func TestWipeWaitsForRunningCycleBeforeReset(t *testing.T) {
+	ts := newTestStore(t, 4<<10)
+	c := ts.openCollector(t, Options{})
+	root, _ := storeTree(t, ts.objects, "a", 10)
+	putTestRef(t, c, ts.refs, "a", root)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.mu.Lock()
+	c.midMark = func() { close(entered); <-release }
+	c.mu.Unlock()
+	cycleDone := make(chan struct{})
+	go func() {
+		defer close(cycleDone)
+		c.Run(context.Background(), -1) //nolint:errcheck // cancelled by Wipe
+	}()
+	<-entered
+
+	resetCalled := make(chan struct{})
+	wipeDone := make(chan error, 1)
+	go func() {
+		wipeDone <- c.Wipe(func() error { close(resetCalled); return nil })
+	}()
+	select {
+	case <-resetCalled:
+		t.Fatal("reset ran before the cycle finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-wipeDone; err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+	<-resetCalled
+	<-cycleDone
+}

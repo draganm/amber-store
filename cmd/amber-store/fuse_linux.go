@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/draganm/amber-store/client"
-	"github.com/draganm/amber-store/socketpath"
 	"github.com/draganm/amber-store/key"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -85,7 +84,10 @@ func runFuse(c *cli.Context, cfg *fuseConfig) error {
 		return err
 	}
 
-	cl := client.New(socketpath.Resolve(cfg.socket))
+	cl, err := daemonClient(cfg.socket)
+	if err != nil {
+		return err
+	}
 	rootKey, subpath, err := resolveSpec(c.Context, cl, spec)
 	if err != nil {
 		return err

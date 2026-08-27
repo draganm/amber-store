@@ -65,17 +65,11 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	pub, nonce, err := httpsig.VerifyRequestHash(r, bodyHash, now, h.window)
+	pub, nonce, err := httpsig.VerifyRequestHash(r, h.identityWire, bodyHash, now, h.window)
 	if err != nil {
 		h.inbox.Discard(tmp)
 		h.log.Warn("request authentication failed", "error", err)
 		h.signError(w, nonce, http.StatusUnauthorized, err.Error())
-		return
-	}
-	if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
-		h.inbox.Discard(tmp)
-		h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
-		h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
 		return
 	}
 	ent, err := h.authorize(pub, r, now)
@@ -83,6 +77,13 @@ func (h *handler) postObjects(w http.ResponseWriter, r *http.Request) {
 		h.inbox.Discard(tmp)
 		h.log.Warn("key not authorized", "key", ssh.FingerprintSHA256(pub), "error", err)
 		h.signError(w, nonce, http.StatusForbidden, err.Error())
+		return
+	}
+	// After authorize so unlisted keys cannot grow the nonce cache.
+	if h.nonces.SeenBefore(ssh.FingerprintSHA256(pub), nonce, now) {
+		h.inbox.Discard(tmp)
+		h.log.Warn("replayed nonce", "key", ssh.FingerprintSHA256(pub))
+		h.signError(w, nonce, http.StatusUnauthorized, "replayed nonce")
 		return
 	}
 	if !ent.Allows(allowlist.CapPushObjects) {

@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -16,11 +17,16 @@ import (
 // signedRef builds a signed reference record pointing at k, signed by signer.
 func signedRef(t *testing.T, name string, k []byte, signer ssh.Signer) []byte {
 	t.Helper()
+	return signedRefAt(t, name, k, signer, time.Now().UnixNano())
+}
+
+func signedRefAt(t *testing.T, name string, k []byte, signer ssh.Signer, createdAt int64) []byte {
+	t.Helper()
 	rec := reference.Reference{
 		Name:      name,
 		Key:       k,
 		User:      "tester@example.com",
-		CreatedAt: time.Now().UnixNano(),
+		CreatedAt: createdAt,
 		PublicKey: signer.PublicKey().Marshal(),
 	}
 	payload, err := rec.SignaturePayload()
@@ -172,6 +178,45 @@ func TestRefOwnership(t *testing.T) {
 	// an admin transport key bypasses ownership
 	if code, _ := ts.signedDo(t, ts.admin, "PUT", "/v1/refs?name=owned", signedRef(t, "owned", target.Key[:], intruder)); code != 204 {
 		t.Fatal("admin override failed")
+	}
+}
+
+// Replaying an older signed record must not roll a name back. Re-pushing
+// the current record is a no-op and admins keep their override.
+func TestRefPutRejectsRollbackToOlderRecord(t *testing.T) {
+	ts := newTestServer(t)
+	blobs := storeBlobs(t, ts, "v1", "v2")
+	owner := testSigner(t)
+	const base = 1_700_000_000_000_000_000
+	v1 := signedRefAt(t, "rel", blobs[0].Key[:], owner, base)
+	v2 := signedRefAt(t, "rel", blobs[1].Key[:], owner, base+1)
+	sameTimeOther := signedRefAt(t, "rel", blobs[0].Key[:], owner, base+1)
+
+	put := func(signer ssh.Signer, rec []byte) int {
+		code, _ := ts.signedDo(t, signer, "PUT", "/v1/refs?name=rel", rec)
+		return code
+	}
+	if code := put(ts.client, v1); code != 204 {
+		t.Fatalf("v1 = %d", code)
+	}
+	if code := put(ts.client, v2); code != 204 {
+		t.Fatalf("v2 = %d", code)
+	}
+	if code := put(ts.client, v1); code != 409 {
+		t.Fatalf("replaying v1 over v2 = %d, want 409", code)
+	}
+	if code := put(ts.client, sameTimeOther); code != 409 {
+		t.Fatalf("different record with equal created_at = %d, want 409", code)
+	}
+	if code := put(ts.client, v2); code != 204 {
+		t.Fatalf("re-pushing the current record = %d, want 204", code)
+	}
+	_, got := ts.signedDo(t, ts.client, "GET", "/v1/refs?name=rel", nil)
+	if !bytes.Equal(got, v2) {
+		t.Fatal("stored record is not v2")
+	}
+	if code := put(ts.admin, v1); code != 204 {
+		t.Fatalf("admin rollback = %d, want 204", code)
 	}
 }
 

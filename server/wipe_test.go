@@ -17,12 +17,12 @@ func TestWipeClearsObjectsAndRefsAndKeepsServing(t *testing.T) {
 
 	root := storedBlob(t, h, "content")
 	rec := signedRecord(t, op, "thing:1", root)
-	if resp := signedDo(t, h.srv, op, nil, http.MethodPut, "/v1/refs?name=thing%3A1", rec); resp.StatusCode != http.StatusNoContent {
+	if resp := signedDo(t, h, op, nil, http.MethodPut, "/v1/refs?name=thing%3A1", rec); resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("put ref: got %d (%s)", resp.StatusCode, b)
 	}
 
-	resp := signedDo(t, h.srv, op, nil, http.MethodPost, "/v1/wipe", nil)
+	resp := signedDo(t, h, op, nil, http.MethodPost, "/v1/wipe", nil)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("wipe: got %d (%s), want 200", resp.StatusCode, b)
@@ -37,12 +37,12 @@ func TestWipeClearsObjectsAndRefsAndKeepsServing(t *testing.T) {
 	}
 
 	// The allowlist survives: the same key keeps serving, and writes work again.
-	if resp := signedDo(t, h.srv, op, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
+	if resp := signedDo(t, h, op, nil, http.MethodGet, "/v1/refs", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("list after wipe: got %d, want 200", resp.StatusCode)
 	}
 	root2 := storedBlob(t, h, "content-after")
 	rec2 := signedRecord(t, op, "thing:2", root2)
-	if resp := signedDo(t, h.srv, op, nil, http.MethodPut, "/v1/refs?name=thing%3A2", rec2); resp.StatusCode != http.StatusNoContent {
+	if resp := signedDo(t, h, op, nil, http.MethodPut, "/v1/refs?name=thing%3A2", rec2); resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("put ref after wipe: got %d (%s)", resp.StatusCode, b)
 	}
@@ -55,10 +55,10 @@ func TestWipeRequiresWipeCapability(t *testing.T) {
 		keyLine(legacy),
 		"read,push-objects,write-refs,delegate "+keyLine(powered),
 	)
-	if resp := signedDo(t, h.srv, legacy, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, legacy, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("legacy key wipe: got %d, want 403", resp.StatusCode)
 	}
-	if resp := signedDo(t, h.srv, powered, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, powered, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("delegate key wipe: got %d, want 403", resp.StatusCode)
 	}
 }
@@ -66,7 +66,7 @@ func TestWipeRequiresWipeCapability(t *testing.T) {
 func TestAdminImpliesWipe(t *testing.T) {
 	admin := capsSigner(t)
 	h := newCapsHarness(t, "admin "+keyLine(admin))
-	if resp := signedDo(t, h.srv, admin, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusOK {
+	if resp := signedDo(t, h, admin, nil, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("admin wipe: got %d (%s), want 200", resp.StatusCode, b)
 	}
@@ -86,7 +86,7 @@ func TestWipeUnreachableViaGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp := signedDo(t, h.srv, runner, g, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
+	if resp := signedDo(t, h, runner, g, http.MethodPost, "/v1/wipe", nil); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("granted runner wipe: got %d, want 403", resp.StatusCode)
 	}
 }

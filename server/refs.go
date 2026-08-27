@@ -30,7 +30,8 @@ func refName(r *http.Request) (string, error) {
 // putRef stores a reference record after the full validation chain:
 // canonical record matching the query name; a verifying signature (the
 // record MUST be signed — the signer key owns the name); ownership — an
-// existing name may only be overwritten by the same signer key, unless the
+// existing name may only be overwritten by the same signer key and by a
+// record with a later created_at (or the identical record), unless the
 // transport key is an admin; and the pointed-to content must be complete —
 // every object reachable from the key exists (push objects before the ref).
 func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedRequest) {
@@ -74,6 +75,12 @@ func (h *handler) putRef(w http.ResponseWriter, r *http.Request, a *authedReques
 		}
 		if !bytes.Equal(old.PublicKey, rec.PublicKey) && !a.entry.Admin {
 			h.signError(w, a.nonce, http.StatusForbidden, "reference is owned by a different signer key")
+			return
+		}
+		// Anyone who read an older signed record could re-PUT it, so
+		// created_at must advance. The identical record stays a no-op.
+		if rec.CreatedAt <= old.CreatedAt && !bytes.Equal(existing, a.body) && !a.entry.Admin {
+			h.signError(w, a.nonce, http.StatusConflict, "reference record is not newer than the stored one")
 			return
 		}
 	case errors.Is(err, refstore.ErrNotFound):

@@ -368,6 +368,42 @@ func TestGetTar_PathTarsSubdirectory(t *testing.T) {
 	}
 }
 
+// A mid-stream export failure must surface as a read error on the client,
+// not as a cleanly ended (truncated) archive.
+func TestGetTar_MidStreamFailureAbortsConnection(t *testing.T) {
+	store := openStore(t)
+	c := serveOnSocket(t, store)
+
+	content := mustBlob(t, "alpha")
+	missingInner, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("deep.txt"), Mode: 0o100644, Mtime: 1, ContentKey: content.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fstree.EncodeDirLeaf([]fstree.Entry{
+		{Name: []byte("a"), Mode: 0o100644, Mtime: 2, ContentKey: content.Key[:]},
+		{Name: []byte("mid"), Mode: 0o040755, Mtime: 3, ContentKey: missingInner.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// missingInner is deliberately not ingested.
+	if _, err := c.Ingest(context.Background(), packOf(t, content, root)); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	body, err := c.Tar(context.Background(), root.Key, "")
+	if err != nil {
+		t.Fatalf("Tar: %v", err)
+	}
+	defer body.Close()
+	_, err = io.Copy(io.Discard, body)
+	if err == nil {
+		t.Fatalf("truncated export read cleanly to EOF")
+	}
+}
+
 func TestGetTar_MissingRootIs404(t *testing.T) {
 	store := openStore(t)
 	srv := httptest.NewServer(newHandler(t, store, nil))

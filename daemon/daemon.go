@@ -216,10 +216,10 @@ func (h *handler) getTar(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
 	if err := tarexport.Write(w, k, h.store.Get); err != nil {
-		// The 200 status and some bytes may already be in flight; we cannot change
-		// the status now. Log and let the truncated archive surface as a tar read
-		// error on the client.
+		// The 200 is already out. A cleanly ended chunked body could read as
+		// a complete (truncated) archive, so abort the connection instead.
 		h.log.Error("tar export aborted", "key", k, "error", err)
+		panic(http.ErrAbortHandler)
 	}
 }
 

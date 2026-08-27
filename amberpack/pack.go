@@ -45,11 +45,6 @@ const tagEnd byte = 0x00
 // Callers distinguish it with errors.Is to map to a client error.
 var ErrMalformed = errors.New("amberpack: malformed pack stream")
 
-// maxWirePayload bounds a single record's stored payload so a hostile or corrupt
-// stream cannot trigger an unbounded allocation. It is far above any real CAS
-// object (the default chunker MaxSize is 1 MiB).
-const maxWirePayload = 256 << 20 // 256 MiB
-
 // Writer serializes fstree.Objects into the wire pack format. It is not safe for
 // concurrent use; a client wanting parallel uploads creates one Writer per pack.
 type Writer struct {
@@ -158,8 +153,8 @@ func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 					return
 				}
 				slen := binary.BigEndian.Uint32(hdr[38:42]) // stored-payload length field
-				if slen > maxWirePayload {
-					yield(fstree.Object{}, fmt.Errorf("%w: record payload %d exceeds limit %d", ErrMalformed, slen, maxWirePayload))
+				if slen > MaxPayload {
+					yield(fstree.Object{}, fmt.Errorf("%w: record payload %d exceeds limit %d", ErrMalformed, slen, MaxPayload))
 					return
 				}
 				full := make([]byte, RecHeaderSize+int(slen))

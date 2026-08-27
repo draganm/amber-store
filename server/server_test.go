@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/draganm/amber-store/fstree"
 	"github.com/draganm/amber-store/gc"
 	"github.com/draganm/amber-store/inbox"
 	"github.com/draganm/amber-store/packstore"
@@ -108,7 +109,7 @@ func (ts *testServer) signedDo(t *testing.T, signer ssh.Signer, method, pathQuer
 	if _, err := rand.Read(nonce); err != nil {
 		t.Fatal(err)
 	}
-	if err := httpsig.SignRequest(req, signer, time.Now().UnixNano(), nonce, body); err != nil {
+	if err := httpsig.SignRequest(req, signer, ts.identity.PublicKey().Marshal(), time.Now().UnixNano(), nonce, body); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -190,28 +191,8 @@ func TestAuthRejections(t *testing.T) {
 
 func TestReplayedNonceRejected(t *testing.T) {
 	ts := newTestServer(t)
-	req, err := http.NewRequest("POST", ts.srv.URL+"/v1/objects/missing", bytes.NewReader(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := httpsig.SignRequest(req, ts.client, time.Now().UnixNano(), []byte("fixed-nonce-0123"), nil); err != nil {
-		t.Fatal(err)
-	}
-	send := func() int {
-		r2 := req.Clone(req.Context())
-		r2.Body = io.NopCloser(bytes.NewReader(nil))
-		resp, err := http.DefaultClient.Do(r2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-	if code := send(); code != 200 {
-		t.Fatalf("first send = %d, want 200", code)
-	}
-	if code := send(); code != 401 {
-		t.Fatalf("replay = %d, want 401", code)
+	if a, b := ts.sendTwice(t, ts.client, "/v1/objects/missing", nil); a != 200 || b != 401 {
+		t.Fatalf("got %d then %d, want 200 then 401", a, b)
 	}
 }
 
@@ -235,7 +216,7 @@ func TestBodyOverCapRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := httpsig.SignRequest(req, ts.client, time.Now().UnixNano(), []byte("nonce-16-bytes!!"), body); err != nil {
+	if err := httpsig.SignRequest(req, ts.client, ts.identity.PublicKey().Marshal(), time.Now().UnixNano(), []byte("nonce-16-bytes!!"), body); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -254,5 +235,66 @@ func TestBodyOverCapRejected(t *testing.T) {
 	if err := httpsig.VerifyResponse(ts.identity.PublicKey().Marshal(), nil, resp.StatusCode,
 		httpsig.HashBody(respBody), resp.Header.Get(httpsig.HeaderSignature)); err != nil {
 		t.Fatalf("413 response signature: %v", err)
+	}
+}
+
+// sendTwice signs one request with a fixed nonce and sends it twice,
+// returning both status codes.
+func (ts *testServer) sendTwice(t *testing.T, signer ssh.Signer, pathQuery string, body []byte) (first, second int) {
+	t.Helper()
+	req, err := http.NewRequest("POST", ts.srv.URL+pathQuery, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := httpsig.SignRequest(req, signer, ts.identity.PublicKey().Marshal(), time.Now().UnixNano(), []byte("fixed-nonce-0123"), body); err != nil {
+		t.Fatal(err)
+	}
+	send := func() int {
+		r2 := req.Clone(req.Context())
+		r2.Body = io.NopCloser(bytes.NewReader(body))
+		resp, err := http.DefaultClient.Do(r2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	return send(), send()
+}
+
+// An unlisted key must not enter the replay cache. If it did, the repeat
+// would answer 401 instead of 403.
+func TestUnauthorizedKeyDoesNotEnterNonceCache(t *testing.T) {
+	ts := newTestServer(t)
+	stranger := testSigner(t)
+	if a, b := ts.sendTwice(t, stranger, "/v1/objects/missing", nil); a != 403 || b != 403 {
+		t.Fatalf("auth route: got %d then %d, want 403 twice", a, b)
+	}
+	o, err := fstree.EncodeBlob([]byte("stranger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := ts.sendTwice(t, stranger, "/v1/objects?root="+o.Key.String(), packOf(t, o)); a != 403 || b != 403 {
+		t.Fatalf("push route: got %d then %d, want 403 twice", a, b)
+	}
+}
+
+// A request signed for server A must be rejected by server B.
+func TestRequestSignedForAnotherServerIsRejected(t *testing.T) {
+	a, b := newTestServer(t), newTestServer(t)
+	req, err := http.NewRequest("POST", b.srv.URL+"/v1/objects/missing", bytes.NewReader(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := httpsig.SignRequest(req, b.client, a.identity.PublicKey().Marshal(), time.Now().UnixNano(), []byte("nonce-for-relay!"), nil); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }

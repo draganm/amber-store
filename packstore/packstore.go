@@ -106,6 +106,8 @@ type Store struct {
 
 	writesMu sync.Mutex
 	writes   map[*writeToken]time.Time // in-flight Put/WriteBatch/WriteParallel starts
+
+	fsyncs atomic.Int64 // active-segment fsyncs issued, for tests
 }
 
 // beginScrub registers a lock-free mmap walk. Call while holding mu.RLock
@@ -397,6 +399,7 @@ func (s *Store) syncActive() error {
 		s.setFailed(err)
 		return err
 	}
+	s.fsyncs.Add(1)
 	return nil
 }
 
@@ -426,6 +429,11 @@ func (s *Store) sealActiveLocked() error {
 	}
 	footer, err := buildFooter(a.size, entries)
 	if err != nil {
+		return err
+	}
+	// The footer is located from EOF, so drop anything a failed WriteAt
+	// left past a.size.
+	if err := a.f.Truncate(a.size); err != nil {
 		return err
 	}
 	if _, err := a.f.WriteAt(footer, a.size); err != nil {
