@@ -17,6 +17,8 @@ const (
 
 	tagChunk byte = 0x01
 	flagZstd byte = 0x01
+	// FlagZstd marks a record whose stored payload is a zstd frame.
+	FlagZstd = flagZstd
 
 	// MaxPayload bounds one object's payload, stored or decoded. The length
 	// fields are untrusted and size allocations. Real objects are ~1 MiB.
@@ -46,6 +48,9 @@ type Record struct {
 	Slen  uint32
 }
 
+// maxFrameWindow is ZSTD_WINDOWLOG_LIMIT_DEFAULT (27) as a size.
+const maxFrameWindow = 1 << 27
+
 // Shared zstd coders; EncodeAll/DecodeAll are safe for concurrent use.
 var (
 	zstdEnc *zstd.Encoder
@@ -57,8 +62,10 @@ func init() {
 	if zstdEnc, err = zstd.NewWriter(nil); err != nil {
 		panic(err)
 	}
-	// CapLimit stops DecodeAll at the dst capacity DecodePayload sizes from ulen.
-	if zstdDec, err = zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true), zstd.WithDecoderMaxMemory(MaxPayload)); err != nil {
+	// CapLimit stops DecodeAll at the dst capacity DecodePayload sizes from
+	// ulen. The window limit is libzstd's default: stored frames are served
+	// verbatim to nix, which would reject anything wider.
+	if zstdDec, err = zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true), zstd.WithDecoderMaxMemory(MaxPayload), zstd.WithDecoderMaxWindow(maxFrameWindow)); err != nil {
 		panic(err)
 	}
 }
@@ -98,6 +105,22 @@ func payloadFits(n int) bool {
 // and returns its header. It checks framing, flags, key canonicality, and the
 // CRC, without mutating b (b may be a read-only mmap).
 func ParseRecord(b []byte) (Record, error) {
+	rec, err := ParseRecordHeader(b)
+	if err != nil {
+		return Record{}, err
+	}
+	c := crc32.Update(0, castagnoli, b[:42])
+	c = crc32.Update(c, castagnoli, zero4[:])
+	c = crc32.Update(c, castagnoli, b[RecHeaderSize:RecHeaderSize+int(rec.Slen)])
+	if c != binary.BigEndian.Uint32(b[42:46]) {
+		return Record{}, fmt.Errorf("%w: record CRC mismatch", ErrCorrupt)
+	}
+	return rec, nil
+}
+
+// ParseRecordHeader is ParseRecord without the CRC pass, for consumers on
+// end-to-end-verified paths.
+func ParseRecordHeader(b []byte) (Record, error) {
 	if len(b) < RecHeaderSize {
 		return Record{}, fmt.Errorf("%w: truncated record header", ErrCorrupt)
 	}
@@ -122,12 +145,6 @@ func ParseRecord(b []byte) (Record, error) {
 	if flags&flagZstd != 0 && slen >= ulen {
 		return Record{}, fmt.Errorf("%w: compressed record with slen %d >= ulen %d", ErrCorrupt, slen, ulen)
 	}
-	c := crc32.Update(0, castagnoli, b[:42])
-	c = crc32.Update(c, castagnoli, zero4[:])
-	c = crc32.Update(c, castagnoli, b[RecHeaderSize:RecHeaderSize+int(slen)])
-	if c != binary.BigEndian.Uint32(b[42:46]) {
-		return Record{}, fmt.Errorf("%w: record CRC mismatch", ErrCorrupt)
-	}
 	k, err := key.Parse(b[1:33])
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: record key: %v", ErrCorrupt, err)
@@ -138,17 +155,30 @@ func ParseRecord(b []byte) (Record, error) {
 // DecodePayload returns caller-owned payload bytes from a record's stored
 // payload. stored may be a read-only mmap slice and is never retained.
 func DecodePayload(flags byte, ulen uint32, stored []byte) ([]byte, error) {
+	return AppendPayload(nil, flags, ulen, stored)
+}
+
+// AppendPayload is DecodePayload appending to dst, for callers reusing a
+// scratch buffer across records.
+func AppendPayload(dst []byte, flags byte, ulen uint32, stored []byte) ([]byte, error) {
 	if flags&flagZstd == 0 {
-		out := make([]byte, len(stored))
-		copy(out, stored)
-		return out, nil
+		return append(dst, stored...), nil
 	}
-	out, err := zstdDec.DecodeAll(stored, make([]byte, 0, ulen))
+	// The decoder is capped at dst's spare capacity (DecodeAllCapLimit), so
+	// give it exactly ulen: enough for a well-formed record, and the bound
+	// that stops a bomb at what the header admits to.
+	if cap(dst)-len(dst) < int(ulen) {
+		grown := make([]byte, len(dst), len(dst)+int(ulen))
+		copy(grown, dst)
+		dst = grown
+	}
+	dst = dst[: len(dst) : len(dst)+int(ulen)]
+	out, err := zstdDec.DecodeAll(stored, dst)
 	if err != nil {
 		return nil, fmt.Errorf("%w: zstd: %v", ErrCorrupt, err)
 	}
-	if uint32(len(out)) != ulen {
-		return nil, fmt.Errorf("%w: decompressed to %d bytes, header says %d", ErrCorrupt, len(out), ulen)
+	if uint32(len(out)-len(dst)) != ulen {
+		return nil, fmt.Errorf("%w: decompressed to %d bytes, header says %d", ErrCorrupt, len(out)-len(dst), ulen)
 	}
 	return out, nil
 }

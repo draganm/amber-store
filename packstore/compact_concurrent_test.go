@@ -79,19 +79,21 @@ func TestCompactDuringReads(t *testing.T) {
 					}
 					continue
 				}
-				rec, err := s.GetRecord(k)
-				if errors.Is(err, ErrNotFound) {
-					continue
+				batch := ks[i%len(ks):]
+				if len(batch) > 8 {
+					batch = batch[:8]
 				}
-				if err != nil {
+				var got int
+				err := s.ViewRecordSpans(batch, 64<<10, func(rec []byte) error {
+					for _, b := range rec { // touch every byte of the borrow
+						got += int(b)
+					}
+					return nil
+				})
+				if err != nil && !errors.Is(err, ErrNotFound) {
 					readErr <- err
 					return
 				}
-				var got int
-				for _, b := range rec { // touch every byte
-					got += int(b)
-				}
-				_ = got
 			}
 		})
 	}

@@ -29,8 +29,10 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"sync"
 
 	"github.com/draganm/amber-store/fstree"
+	"github.com/draganm/amber-store/key"
 )
 
 // packMagic identifies the wire pack format and its version (the trailing byte).
@@ -108,6 +110,12 @@ func (w *Writer) Close() error {
 	return w.bw.Flush()
 }
 
+// RawRecord is one record lifted out of a pack without payload decoding.
+type RawRecord struct {
+	Key   key.Key
+	Bytes []byte // the full record, reusable verbatim
+}
+
 // Reader decodes a wire pack stream.
 type Reader struct {
 	r io.Reader
@@ -118,66 +126,101 @@ func NewReader(r io.Reader) *Reader {
 	return &Reader{r: r}
 }
 
-// All iterates over the objects in the stream. It yields exactly one error (and
-// stops) on any structural problem; on a clean stream it yields every object and
-// returns after the end marker. All must be called at most once per Reader
-// because the underlying stream position is not reset between calls.
+var bufPool sync.Pool
+
+// GetBuf returns a length-n buffer, pooled when possible. Records
+// yields GetBuf buffers. Recycle them with PutBuf.
+func GetBuf(n int) []byte {
+	if b, ok := bufPool.Get().(*[]byte); ok && cap(*b) >= n {
+		return (*b)[:n]
+	}
+	return make([]byte, n)
+}
+
+// PutBuf returns a buffer to the pool once its contents are dead.
+func PutBuf(b []byte) {
+	bufPool.Put(&b)
+}
+
+// All yields the stream's objects, validating and decoding each record.
+// It yields exactly one error and stops on any structural problem. At
+// most one of All and Records, called once.
 func (r *Reader) All() iter.Seq2[fstree.Object, error] {
 	return func(yield func(fstree.Object, error) bool) {
+		for raw, err := range r.Records() {
+			if err != nil {
+				yield(fstree.Object{}, err)
+				return
+			}
+			rec, err := ParseRecord(raw.Bytes)
+			if err != nil {
+				yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
+				return
+			}
+			payload, err := DecodePayload(rec.Flags, rec.Ulen, raw.Bytes[RecHeaderSize:])
+			if err != nil {
+				yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
+				return
+			}
+			if !yield(fstree.Object{Key: rec.Key, Bytes: payload}, nil) {
+				return
+			}
+		}
+	}
+}
+
+// Records iterates over the stream's records without decoding payloads
+// (framing and header checks only). The consumer must verify each record
+// before trusting it. At most one of All and Records, called once.
+func (r *Reader) Records() iter.Seq2[RawRecord, error] {
+	return func(yield func(RawRecord, error) bool) {
 		br := bufio.NewReader(r.r)
 		var magic [len(packMagic)]byte
 		if _, err := io.ReadFull(br, magic[:]); err != nil {
-			yield(fstree.Object{}, fmt.Errorf("%w: reading magic: %v", ErrMalformed, err))
+			yield(RawRecord{}, fmt.Errorf("%w: reading magic: %v", ErrMalformed, err))
 			return
 		}
 		if string(magic[:]) != packMagic {
-			yield(fstree.Object{}, fmt.Errorf("%w: bad magic", ErrMalformed))
+			yield(RawRecord{}, fmt.Errorf("%w: bad magic", ErrMalformed))
 			return
 		}
 		for {
 			tag, err := br.ReadByte()
 			if err != nil {
-				yield(fstree.Object{}, fmt.Errorf("%w: truncated before end marker: %v", ErrMalformed, err))
+				yield(RawRecord{}, fmt.Errorf("%w: truncated before end marker: %v", ErrMalformed, err))
 				return
 			}
 			switch tag {
 			case tagEnd:
 				return
 			case tagChunk:
-				// Reassemble the full record — tag + remaining 45 header bytes +
-				// slen payload bytes — then validate it with ParseRecord.
 				var hdr [RecHeaderSize]byte
 				hdr[0] = tag
 				if _, err := io.ReadFull(br, hdr[1:]); err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: truncated record header: %v", ErrMalformed, err))
+					yield(RawRecord{}, fmt.Errorf("%w: truncated record header: %v", ErrMalformed, err))
 					return
 				}
-				slen := binary.BigEndian.Uint32(hdr[38:42]) // stored-payload length field
+				slen := binary.BigEndian.Uint32(hdr[38:42])
 				if slen > MaxPayload {
-					yield(fstree.Object{}, fmt.Errorf("%w: record payload %d exceeds limit %d", ErrMalformed, slen, MaxPayload))
+					yield(RawRecord{}, fmt.Errorf("%w: record payload %d exceeds limit %d", ErrMalformed, slen, MaxPayload))
 					return
 				}
-				full := make([]byte, RecHeaderSize+int(slen))
+				full := GetBuf(RecHeaderSize + int(slen))
 				copy(full, hdr[:])
 				if _, err := io.ReadFull(br, full[RecHeaderSize:]); err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: truncated record payload: %v", ErrMalformed, err))
+					yield(RawRecord{}, fmt.Errorf("%w: truncated record payload: %v", ErrMalformed, err))
 					return
 				}
-				rec, err := ParseRecord(full)
+				rec, err := ParseRecordHeader(full)
 				if err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
+					yield(RawRecord{}, fmt.Errorf("%w: %v", ErrMalformed, err))
 					return
 				}
-				payload, err := DecodePayload(rec.Flags, rec.Ulen, full[RecHeaderSize:])
-				if err != nil {
-					yield(fstree.Object{}, fmt.Errorf("%w: %v", ErrMalformed, err))
-					return
-				}
-				if !yield(fstree.Object{Key: rec.Key, Bytes: payload}, nil) {
+				if !yield(RawRecord{Key: rec.Key, Bytes: full}, nil) {
 					return
 				}
 			default:
-				yield(fstree.Object{}, fmt.Errorf("%w: bad record tag %#x", ErrMalformed, tag))
+				yield(RawRecord{}, fmt.Errorf("%w: bad record tag %#x", ErrMalformed, tag))
 				return
 			}
 		}

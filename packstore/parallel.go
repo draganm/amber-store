@@ -31,18 +31,33 @@ type WriteOpts struct {
 	Verify    bool // recompute and check each new object's key before storing it
 }
 
-// WriteParallel stores every object the iterator yields using multiple
-// concurrent workers. Compression and (optional) verification run in
-// parallel; appends serialize on the active segment. Each worker fsyncs after
-// appending BatchSize bytes, and the run fsyncs once more before returning.
-//
-// Like WriteBatch, WriteParallel is durable-on-return but NOT atomic: on
-// error or crash a valid prefix remains, which a content-addressed re-run
-// deduplicates. The final fsync also covers dedup hits against records a
-// concurrent, uncommitted run appended. If the iterator yields
-// an error, WriteParallel stops and returns it. With opts.Verify, a
-// key/payload mismatch stops the run with a wrapped ErrVerify.
+// WriteParallel stores every yielded object with concurrent workers.
+// Compression and optional verification run in parallel, appends
+// serialize. Durable on return but NOT atomic, like WriteBatch: a crash
+// leaves a valid, deduplicating prefix. With opts.Verify a key/payload
+// mismatch stops the run with a wrapped ErrVerify.
 func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (WriteStats, error) {
+	return writePipeline(s, seq, opts, keyOfObject, nil, func(obj Object, _ *[]byte) (recLen, dataLen int, err error) {
+		if opts.Verify {
+			if err := verifyObject(obj); err != nil {
+				return 0, 0, err
+			}
+		}
+		rec, err := amberpack.EncodeRecord(obj.Key, obj.Data)
+		if err != nil {
+			return 0, 0, err
+		}
+		return len(rec), len(obj.Data), s.append(obj.Key, rec, false)
+	})
+}
+
+func keyOfObject(o Object) key.Key { return o.Key }
+
+// writePipeline is the shared scaffold of WriteParallel and WriteRecords:
+// a distributor feeding workers that dedup, ingest, and fsync every
+// batchSize bytes plus once at the end. recycle, when non-nil, runs once
+// per consumed item.
+func writePipeline[T any](s *Store, seq iter.Seq2[T, error], opts WriteOpts, keyOf func(T) key.Key, recycle func(T), ingest func(T, *[]byte) (recLen, dataLen int, err error)) (WriteStats, error) {
 	w := s.beginWrite()
 	defer s.endWrite(w)
 	writers := opts.Writers
@@ -57,22 +72,22 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch := make(chan Object, writers*2)
+	ch := make(chan T, writers*2)
 	seen := newSeenSet()
 	eg := &errgroup.Group{}
 	var stored, deduped, bytesStored atomic.Int64
 
-	// Distributor: forward objects from the iterator to the worker pool. A
+	// Distributor: forward items from the iterator to the worker pool. A
 	// yielded error cancels the run and propagates as the group's error.
 	eg.Go(func() error {
 		defer close(ch)
-		for obj, err := range seq {
+		for item, err := range seq {
 			if err != nil {
 				cancel()
 				return err
 			}
 			select {
-			case ch <- obj:
+			case ch <- item:
 			case <-ctx.Done():
 				return nil
 			}
@@ -82,7 +97,7 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 
 	for range writers {
 		eg.Go(func() error {
-			err := s.runWriter(ctx, ch, seen, batchSize, opts.Verify, &stored, &deduped, &bytesStored)
+			err := runIngest(s, ctx, ch, seen, batchSize, keyOf, recycle, ingest, &stored, &deduped, &bytesStored)
 			if err != nil {
 				cancel() // stop the distributor and sibling workers
 			}
@@ -104,48 +119,41 @@ func (s *Store) WriteParallel(seq iter.Seq2[Object, error], opts WriteOpts) (Wri
 	}, err
 }
 
-// runWriter consumes objects, encoding (compressing, optionally verifying)
-// them concurrently with its siblings and appending them to the store. It
-// fsyncs after every batchSize appended bytes. The final fsync is
-// WriteParallel's.
-func (s *Store) runWriter(ctx context.Context, ch <-chan Object, seen *seenSet, batchSize int, verify bool, stored, deduped, bytesStored *atomic.Int64) error {
+func runIngest[T any](s *Store, ctx context.Context, ch <-chan T, seen *seenSet, batchSize int, keyOf func(T) key.Key, recycle func(T), ingest func(T, *[]byte) (recLen, dataLen int, err error), stored, deduped, bytesStored *atomic.Int64) error {
+	var scratch []byte
 	pending := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case obj, ok := <-ch:
+		case item, ok := <-ch:
 			if !ok {
 				return nil
 			}
-			s.observe(obj.Key)
-			if !seen.addIfAbsent(obj.Key) {
+			k := keyOf(item)
+			s.observe(k)
+			if !seen.addIfAbsent(k) {
 				deduped.Add(1)
+				free(recycle, item)
 				continue
 			}
-			has, err := s.Has(obj.Key)
+			has, err := s.Has(k)
 			if err != nil {
 				return err
 			}
 			if has {
 				deduped.Add(1)
+				free(recycle, item)
 				continue
 			}
-			if verify {
-				if err := verifyObject(obj); err != nil {
-					return err
-				}
-			}
-			rec, err := amberpack.EncodeRecord(obj.Key, obj.Data)
+			recLen, dataLen, err := ingest(item, &scratch)
+			free(recycle, item)
 			if err != nil {
 				return err
 			}
-			if err := s.append(obj.Key, rec, false); err != nil {
-				return err
-			}
 			stored.Add(1)
-			bytesStored.Add(int64(len(obj.Data)))
-			pending += len(rec)
+			bytesStored.Add(int64(dataLen))
+			pending += recLen
 			if pending >= batchSize {
 				pending = 0
 				if err := s.syncActive(); err != nil {
@@ -185,4 +193,10 @@ func (s *seenSet) addIfAbsent(k key.Key) bool {
 	}
 	sh.m[k] = struct{}{}
 	return true
+}
+
+func free[T any](recycle func(T), item T) {
+	if recycle != nil {
+		recycle(item)
+	}
 }

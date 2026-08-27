@@ -46,4 +46,6 @@ op-k8s-status-cli
 output/
 ./rootcause
 
-!.claude/settings.local.json
+!.claude/settings.local.jsonresult
+result
+/nix-cached

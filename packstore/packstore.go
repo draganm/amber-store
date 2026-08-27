@@ -603,10 +603,18 @@ func (s *Store) GetRecord(k key.Key) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
-// StoredSize returns the stored (post-compression) payload length of the object
-// under k and whether k was found, reading only the index — no payload read.
-// It sizes objects for byte-balanced push batching against the bytes that
-// actually travel.
+// ViewRecord calls fn with a copy of k's record, outside the store lock:
+// fn typically writes to a network peer and may stall.
+func (s *Store) ViewRecord(k key.Key, fn func([]byte) error) error {
+	rec, err := s.GetRecord(k)
+	if err != nil {
+		return err
+	}
+	return fn(rec)
+}
+
+// StoredSize returns the stored payload length under k from the index
+// alone, sizing byte-balanced push batches by bytes that travel.
 func (s *Store) StoredSize(k key.Key) (uint64, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -684,6 +692,22 @@ func (s *Store) SortByLocation(keys []key.Key) {
 }
 
 // Has reports whether an object is stored under k.
+// SizeBytes reports the summed size of all segment files.
+func (s *Store) SizeBytes() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total uint64
+	for _, g := range s.sealed {
+		total += uint64(len(g.mm))
+	}
+	if s.active != nil {
+		if fi, err := s.active.f.Stat(); err == nil {
+			total += uint64(fi.Size())
+		}
+	}
+	return total
+}
+
 func (s *Store) Has(k key.Key) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
